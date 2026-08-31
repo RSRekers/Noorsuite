@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "NoorSuite"
+version = "0.4.0"
+description = "NOORSUITE - organize and re-plot datasets from a research project, driven from Jupyter and a Qt GUI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6",
+    "matplotlib",
+    "numpy",
+    "pandas",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+noorsuite = "NoorSuite.__main__:main"
+scisuite = "NoorSuite.__main__:main"
+
+[tool.setuptools]
+packages = ["NoorSuite"]
+
+[tool.setuptools.package-data]
+NoorSuite = ["NOORSUITE_ICON.jpg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
