@@ -2,7 +2,7 @@
 # Noorsuite
 a scientific plotting suite for data management
 
-<img width="700" height="700" alt="NOORSUITE_ICON_old" src="https://github.com/user-attachments/assets/7b46cb80-27a4-401c-a0bf-1b489b085eac" />
+<img width="400" height="400" alt="NOORSUITE_ICON_old" src="https://github.com/user-attachments/assets/7b46cb80-27a4-401c-a0bf-1b489b085eac" />
 Did you know? A Noor is a lake-like bay with a small entry into the sea.
 They are called that by people in Northern Germany and Denmark.
 That's why there is a viking ship.
