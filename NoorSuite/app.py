@@ -12,35 +12,41 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 from matplotlib import rcParams
-from PyQt6.QtCore import QByteArray, QMimeData, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QDrag, QIcon, QImage
+from PyQt6.QtCore import QByteArray, QMimeData, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QDrag, QIcon, QImage, QKeySequence
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
                              QHBoxLayout, QInputDialog, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                             QMessageBox, QPushButton, QSpinBox, QSplitter,
-                             QStyle, QTableWidget, QTableWidgetItem, QTabWidget,
-                             QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem,
-                             QVBoxLayout, QWidget)
+                             QMessageBox, QPushButton, QComboBox, QSpinBox,
+                             QSplitter, QStackedWidget, QStyle, QTableWidget,
+                             QTableWidgetItem, QTabWidget, QToolBar, QTreeWidget,
+                             QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .colormap import available_specs, load_file, resolve_spec, sample, save_file
 from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
-                      ColormapPanel, FigureDialog, LegendDialog, TextDialog,
-                      TraceStyleDialog, TraceStyleWidget)
+                      ColormapPanel, FigureDialog, ImageDialog, LegendDialog,
+                      TextDialog, TraceStyleDialog, TraceStyleWidget)
 from .fuzzy import fuzzy_match
-from .ipc import (ACTION_ADD_TO_SHEET, ACTION_APPEND_DATAFRAME,
+from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
+                  ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_REMOVE_DATA,
                   ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
-from .model import (INDEX_COL, ColorMap, DataObject, ProjectModel, SheetModel,
-                    TraceRef, _new_id)
+from .model import (INDEX_COL, ColorMap, DataObject, ImageObject, ImageRef,
+                    ProjectModel, SheetModel, TraceRef, _new_id)
 from .sheet import PlotSheet
+from .widgets import CollapsibleSection
 
 APP_NAME = "NOORSUITE"
 APP_ID = "NOORSUITE.SciSuite"          # Windows AppUserModelID (taskbar grouping)
 _ICON_NAME = "NOORSUITE_ICON.jpg"
+_AUTOSAVE_SECONDS = 120               # periodic re-save once a project file is set
+_UNTITLED = "Untitled project"
 
 ITEM_TYPE_ROLE = Qt.ItemDataRole.UserRole + 1
 ITEM_ID_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -66,33 +72,6 @@ def app_icon() -> QIcon:
 def _cycle_color(n: int) -> str:
     colors = rcParams["axes.prop_cycle"].by_key().get("color", ["#1f77b4"])
     return colors[n % len(colors)]
-
-
-class CollapsibleSection(QWidget):
-    """A titled section whose body collapses / expands when the header is clicked."""
-
-    def __init__(self, title: str, body: QWidget, expanded: bool = True, parent=None):
-        super().__init__(parent)
-        self._body = body
-        self.toggle = QToolButton()
-        self.toggle.setText(title)
-        self.toggle.setCheckable(True)
-        self.toggle.setChecked(expanded)
-        self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-        self.toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
-        self.toggle.toggled.connect(self._on_toggled)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
-        lay.addWidget(self.toggle)
-        lay.addWidget(body)
-        body.setVisible(expanded)
-
-    def _on_toggled(self, checked: bool):
-        self._body.setVisible(checked)
-        self.toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
 
 
 # =====================================================================
@@ -238,6 +217,78 @@ class ReorderList(QListWidget):
         self.reordered.emit()
 
 
+class ImageAxesPanel(QWidget):
+    """Middle-left page for an ImageObject: pick the two display axes, then add to a sheet."""
+
+    addRequested = pyqtSignal(dict, str)   # ({image_id, display_axes}, "active"|"new")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._image_id = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.addWidget(QLabel("Image  (pick the two axes to display)"))
+        self.info = QLabel("-")
+        self.info.setWordWrap(True)
+        lay.addWidget(self.info)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Row axis:"))
+        self.row_combo = QComboBox()
+        row.addWidget(self.row_combo, 1)
+        lay.addLayout(row)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Col axis:"))
+        self.col_combo = QComboBox()
+        row2.addWidget(self.col_combo, 1)
+        lay.addLayout(row2)
+        self.row_combo.currentIndexChanged.connect(self._validate)
+        self.col_combo.currentIndexChanged.connect(self._validate)
+        btns = QHBoxLayout()
+        self.add_active_btn = QPushButton("Add to active subplot")
+        self.add_active_btn.clicked.connect(lambda: self._emit("active"))
+        self.add_new_btn = QPushButton("Add to new sheet")
+        self.add_new_btn.clicked.connect(lambda: self._emit("new"))
+        btns.addWidget(self.add_active_btn)
+        btns.addWidget(self.add_new_btn)
+        lay.addLayout(btns)
+        lay.addStretch(1)
+
+    def set_image(self, obj):
+        self._image_id = obj.id if obj else None
+        self.row_combo.blockSignals(True)
+        self.col_combo.blockSignals(True)
+        self.row_combo.clear()
+        self.col_combo.clear()
+        if obj is not None:
+            self.info.setText(f"{obj.name}\n{obj.head_meta()}")
+            for i, nm in enumerate(obj.axis_names):
+                self.row_combo.addItem(f"{nm} ({obj.shape[i]})", i)
+                self.col_combo.addItem(f"{nm} ({obj.shape[i]})", i)
+            r = max(0, obj.ndim - 2)
+            c = max(0, obj.ndim - 1)
+            self.row_combo.setCurrentIndex(r)
+            self.col_combo.setCurrentIndex(c)
+        self.row_combo.blockSignals(False)
+        self.col_combo.blockSignals(False)
+        self._validate()
+
+    def _validate(self, *_):
+        ok = (self._image_id is not None
+              and self.row_combo.currentData() is not None
+              and self.row_combo.currentData() != self.col_combo.currentData())
+        self.add_active_btn.setEnabled(ok)
+        self.add_new_btn.setEnabled(ok)
+
+    def _emit(self, target):
+        if self._image_id is None:
+            return
+        r, c = self.row_combo.currentData(), self.col_combo.currentData()
+        if r is None or r == c:
+            return
+        self.addRequested.emit({"image_id": self._image_id,
+                                "display_axes": [int(r), int(c)]}, target)
+
+
 # =====================================================================
 # Main window
 # =====================================================================
@@ -252,11 +303,16 @@ class SciSuiteWindow(QMainWindow):
         self._folder_icon = st.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         self._sheet_icon = st.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         self._data_icon = st.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
+        self._image_icon = st.standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
 
         self.repository: dict[str, DataObject] = {}
+        self.images: dict[str, ImageObject] = {}
         self.sheets: dict[str, SheetModel] = {}
         self.open_tabs: dict[str, PlotSheet] = {}
         self.colormaps: list[ColorMap] = []      # project-wide colormap library
+        self._ipc_data_full: dict = {}           # full column data for client get_data()
+        self._ipc_image_full: dict = {}          # full image arrays for client get_image()
+        self.project_path: str | None = None     # set by Save As / Open
         self.port = port
         self.session_file = os.path.expanduser("~/.scisuite_session.json")
 
@@ -269,6 +325,22 @@ class SciSuiteWindow(QMainWindow):
         if not self.sheets:
             self.create_new_sheet("Sheet 1")
         self._refresh_ipc_snapshot()
+        self._update_title()
+
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(_AUTOSAVE_SECONDS * 1000)
+        self._autosave_timer.timeout.connect(self._autosave_project)
+        self._autosave_timer.start()
+
+    # --------------------------------------------------------- project identity
+    def _project_name(self) -> str:
+        return Path(self.project_path).stem if self.project_path else _UNTITLED
+
+    def _update_title(self):
+        name = self._project_name()
+        self.setWindowTitle(f"{APP_NAME} - {name}")
+        if hasattr(self, "project_label"):
+            self.project_label.setText(f"  Project: {name}  ")
 
     # ----------------------------------------------------------------------- UI
     def _init_ui(self):
@@ -304,7 +376,9 @@ class SciSuiteWindow(QMainWindow):
         pl.addWidget(self.data_list)
         vsplit.addWidget(pool)
 
-        # --- 2. column picker ---
+        # --- 2. middle panel: column picker (data objects) / axis picker (images) ---
+        self.middle_stack = QStackedWidget()
+
         picker = QWidget()
         gl = QVBoxLayout(picker)
         gl.setContentsMargins(6, 2, 6, 2)
@@ -324,7 +398,13 @@ class SciSuiteWindow(QMainWindow):
         btn_row.addWidget(self.add_active_btn)
         btn_row.addWidget(self.add_new_btn)
         gl.addLayout(btn_row)
-        vsplit.addWidget(picker)
+        self.middle_stack.addWidget(picker)                # page 0
+
+        self.image_panel = ImageAxesPanel()
+        self.image_panel.addRequested.connect(self._add_image_from_panel)
+        self.middle_stack.addWidget(self.image_panel)      # page 1
+
+        vsplit.addWidget(self.middle_stack)
 
         # --- 3. project tree ---
         proj = QWidget()
@@ -432,12 +512,25 @@ class SciSuiteWindow(QMainWindow):
     def _init_actions(self):
         toolbar = QToolBar("Main Actions")
         self.addToolBar(toolbar)
+
+        self.project_label = QLabel()
+        self.project_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        toolbar.addWidget(self.project_label)
+        toolbar.addSeparator()
+
+        save_act = QAction("Save", self)
+        save_act.setShortcut(QKeySequence.StandardKey.Save)   # Ctrl+S / Strg+S
+        save_act.setToolTip("Save to the current project file (Ctrl+S)")
+        save_act.triggered.connect(self._quick_save)
+        self.addAction(save_act)                              # window-level shortcut
+        toolbar.addAction(save_act)
+
         for text, slot in (
+            ("Save As...", self.save_project_file),
+            ("Open Project", self.load_project_file),
+            (None, None),
             ("New Folder", lambda: self._add_folder_item("New Folder", self._selected_folder())),
             ("New Sheet", lambda: self.create_new_sheet()),
-            (None, None),
-            ("Save Project", self.save_project_file),
-            ("Open Project", self.load_project_file),
             (None, None),
             ("Copy Plot", self.copy_plot_to_clipboard),
             ("Export SVG", self.export_svg),
@@ -448,6 +541,8 @@ class SciSuiteWindow(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(slot)
             toolbar.addAction(action)
+
+        self.statusBar().showMessage("Ready")
 
     # -------------------------------------------------------------- data pool
     def _refresh_data_list(self):
@@ -462,6 +557,12 @@ class SciSuiteWindow(QMainWindow):
             if obj.tags:
                 item.setToolTip(", ".join(obj.tags))
             self.data_list.addItem(item)
+        for obj in self.images.values():
+            item = QListWidgetItem(self._image_icon,
+                                   f"{obj.name}  [{'x'.join(str(s) for s in obj.shape)}]")
+            item.setData(Qt.ItemDataRole.UserRole, obj.id)
+            item.setToolTip(obj.head_meta())
+            self.data_list.addItem(item)
         self.data_list.blockSignals(False)
         if keep:
             for i in range(self.data_list.count()):
@@ -473,7 +574,16 @@ class SciSuiteWindow(QMainWindow):
         self._on_data_selected(self.data_list.currentItem(), None)
 
     def _on_data_selected(self, current, _previous):
-        obj = self.repository.get(current.data(Qt.ItemDataRole.UserRole)) if current else None
+        key = current.data(Qt.ItemDataRole.UserRole) if current else None
+        img = self.images.get(key)
+        if img is not None:
+            self.middle_stack.setCurrentIndex(1)
+            self.image_panel.set_image(img)
+            self.col_tree.set_object(None)
+            self._fill_preview(None)
+            return
+        self.middle_stack.setCurrentIndex(0)
+        obj = self.repository.get(key)
         self.col_tree.set_object(obj)
         self._fill_preview(obj)
         self._update_add_buttons()
@@ -501,7 +611,15 @@ class SciSuiteWindow(QMainWindow):
         item = self.data_list.itemAt(pos)
         if item is None:
             return
-        obj = self.repository.get(item.data(Qt.ItemDataRole.UserRole))
+        key = item.data(Qt.ItemDataRole.UserRole)
+        img = self.images.get(key)
+        if img is not None:
+            menu = QMenu()
+            del_act = menu.addAction("Delete image")
+            if menu.exec(self.data_list.viewport().mapToGlobal(pos)) == del_act:
+                self._remove_image(img.id)
+            return
+        obj = self.repository.get(key)
         if obj is None:
             return
         menu = QMenu()
@@ -637,11 +755,17 @@ class SciSuiteWindow(QMainWindow):
         ps = PlotSheet(sm)
         ps.active_subplot_changed.connect(self.on_subplot_selection_changed)
         ps.element_double_clicked.connect(self.open_element_editor)
+        ps.notes_changed.connect(self._on_notes_edited)
+        ps.image_changed.connect(self._refresh_ipc_snapshot)
         self.open_tabs[sheet_id] = ps
         idx = self.tab_widget.addTab(ps, self._sheet_icon, sm.name)
         self.tab_widget.setCurrentIndex(idx)
-        ps.render(self.repository)
+        ps.render(self.repository, self.images)
         return ps
+
+    def _on_notes_edited(self):
+        self.statusBar().showMessage(
+            "Notes updated (saved with the project / Ctrl+S / autosave)", 2000)
 
     def close_tab(self, index):
         widget = self.tab_widget.widget(index)
@@ -767,7 +891,9 @@ class SciSuiteWindow(QMainWindow):
             for i, ref in enumerate(sub.traces):
                 obj = self.repository.get(ref.data_id)
                 oname = obj.name if obj else "(missing)"
-                item = QListWidgetItem(f"{oname}: {ref.display_label}")
+                x_disp = ref.x_col if ref.x_col and ref.x_col != INDEX_COL else "row index"
+                item = QListWidgetItem(f"{oname}:  {ref.display_label}  vs  {x_disp}")
+                item.setToolTip(f"y = {ref.y_col}   x = {x_disp}   ({oname})")
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(Qt.CheckState.Checked if ref.enabled
                                    else Qt.CheckState.Unchecked)
@@ -984,6 +1110,10 @@ class SciSuiteWindow(QMainWindow):
         elif kind == "axes":
             AxesDialog(cs.model.subplots[hit["subplot_index"]],
                        self._after_element_edit, self).exec()
+        elif kind == "image":
+            sub = cs.model.subplots[hit["subplot_index"]]
+            if sub.image is not None:
+                ImageDialog(sub, self._after_element_edit, self).exec()
         elif kind == "figure":
             FigureDialog(cs.model, self._after_element_edit, self).exec()
 
@@ -991,16 +1121,16 @@ class SciSuiteWindow(QMainWindow):
     def render_current_sheet(self):
         cs = self.current_sheet()
         if cs:
-            cs.render(self.repository)
+            cs.render(self.repository, self.images)
 
     def _render_sheet(self, sheet_id):
         ps = self.open_tabs.get(sheet_id)
         if ps is not None:
-            ps.render(self.repository)
+            ps.render(self.repository, self.images)
 
     def _refresh_open_sheets(self):
         for ps in self.open_tabs.values():
-            ps.render(self.repository)
+            ps.render(self.repository, self.images)
 
     # ---------------------------------------------------------- save / load / io
     def _serialize_tree(self) -> list:
@@ -1037,6 +1167,7 @@ class SciSuiteWindow(QMainWindow):
     def _project_model(self) -> ProjectModel:
         pm = ProjectModel()
         pm.data_objects = list(self.repository.values())
+        pm.images = list(self.images.values())
         pm.sheets = list(self.sheets.values())
         pm.tree = self._serialize_tree()
         pm.colormaps = list(self.colormaps)
@@ -1046,6 +1177,7 @@ class SciSuiteWindow(QMainWindow):
 
     def _load_project_model(self, pm: ProjectModel):
         self.repository.clear()
+        self.images.clear()
         self.sheets.clear()
         self.open_tabs.clear()
         self.colormaps = list(pm.colormaps)
@@ -1057,6 +1189,8 @@ class SciSuiteWindow(QMainWindow):
 
         for obj in pm.data_objects:
             self.repository[obj.id] = obj
+        for img in pm.images:
+            self.images[img.id] = img
         for sm in pm.sheets:
             self.sheets[sm.sheet_id] = sm
         self._build_tree_from_nodes(pm.tree)
@@ -1074,32 +1208,67 @@ class SciSuiteWindow(QMainWindow):
         self._sync_subplot_strip()
         self.colormap_panel.refresh()
         self._refresh_open_sheets()
+        self._refresh_ipc_data()
         self._refresh_ipc_snapshot()
+
+    def _write_project(self, path: str) -> bool:
+        try:
+            self._project_model().save(path)
+            return True
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return False
+
+    def _quick_save(self):
+        """Ctrl+S: save to the current project file, or fall back to Save As."""
+        if not self.project_path:
+            self.save_project_file()
+            return
+        if self._write_project(self.project_path):
+            self.statusBar().showMessage(
+                f"Saved {self._project_name()}  -  {time.strftime('%H:%M:%S')}", 4000)
+
+    def _autosave_project(self):
+        if not self.project_path:
+            return
+        try:
+            self._project_model().save(self.project_path)
+            self.statusBar().showMessage(
+                f"Autosaved  -  {time.strftime('%H:%M:%S')}", 3000)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Autosave failed: {exc}", 6000)
 
     def save_project_file(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save SciSuite Project", "", "SciSuite Project (*.sciproj)")
-        if path:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(self._project_model().to_json())
+            self, "Save Project As", self.project_path or "",
+            "NOORSUITE Project (*.sciproj)")
+        if not path:
+            return
+        if not path.lower().endswith(".sciproj"):
+            path += ".sciproj"
+        if self._write_project(path):
+            self.project_path = path
+            self._update_title()
+            self.statusBar().showMessage(f"Saved {self._project_name()}", 4000)
 
     def load_project_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open SciSuite Project", "", "SciSuite Project (*.sciproj)")
+            self, "Open Project", "", "NOORSUITE Project (*.sciproj)")
         if not path:
             return
         try:
-            with open(path, encoding="utf-8") as fh:
-                pm = ProjectModel.from_json(fh.read())
-        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            pm = ProjectModel.load(path)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             QMessageBox.critical(self, "Cannot open project", str(exc))
             return
         self._load_project_model(pm)
+        self.project_path = path
+        self._update_title()
+        self.statusBar().showMessage(f"Opened {self._project_name()}", 4000)
 
     def save_session(self):
         try:
-            with open(self.session_file, "w", encoding="utf-8") as fh:
-                fh.write(self._project_model().to_json(indent=None))
+            self._project_model().save(self.session_file)
         except OSError:
             pass
 
@@ -1107,8 +1276,7 @@ class SciSuiteWindow(QMainWindow):
         if not os.path.exists(self.session_file):
             return
         try:
-            with open(self.session_file, encoding="utf-8") as fh:
-                pm = ProjectModel.from_json(fh.read())
+            pm = ProjectModel.load(self.session_file)
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             return
         self._load_project_model(pm)
@@ -1136,13 +1304,16 @@ class SciSuiteWindow(QMainWindow):
             QMessageBox.information(self, "Export Successful", f"Saved: {path}")
 
     def closeEvent(self, event):
+        self._autosave_timer.stop()
         self.save_session()
+        if self.project_path:
+            self._autosave_project()
         self.ipc.stop()
         event.accept()
 
     # ---------------------------------------------------------------- IPC intake
     def _sheet_haystack(self, sm: SheetModel) -> str:
-        parts = [sm.name, " ".join(sm.tags)]
+        parts = [sm.name, " ".join(sm.tags), sm.notes]
         seen = set()
         for sub in sm.subplots:
             parts += [sub.title, sub.x_label, sub.y_label]
@@ -1152,6 +1323,10 @@ class SciSuiteWindow(QMainWindow):
                 if obj and obj.id not in seen:
                     seen.add(obj.id)
                     parts.append(obj.name)
+            if sub.image is not None:
+                img = self.images.get(sub.image.data_id)
+                if img is not None:
+                    parts.append(img.name)
         return " ".join(p for p in parts if p)
 
     def _filter_data_pool(self, text):
@@ -1182,11 +1357,33 @@ class SciSuiteWindow(QMainWindow):
         for i in range(self.tree.topLevelItemCount()):
             recurse(self.tree.topLevelItem(i))
 
+    def _refresh_ipc_data(self):
+        """Rebuild full column + image data (client get_data / get_image). Data mutations only."""
+        self._ipc_data_full = {
+            o.id: {"id": o.id, "name": o.name, "column_order": list(o.column_order),
+                   "columns": {c: o.columns[c].tolist() for c in o.column_order}}
+            for o in self.repository.values()
+        }
+        self._ipc_image_full = {
+            im.id: {"id": im.id, "name": im.name, "shape": list(im.shape),
+                    "dtype": str(im.data.dtype), "axis_names": list(im.axis_names),
+                    "bytes": np.ascontiguousarray(im.data).tobytes()}
+            for im in self.images.values()
+        }
+        if isinstance(self.ipc.snapshot, dict):
+            self.ipc.snapshot["data_full"] = self._ipc_data_full
+            self.ipc.snapshot["image_full"] = self._ipc_image_full
+
     def _refresh_ipc_snapshot(self):
         data_objects = [{
             "id": o.id, "name": o.name, "columns": list(o.column_order),
             "nrows": o.nrows, "tags": list(o.tags), "source": o.source,
         } for o in self.repository.values()]
+        images = [{
+            "id": im.id, "name": im.name, "shape": list(im.shape),
+            "dtype": str(im.data.dtype), "axis_names": list(im.axis_names),
+            "tags": list(im.tags), "source": im.source,
+        } for im in self.images.values()]
         traces = []
         for sm in self.sheets.values():
             for i, sub in enumerate(sm.subplots):
@@ -1199,12 +1396,19 @@ class SciSuiteWindow(QMainWindow):
                         "sheet": sm.name, "subplot": i, "enabled": t.enabled,
                         "plot_type": t.plot_type, "color": t.color,
                     })
-        self.ipc.snapshot = {"data_objects": data_objects, "traces": traces}
+        self.ipc.snapshot = {"data_objects": data_objects, "images": images,
+                             "traces": traces, "data_full": self._ipc_data_full,
+                             "image_full": self._ipc_image_full}
 
     def _find_data(self, key):
         if key in self.repository:
             return self.repository[key]
         return next((o for o in self.repository.values() if o.name == key), None)
+
+    def _find_image(self, key):
+        if key in self.images:
+            return self.images[key]
+        return next((o for o in self.images.values() if o.name == key), None)
 
     def handle_incoming_ipc(self, payload: dict):
         action = payload.get("action")
@@ -1212,8 +1416,12 @@ class SciSuiteWindow(QMainWindow):
             self._ingest_dataobject(payload)
         elif action == ACTION_APPEND_TRACE:
             self._ingest_pushed_trace(payload)
+        elif action == ACTION_APPEND_IMAGE:
+            self._ingest_image(payload)
         elif action == ACTION_ADD_TO_SHEET:
             self._handle_add_to_sheet(payload)
+        elif action == ACTION_ADD_IMAGE_TO_SHEET:
+            self._handle_add_image_to_sheet(payload)
         elif action in (ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE):
             self._remove_data(payload.get("key"))
         elif action == ACTION_CLEAR:
@@ -1236,8 +1444,88 @@ class SciSuiteWindow(QMainWindow):
         self._refresh_data_list()
         self._refresh_open_sheets()
         self._sync_subplot_trace_list()
+        self._refresh_ipc_data()
         self._refresh_ipc_snapshot()
         return obj
+
+    def _ingest_image(self, payload: dict) -> ImageObject:
+        name = payload.get("name", "image")
+        arr = np.frombuffer(payload["bytes"], dtype=payload["dtype"]).reshape(
+            payload["shape"])
+        axis_names = payload.get("axis_names")
+        existing = None
+        if payload.get("mode") == "update":
+            existing = self._find_image(name)
+        if existing is not None:
+            existing.update_from(arr, axis_names)
+            obj = existing
+        else:
+            obj = ImageObject(name, arr, axis_names, payload.get("axis_units"),
+                              payload.get("tags"), payload.get("source", "array"))
+            self.images[obj.id] = obj
+        self._refresh_data_list()
+        self._refresh_open_sheets()
+        self._refresh_ipc_data()
+        self._refresh_ipc_snapshot()
+        return obj
+
+    def _add_image_to_subplot(self, image_id, sheet_id, subplot_index, display_axes):
+        obj = self.images.get(image_id)
+        sm = self.sheets.get(sheet_id)
+        if obj is None or sm is None:
+            return
+        si = min(int(subplot_index), len(sm.subplots) - 1)
+        sub = sm.subplots[si]
+        r, c = int(display_axes[0]), int(display_axes[1])
+        index = {a: obj.shape[a] // 2 for a in range(obj.ndim) if a not in (r, c)}
+        sub.image = ImageRef(obj.id, [r, c], index)
+        sm.active_index = si
+        self._render_sheet(sheet_id)
+        self.sync_active_subplot_inspector()
+        self._refresh_ipc_snapshot()
+
+    def _add_image_from_panel(self, sel: dict, target: str):
+        if target == "new":
+            sm = self._create_sheet_model()
+        else:
+            sm = self._active_sheet_model() or self._create_sheet_model()
+        self._open_sheet_tab(sm.sheet_id)
+        self._add_image_to_subplot(sel["image_id"], sm.sheet_id, sm.active_index,
+                                   sel["display_axes"])
+
+    def _handle_add_image_to_sheet(self, payload: dict):
+        obj = self._find_image(payload.get("name") or payload.get("id"))
+        if obj is None:
+            return
+        target = payload.get("sheet", "__active__")
+        if target == "__new__":
+            sm = self._create_sheet_model()
+        elif target in ("__active__", "", None):
+            sm = self._active_sheet_model() or self._create_sheet_model()
+        else:
+            sm = self.sheets.get(target) or next(
+                (s for s in self.sheets.values() if s.name == target), None)
+            if sm is None:
+                sm = self._create_sheet_model(target if isinstance(target, str) else None)
+        self._open_sheet_tab(sm.sheet_id)
+        sub_idx = min(int(payload.get("subplot_index", 0)), len(sm.subplots) - 1)
+        axes = payload.get("display_axes") or [max(0, obj.ndim - 2), max(0, obj.ndim - 1)]
+        self._add_image_to_subplot(obj.id, sm.sheet_id, sub_idx, axes)
+
+    def _remove_image(self, key):
+        obj = self._find_image(key)
+        if obj is None:
+            return
+        self.images.pop(obj.id, None)
+        for sm in self.sheets.values():
+            for sub in sm.subplots:
+                if sub.image is not None and sub.image.data_id == obj.id:
+                    sub.image = None
+        self._refresh_data_list()
+        self._refresh_open_sheets()
+        self.sync_active_subplot_inspector()
+        self._refresh_ipc_data()
+        self._refresh_ipc_snapshot()
 
     def _ingest_pushed_trace(self, payload: dict):
         name = payload["name"]
@@ -1282,6 +1570,9 @@ class SciSuiteWindow(QMainWindow):
         self._add_traces(sel, sm.sheet_id, sub_idx)
 
     def _remove_data(self, key):
+        if self._find_image(key) is not None:
+            self._remove_image(key)
+            return
         obj = self._find_data(key)
         if obj is None:
             return
@@ -1292,16 +1583,20 @@ class SciSuiteWindow(QMainWindow):
         self._refresh_data_list()
         self._refresh_open_sheets()
         self._sync_subplot_trace_list()
+        self._refresh_ipc_data()
         self._refresh_ipc_snapshot()
 
     def _clear_all(self):
         self.repository.clear()
+        self.images.clear()
         for sm in self.sheets.values():
             for sub in sm.subplots:
                 sub.traces = []
+                sub.image = None
         self._refresh_data_list()
         self._refresh_open_sheets()
         self._sync_subplot_trace_list()
+        self._refresh_ipc_data()
         self._refresh_ipc_snapshot()
 
 

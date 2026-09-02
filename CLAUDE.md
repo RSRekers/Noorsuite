@@ -43,25 +43,32 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
 
 | Module | Role |
 | --- | --- |
-| `model.py` | `DataObject`, `TraceRef`, `SubplotModel`, `SheetModel`, `ColorMap`, `ProjectModel`; `apply_y_transform`, `apply_numeric_expr`; option vocabularies. Plain (matplotlib-free) objects with `to_dict`/`from_dict`. |
+| `model.py` | `DataObject`, `ImageObject`, `TraceRef`, `ImageRef`, `SubplotModel`, `SheetModel`, `ColorMap`, `ProjectModel` (+ `ProjectModel.save/load` for the image sidecar); `apply_y_transform`, `apply_numeric_expr`; option vocabularies. Needs only numpy. |
 | `colormap.py` | Colormap sampling + `.scicmap` file I/O (needs matplotlib): `sample(spec, n)`, `available_specs`, `resolve_spec`, `save_file`/`load_file`, `BUILTIN_NAMES`. |
 | `fuzzy.py` | `fuzzy_match` (case-insensitive subsequence) + `fuzzy_score`. Dependency-free. |
+| `widgets.py` | `CollapsibleSection` (header `QToolButton` that shows/hides a body widget; `toggled` signal). Shared by `app.py`, `sheet.py`, `dialogs.py`. |
 | `protocol.py` | Qt-free wire protocol: `frame`/`read_frame` (8-byte big-endian length prefix + pickle), action-name constants, `IPCClient`. |
 | `ipc.py` | `IPCBridge` — the server `QObject` (needs PyQt6). Re-exports everything from `protocol.py`. |
 | `client.py` | `SciSuiteClient` — DataFrame-first Jupyter API. |
 | `sheet.py` | `PlotSheet` widget + the rendering engine + canvas hit-testing + the active-subplot highlight. |
-| `dialogs.py` | `TraceStyleWidget` / `AxesStyleWidget` / `BulkTraceEditWidget` / `ColormapPanel` + the scrollable double-click editor dialogs. |
-| `app.py` | `SciSuiteWindow` (alias `ModernOriginSuite`) + `ColumnTree` + `ProjectTree` + `ReorderList` — panels, tabs, inspector, save/load, IPC intake. |
+| `dialogs.py` | `TraceStyleWidget` / `AxesStyleWidget` / `BulkTraceEditWidget` / `ColormapPanel` / `ImageStyleWidget` + the scrollable double-click editor dialogs. |
+| `app.py` | `SciSuiteWindow` (alias `ModernOriginSuite`) + `ColumnTree` + `ProjectTree` + `ReorderList` + `ImageAxesPanel` — panels, tabs, inspector, save/load, IPC intake. |
 | `__main__.py` | `python -m NoorSuite --gui <port>` entry. |
 
-### The data model (v4)
+### The data model (v6)
 
 - A **`DataObject`** is a named bag of columns — one pushed DataFrame. Its columns are the
   addressable unit; the object name is a stable pointer (`update_from` refreshes columns in
   place across re-pushes).
-- A **`TraceRef`** on a `SubplotModel` points at `(data_id, x_col, y_col)` and carries its own
-  style + an `enabled` flag (temporary hide, not delete). The same column can be referenced
-  from several subplots with different styling.
+- An **`ImageObject`** is a named ND `np.ndarray` + `axis_names`. `slice(display_axes, index)`
+  returns the 2-D slice to `imshow`. Lives in `SciSuiteWindow.images` (separate from
+  `repository`); its array persists to a sidecar `.npy`, not inline (see below).
+- A **`TraceRef`** on a `SubplotModel` points at `(data_id, x_col, y_col)` + its own style +
+  an `enabled` flag. An **`ImageRef`** (`SubplotModel.image`, or `None`) points at an
+  `ImageObject` + `display_axes` [row, col] / `slice_axis` (which non-display axis the slider
+  drives; `None` = auto) / `index` (per-axis slice position) / cmap / vmin-vmax /
+  interpolation / origin / aspect / alpha / colorbar. The image draws at `zorder=0` with
+  `extent=[0,ncols,0,nrows]`, so `TraceRef`s overlay on top in the same coords.
 - `x_col == "" or "__index__"` (`model.INDEX_COL`) means "use the row index".
 - A **`ColorMap`** is `{name, colors[hex], builtin}`. `SheetModel` owns `colormaps` (custom,
   per-sheet) + `active_colormap` (name; `""` = matplotlib prop-cycle); `ProjectModel.colormaps`
@@ -77,11 +84,20 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
 ### Cross-cutting mechanisms
 
 - **IPC threading.** `IPCBridge` accepts on a daemon thread. *Mutations* (`append_dataframe`,
-  `append_trace`, `add_to_sheet`, `remove_data`/`remove_trace`, `clear`) are re-emitted as the
-  `data_received` Qt signal and handled on the GUI thread by
-  `SciSuiteWindow.handle_incoming_ipc`. *Queries* (`list_data`, `list_traces`) are answered
-  synchronously from `IPCBridge.snapshot`, a plain dict the GUI thread rewrites via
-  `_refresh_ipc_snapshot()` after every change. Call it after any new mutation path.
+  `append_trace`, `append_image`, `add_to_sheet`, `add_image_to_sheet`, `remove_data`, `clear`)
+  are re-emitted as the `data_received` Qt signal and handled on the GUI thread by
+  `SciSuiteWindow.handle_incoming_ipc`. *Queries* (`list_data`, `list_images`, `list_traces`,
+  `get_data`) are answered from `IPCBridge.snapshot`. Two refresh methods: `_refresh_ipc_snapshot()`
+  (cheap metadata — call after any change) and `_refresh_ipc_data()` (rebuilds
+  `snapshot["data_full"]`, the full column values that back `client.get_data()` — call only on
+  data-object add/update/remove/clear/load).
+
+- **Jupyter round-trip.** `client.get_data(name)` → DataFrame from `data_full`;
+  `client.get_image(name)` → ndarray from `image_full` (both rebuilt by `_refresh_ipc_data`).
+  Edit and `push_dataframe(df, name=name, mode="update")` / `push_image(arr, name=name,
+  mode="update")` → `update_from` refreshes the object in place (id preserved), open sheets
+  re-render, the `ColumnTree` / data pool rebuild. `list_data` / `list_images` / `list_traces`
+  are the metadata listings.
 
 - **Rendering is full clear-and-rebuild.** `PlotSheet.render(repository)` does `fig.clf()`,
   applies the figure frame (`fig.patch` edge/width/style, only visible with `fig_frame_on` and
@@ -97,34 +113,57 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   in `transFigure` coords. Never call it from `render()` (no renderer yet); `render()` just
   nulls the patch and lets the next draw rebuild it.
 
-- **One source of truth for style widgets.** `TraceStyleWidget` (binds a `TraceRef`) and
-  `AxesStyleWidget` (binds a `SubplotModel`) live in `dialogs.py` and are embedded both in the
-  right-hand inspector and in the pop-up dialogs. Dialogs (`_BaseEditDialog`) wrap their
-  content in a capped-height `QScrollArea` with the button box outside it, so they fit small
-  screens.
+- **Image slider bar.** `PlotSheet`'s vertical `QSplitter` is 3 panes: plot → `slider_bar`
+  → Notes. `slider_bar` (shown only when the active subplot's image has `ndim > 2`) has
+  **Row (y)** + **Col (x)** combos (all axes) that set `ImageRef.display_axes`, a **Slice**
+  combo (the non-display axes) that sets `ImageRef.slice_axis`, and the `QSlider` that writes
+  `ImageRef.index[slice_axis]`. Changing the slice axis re-derives `display_axes` (for a 3-D
+  image → the other two, ascending); changing row/col re-derives the slice axis. Every change
+  re-renders; `_rebuild_slider_bar()` runs at the end of `render()` and on active-subplot
+  change (guarded by `_img_loading`).
+
+- **One source of truth for style widgets.** `TraceStyleWidget` (`TraceRef`),
+  `AxesStyleWidget` (`SubplotModel`) and `ImageStyleWidget` (`sub.image`) live in `dialogs.py`,
+  embedded both in the right-hand inspector and the pop-up dialogs. `AxesStyleWidget`'s groups
+  are `CollapsibleSection`s (Labels & scale / Axis limits open; Cosmetics / Legend / Grid
+  folded; Image auto-hidden when `sub.image is None`). Dialogs (`_BaseEditDialog`) wrap
+  content in a capped-height `QScrollArea` with the button box outside it.
 
 - **`ProjectModel` is the only serialization root** — `.sciproj` files *and* the
-  `~/.scisuite_session.json` autosave (written on close, loaded on startup). It carries
-  `data_objects`, `sheets` (subplots + `TraceRef`s + figure-frame fields + `tags` + per-sheet
-  `colormaps`/`active_colormap`), `tree` (nested `{"type": "folder"|"sheet", ...}` nodes), and
-  `colormaps` (project library). Format is **v4 only**; `ProjectModel.from_dict` raises
-  `ValueError` on any other `version`. `testproject.sciproj` is a regenerable v4 sample.
+  `~/.scisuite_session.json` autosave. It carries `data_objects`, `images`, `sheets`
+  (subplots + `TraceRef`s + `image` + figure-frame + grid + `tags` + `notes` + per-sheet
+  `colormaps`/`active_colormap`), `tree`, and `colormaps` (library). Format is **v6 only**;
+  `from_dict` raises `ValueError` on any other `version`. Save via `ProjectModel.save(path)` /
+  load via `ProjectModel.load(path)` — image arrays go to a **sidecar folder**
+  `Path(path).with_suffix("")` (`report.sciproj` → `report/`), one `img_<id>.npy` each,
+  linked from the JSON by `array_file`; `to_json`/`from_json` alone keep metadata but drop
+  the arrays. `testproject.sciproj` (+ `testproject/`) is a regenerable v6 sample.
+
+- **Project file identity & autosave.** `SciSuiteWindow.project_path` is set by *Save As…* /
+  *Open* only (not by the session autosave). The toolbar `project_label` + window title show
+  `_project_name()` (`Path(project_path).stem` or "Untitled project"). Ctrl+S → `_quick_save`
+  (writes `project_path`, or falls back to Save As); a `QTimer` (`_AUTOSAVE_SECONDS`) calls
+  `_autosave_project` which re-writes `project_path` if set. `closeEvent` does one last
+  autosave.
 
 ### UI layout (`app.py`)
 
-Left is a vertical splitter: **data pool** list → **column picker** (`ColumnTree` with an
-exclusive X tick + Y ticks, plus a `head()` preview table + "Add to active/new sheet"
-buttons; a valid X+Y selection is also draggable, MIME `application/x-scisuite-cols`) →
-**project tree** (`ProjectTree`: folders + sheets with `SP_DirIcon`/`SP_FileIcon`,
-**single-click** a sheet to open its tab, right-click for "Set tags…", accepts column drops
-onto a sheet node). Center: one tab per open sheet. Right, top→bottom: **rows/cols spinboxes**
+Left is a vertical splitter: **data pool** list (DataObjects + ImageObjects, different icons)
+→ **middle `QStackedWidget`**: page 0 = **column picker** (`ColumnTree` X/Y ticks + `head()`
+preview + "Add to active/new sheet"; valid X+Y is draggable, MIME
+`application/x-scisuite-cols`), page 1 = **`ImageAxesPanel`** (row/col axis combos + add
+buttons) — `_on_data_selected` picks the page by object type → **project tree**
+(`ProjectTree`: folders + sheets, **single-click** to open a tab, right-click "Set tags…",
+accepts column drops). Center: one tab per open sheet, each a `QSplitter(Vertical)` — plot →
+image `slider_bar` → collapsible **Notes** pane (`current_sheet()` still returns the
+`PlotSheet`). Right, top→bottom: **rows/cols spinboxes**
 (`on_grid_changed`), the **subplot-order strip** (`ReorderList`, drag to reorder
 `SheetModel.subplots`; its multi-selection is the colormap "Selected subplots" scope), the
 active subplot's `TraceRef` list (`ExtendedSelection`; checkbox = `enabled`; >1 selected swaps
 `TraceStyleWidget` for `BulkTraceEditWidget`), the **`ColormapPanel`**, and the Axes/Trace
 inspectors. Fuzzy search (`fuzzy.fuzzy_match`) filters the data pool and the tree; the tree
-haystack per sheet is `_sheet_haystack` (name + tags + referenced data-object names + every
-subplot title/x_label/y_label + trace labels).
+haystack per sheet is `_sheet_haystack` (name + tags + notes + referenced data-object /
+image names + every subplot title/x_label/y_label + trace labels).
 
 ## Conventions / gotchas
 

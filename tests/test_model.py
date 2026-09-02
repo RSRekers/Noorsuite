@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from NoorSuite.model import (INDEX_COL, PROJECT_VERSION, ColorMap, DataObject,
-                            ProjectModel, SheetModel, SubplotModel, TraceRef)
+                            ImageObject, ImageRef, ProjectModel, SheetModel,
+                            SubplotModel, TraceRef)
 
 
 def _obj(name="run", n=6):
@@ -61,26 +62,78 @@ def test_traceref_resolve_with_index_x():
     np.testing.assert_allclose(y, obj.columns["b"])
 
 
-def test_subplotmodel_roundtrip_includes_traces_and_new_fields():
+def test_subplotmodel_roundtrip_includes_traces_grid_and_image():
     s = SubplotModel("Panel")
     s.y_min, s.y_max = -1.0, 2.5
     s.spine_width = 2.0
     s.spine_style = "--"
+    s.grid_axis = "x"
+    s.grid_ticks = "both"
+    s.grid_style = ":"
+    s.grid_color = "#123456"
+    s.grid_alpha = 0.25
     s.traces = [TraceRef("d1", "t", "a"), TraceRef("d1", INDEX_COL, "b", enabled=False)]
+    s.image = ImageRef("img1", [1, 2], {0: 3})
+    s.image.cmap = "magma"
+    s.image.colorbar = True
 
     restored = SubplotModel.from_dict(s.to_dict())
     assert restored.y_min == -1.0 and restored.y_max == 2.5
     assert restored.spine_width == 2.0 and restored.spine_style == "--"
+    assert restored.grid_axis == "x" and restored.grid_ticks == "both"
+    assert restored.grid_style == ":" and restored.grid_color == "#123456"
+    assert restored.grid_alpha == 0.25
     assert [t.y_col for t in restored.traces] == ["a", "b"]
     assert restored.traces[1].enabled is False
+    assert restored.image.data_id == "img1"
+    assert restored.image.display_axes == [1, 2]
+    assert restored.image.index == {0: 3}
+    assert restored.image.cmap == "magma" and restored.image.colorbar is True
 
 
-def test_sheetmodel_roundtrip_keeps_id_frame_tags_and_colormaps():
+def test_subplotmodel_defaults_have_no_image_and_look_unchanged():
+    s = SubplotModel()
+    assert s.image is None
+    assert s.grid_axis == "both" and s.grid_ticks == "major"
+    assert s.grid_style == "--" and abs(s.grid_alpha - 0.5) < 1e-9
+
+
+def test_imageobject_slice_3d_and_4d():
+    a3 = np.arange(5 * 4 * 6).reshape(5, 4, 6)
+    obj3 = ImageObject("stack", a3, axis_names=["z", "y", "x"])
+    sl = obj3.slice((1, 2), {0: 3})
+    assert sl.shape == (4, 6)
+    np.testing.assert_array_equal(sl, a3[3])
+
+    # swapped display order -> transposed
+    sl_t = obj3.slice((2, 1), {0: 3})
+    assert sl_t.shape == (6, 4)
+    np.testing.assert_array_equal(sl_t, a3[3].T)
+
+    a4 = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+    obj4 = ImageObject("stack4", a4)
+    sl4 = obj4.slice((2, 3), {0: 1, 1: 2})
+    assert sl4.shape == (4, 5)
+    np.testing.assert_array_equal(sl4, a4[1, 2])
+
+
+def test_imageobject_metadata_roundtrip():
+    obj = ImageObject("img", np.zeros((3, 4, 5), dtype="float32"),
+                      axis_names=["z", "y", "x"], tags=["t"])
+    d = obj.to_dict()
+    assert d["shape"] == [3, 4, 5] and d["dtype"] == "float32"
+    restored = ImageObject.from_dict(d)
+    assert restored.name == "img" and restored.axis_names == ["z", "y", "x"]
+    assert restored.shape == (3, 4, 5)
+
+
+def test_sheetmodel_roundtrip_keeps_id_frame_tags_notes_and_colormaps():
     sh = SheetModel("S", 1, 2)
     sh.fig_frame_on = True
     sh.fig_edge_width = 2.5
     sh.fig_edge_style = ":"
     sh.tags = ["overview", "PL"]
+    sh.notes = "Measured 2024-06-01.\nPeak shifts red with anneal temp."
     sh.active_colormap = "viridis"
     sh.colormaps = [ColorMap("mine", ["#111111", "#222222"])]
     restored = SheetModel.from_dict(sh.to_dict())
@@ -89,6 +142,7 @@ def test_sheetmodel_roundtrip_keeps_id_frame_tags_and_colormaps():
     assert restored.fig_edge_width == 2.5
     assert restored.fig_edge_style == ":"
     assert restored.tags == ["overview", "PL"]
+    assert restored.notes == sh.notes
     assert restored.active_colormap == "viridis"
     assert [c.name for c in restored.colormaps] == ["mine"]
     assert restored.colormaps[0].colors == ["#111111", "#222222"]
@@ -117,10 +171,34 @@ def test_project_roundtrip_with_tree_and_colormaps():
 
 def test_project_rejects_wrong_version():
     payload = ProjectModel().to_dict()
-    payload["version"] = 3
+    payload["version"] = 5
     with pytest.raises(ValueError):
         ProjectModel.from_dict(payload)
 
 
-def test_current_version_is_four():
-    assert PROJECT_VERSION == 4
+def test_current_version_is_six():
+    assert PROJECT_VERSION == 6
+
+
+def test_project_save_load_roundtrips_image_array_via_sidecar(tmp_path):
+    project = ProjectModel()
+    arr = (np.random.default_rng(0).random((4, 5, 6)) * 100).astype("float32")
+    img = ImageObject("stack", arr, axis_names=["z", "y", "x"])
+    project.images = [img]
+    sh = SheetModel("S", 1, 1)
+    sh.subplots[0].image = ImageRef(img.id, [1, 2], {0: 2})
+    project.sheets = [sh]
+
+    path = tmp_path / "proj.sciproj"
+    project.save(path)
+    assert (tmp_path / "proj" / f"img_{img.id}.npy").is_file()
+
+    restored = ProjectModel.load(path)
+    assert restored.images[0].shape == (4, 5, 6)
+    np.testing.assert_allclose(restored.images[0].data, arr)
+    assert restored.sheets[0].subplots[0].image.data_id == img.id
+
+    # to_json alone (no sidecar) keeps metadata but drops the array
+    meta = ProjectModel.from_json(project.to_json())
+    assert meta.images[0].shape == (4, 5, 6)
+    assert meta.images[0].data.sum() == 0

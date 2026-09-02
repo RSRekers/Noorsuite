@@ -1,4 +1,4 @@
-"""Data model for SciSuite / NoorSuite (v4).
+"""Data model for SciSuite / NoorSuite (v6).
 
 The pool holds :class:`DataObject`s -- named handles around a set of columns (a pushed
 DataFrame stays *one* object). A plot trace is a :class:`TraceRef`: a pointer to
@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 
 import numpy as np
 
-PROJECT_VERSION = 4
+PROJECT_VERSION = 6
 
 INDEX_COL = "__index__"   # x_col sentinel: use the row index as x
 
@@ -229,10 +230,118 @@ class TraceRef:
         return t
 
 
+class ImageObject:
+    """A named ND array in the data pool, shown as an image (a 2-D slice at a time)."""
+
+    def __init__(self, name, data, axis_names=None, axis_units=None, tags=None,
+                 source="", obj_id=None):
+        self.id = obj_id or _new_id()
+        self.name = name
+        self.data = np.asarray(data)
+        self.axis_names = list(axis_names) if axis_names else \
+            [f"axis_{i}" for i in range(self.data.ndim)]
+        self.axis_units = dict(axis_units or {})
+        self.tags = list(tags or [])
+        self.source = source
+        self._dirty = True            # array not yet written to a sidecar file
+
+    @property
+    def ndim(self) -> int:
+        return self.data.ndim
+
+    @property
+    def shape(self):
+        return tuple(self.data.shape)
+
+    def head_meta(self) -> str:
+        axes = ", ".join(f"{n}={s}" for n, s in zip(self.axis_names, self.shape))
+        return f"{self.data.dtype}  [{axes}]"
+
+    def slice(self, display_axes, index) -> np.ndarray:
+        """2-D slice: index every non-display axis, order as (rows, cols)."""
+        r, c = int(display_axes[0]), int(display_axes[1])
+        sel = [slice(None)] * self.data.ndim
+        for ax in range(self.data.ndim):
+            if ax not in (r, c):
+                n = self.data.shape[ax]
+                sel[ax] = int(np.clip(index.get(ax, n // 2), 0, n - 1))
+        sub = self.data[tuple(sel)]                       # now 2-D, axes (min(r,c), max(r,c))
+        return sub if r < c else np.swapaxes(sub, 0, 1)
+
+    def update_from(self, data, axis_names=None) -> None:
+        self.data = np.asarray(data)
+        if axis_names:
+            self.axis_names = list(axis_names)
+        elif len(self.axis_names) != self.data.ndim:
+            self.axis_names = [f"axis_{i}" for i in range(self.data.ndim)]
+        self._dirty = True
+
+    def to_dict(self) -> dict:
+        # Metadata only; the array itself is written to a sidecar file by ProjectModel.save.
+        return {
+            "id": self.id,
+            "name": self.name,
+            "shape": list(self.shape),
+            "dtype": str(self.data.dtype),
+            "axis_names": list(self.axis_names),
+            "axis_units": dict(self.axis_units),
+            "tags": list(self.tags),
+            "source": self.source,
+            "array_file": "",
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ImageObject":
+        shape = tuple(d.get("shape", ()))
+        stub = np.zeros(shape, dtype=d.get("dtype", "float64"))
+        obj = cls(d["name"], stub, d.get("axis_names"), d.get("axis_units"),
+                  d.get("tags"), d.get("source", ""), d.get("id"))
+        obj._dirty = False
+        return obj
+
+
+class ImageRef:
+    """A pointer from a subplot to an :class:`ImageObject` + its display state."""
+
+    _FIELDS = ("data_id", "display_axes", "index", "slice_axis", "cmap", "vmin", "vmax",
+               "interpolation", "origin", "aspect", "alpha", "colorbar")
+
+    def __init__(self, data_id, display_axes=(0, 1), index=None):
+        self.data_id = data_id
+        self.display_axes = list(display_axes)
+        self.index: dict[int, int] = {int(k): int(v) for k, v in (index or {}).items()}
+        self.slice_axis = None        # axis the navigation slider drives (None -> auto)
+        self.cmap = "viridis"
+        self.vmin = None
+        self.vmax = None
+        self.interpolation = "nearest"
+        self.origin = "upper"          # upper | lower
+        self.aspect = "auto"          # auto | equal
+        self.alpha = 1.0
+        self.colorbar = False
+
+    def to_dict(self) -> dict:
+        d = {f: getattr(self, f) for f in self._FIELDS}
+        d["display_axes"] = list(self.display_axes)
+        d["index"] = {str(k): v for k, v in self.index.items()}
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ImageRef":
+        ref = cls(d["data_id"], d.get("display_axes", (0, 1)),
+                  {int(k): int(v) for k, v in d.get("index", {}).items()})
+        for f in cls._FIELDS:
+            if f in d and f not in ("data_id", "display_axes", "index") and d[f] is not None:
+                setattr(ref, f, d[f])
+        return ref
+
+
 class SubplotModel:
     """Configuration for one panel / subplot within a sheet."""
 
     _FIELDS = ("title", "x_label", "y_label", "x_scale", "y_scale", "show_grid",
+               "grid_axis", "grid_ticks", "grid_style", "grid_width", "grid_color",
+               "grid_alpha",
                "x_min", "x_max", "y_min", "y_max",
                "tick_label_size", "face_color", "face_alpha",
                "spine_color", "spine_width", "spine_style",
@@ -247,7 +356,14 @@ class SubplotModel:
         self.x_scale = "linear"        # linear | log
         self.y_scale = "linear"
         self.show_grid = True
+        self.grid_axis = "both"        # both | x | y
+        self.grid_ticks = "major"     # major | minor | both
+        self.grid_style = "--"
+        self.grid_width = 0.8
+        self.grid_color = "#b0b0b0"
+        self.grid_alpha = 0.5
         self.traces: list[TraceRef] = []
+        self.image: "ImageRef | None" = None
 
         # Axis limits (None -> autoscale)
         self.x_min = None
@@ -276,6 +392,7 @@ class SubplotModel:
     def to_dict(self) -> dict:
         d = {f: getattr(self, f) for f in self._FIELDS}
         d["traces"] = [t.to_dict() for t in self.traces]
+        d["image"] = self.image.to_dict() if self.image is not None else None
         return d
 
     @classmethod
@@ -285,6 +402,8 @@ class SubplotModel:
             if f in d and d[f] is not None:
                 setattr(s, f, d[f])
         s.traces = [TraceRef.from_dict(t) for t in d.get("traces", [])]
+        img = d.get("image")
+        s.image = ImageRef.from_dict(img) if img else None
         return s
 
 
@@ -312,6 +431,7 @@ class SheetModel:
         self.tags: list[str] = []
         self.colormaps: list[ColorMap] = []   # custom colormaps owned by this sheet
         self.active_colormap = ""             # "" -> matplotlib prop-cycle default
+        self.notes = ""                       # free-text annotation (the "Notes" tab)
 
     def set_grid(self, rows, cols) -> None:
         self.rows = rows
@@ -336,6 +456,7 @@ class SheetModel:
             "cols": self.cols,
             "active_index": self.active_index,
             "tags": list(self.tags),
+            "notes": self.notes,
             "active_colormap": self.active_colormap,
             "colormaps": [c.to_dict() for c in self.colormaps],
             "subplots": [s.to_dict() for s in self.subplots],
@@ -351,6 +472,7 @@ class SheetModel:
             if f in d and d[f] is not None:
                 setattr(sh, f, d[f])
         sh.tags = list(d.get("tags", []))
+        sh.notes = d.get("notes", "")
         sh.active_colormap = d.get("active_colormap", "")
         sh.colormaps = [ColorMap.from_dict(c) for c in d.get("colormaps", [])]
         subs = d.get("subplots")
@@ -366,6 +488,7 @@ class ProjectModel:
     def __init__(self):
         self.version = PROJECT_VERSION
         self.data_objects: list[DataObject] = []
+        self.images: list[ImageObject] = []
         self.sheets: list[SheetModel] = []
         self.tree: list[dict] = []          # folder/sheet organization (raw nodes)
         self.colormaps: list[ColorMap] = []  # project-wide colormap library
@@ -376,6 +499,7 @@ class ProjectModel:
             "version": PROJECT_VERSION,
             "active_sheet_id": self.active_sheet_id,
             "data_objects": [d.to_dict() for d in self.data_objects],
+            "images": [im.to_dict() for im in self.images],
             "sheets": [s.to_dict() for s in self.sheets],
             "tree": self.tree,
             "colormaps": [c.to_dict() for c in self.colormaps],
@@ -392,6 +516,7 @@ class ProjectModel:
         p = cls()
         p.active_sheet_id = d.get("active_sheet_id", "")
         p.data_objects = [DataObject.from_dict(x) for x in d.get("data_objects", [])]
+        p.images = [ImageObject.from_dict(x) for x in d.get("images", [])]
         p.sheets = [SheetModel.from_dict(x) for x in d.get("sheets", [])]
         p.tree = d.get("tree", [])
         p.colormaps = [ColorMap.from_dict(c) for c in d.get("colormaps", [])]
@@ -403,3 +528,43 @@ class ProjectModel:
     @classmethod
     def from_json(cls, text: str) -> "ProjectModel":
         return cls.from_dict(json.loads(text))
+
+    # --- project file + image sidecar folder ---------------------------------
+    @staticmethod
+    def _assets_dir(path) -> Path:
+        return Path(path).with_suffix("")     # report.sciproj -> report/
+
+    def save(self, path) -> None:
+        """Write the project JSON to ``path`` and each image array to ``<stem>/``."""
+        path = Path(path)
+        payload = self.to_dict()
+        if self.images:
+            assets = self._assets_dir(path)
+            assets.mkdir(parents=True, exist_ok=True)
+            by_id = {im.id: im for im in self.images}
+            for entry in payload["images"]:
+                obj = by_id[entry["id"]]
+                fname = f"img_{obj.id}.npy"
+                target = assets / fname
+                if obj._dirty or not target.exists():
+                    np.save(target, obj.data)
+                    obj._dirty = False
+                entry["array_file"] = f"{assets.name}/{fname}"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+
+    @classmethod
+    def load(cls, path) -> "ProjectModel":
+        path = Path(path)
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        project = cls.from_dict(raw)
+        raw_images = {x["id"]: x for x in raw.get("images", [])}
+        for img in project.images:
+            ref = raw_images.get(img.id, {}).get("array_file")
+            if ref:
+                arr_path = (path.parent / ref)
+                if arr_path.is_file():
+                    img.data = np.load(arr_path, allow_pickle=False)
+                    img._dirty = False
+        return project

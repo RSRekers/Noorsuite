@@ -12,14 +12,15 @@ from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox,
                              QDialog, QDialogButtonBox, QDoubleSpinBox,
-                             QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-                             QInputDialog, QLabel, QLineEdit, QMessageBox,
-                             QPushButton, QRadioButton, QScrollArea, QSpinBox,
-                             QVBoxLayout, QWidget)
+                             QFileDialog, QFormLayout, QHBoxLayout, QInputDialog,
+                             QLabel, QLineEdit, QMessageBox, QPushButton,
+                             QRadioButton, QScrollArea, QSpinBox, QVBoxLayout,
+                             QWidget)
 
 from .model import (LEGEND_LOCS, LINE_STYLE_LABELS, LINE_STYLES, MARKER_LABELS,
                     MARKERS, PLOT_TYPES, Y_TRANSFORM_LABELS, Y_TRANSFORMS,
                     ColorMap, apply_numeric_expr)
+from .widgets import CollapsibleSection
 
 _LINESTYLE_ITEMS = ["-", "--", "-.", ":"]
 _KEEP = "(keep)"
@@ -214,9 +215,8 @@ class AxesStyleWidget(QWidget):
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(4)
 
-        labels_box = QGroupBox("Labels & scale")
-        labels_box.setFlat(True)
-        form = QFormLayout(labels_box)
+        labels_body = QWidget()
+        form = QFormLayout(labels_body)
         _tighten(form)
         self.title_edit = QLineEdit(); self.title_edit.textEdited.connect(self._push)
         form.addRow("Title:", self.title_edit)
@@ -233,11 +233,10 @@ class AxesStyleWidget(QWidget):
         self.grid_check = QCheckBox("Show grid lines")
         self.grid_check.toggled.connect(self._push)
         form.addRow("", self.grid_check)
-        outer.addWidget(labels_box)
+        outer.addWidget(CollapsibleSection("Labels & scale", labels_body, expanded=True))
 
-        limits_box = QGroupBox("Axis limits (blank = auto)")
-        limits_box.setFlat(True)
-        lform = QFormLayout(limits_box)
+        limits_body = QWidget()
+        lform = QFormLayout(limits_body)
         _tighten(lform)
         self.xmin_edit = QLineEdit(); self.xmin_edit.editingFinished.connect(self._push)
         self.xmax_edit = QLineEdit(); self.xmax_edit.editingFinished.connect(self._push)
@@ -245,11 +244,11 @@ class AxesStyleWidget(QWidget):
         self.ymax_edit = QLineEdit(); self.ymax_edit.editingFinished.connect(self._push)
         lform.addRow("X min / max:", _pair(self.xmin_edit, self.xmax_edit))
         lform.addRow("Y min / max:", _pair(self.ymin_edit, self.ymax_edit))
-        outer.addWidget(limits_box)
+        outer.addWidget(CollapsibleSection("Axis limits (blank = auto)", limits_body,
+                                           expanded=True))
 
-        cosmetic_box = QGroupBox("Cosmetics")
-        cosmetic_box.setFlat(True)
-        cform = QFormLayout(cosmetic_box)
+        cosmetic_body = QWidget()
+        cform = QFormLayout(cosmetic_body)
         _tighten(cform)
         self.tick_spin = _spin(2.0, 40.0); self.tick_spin.valueChanged.connect(self._push)
         cform.addRow("Tick label size:", self.tick_spin)
@@ -272,11 +271,10 @@ class AxesStyleWidget(QWidget):
         self.spine_style_combo = QComboBox(); self.spine_style_combo.addItems(_LINESTYLE_ITEMS)
         self.spine_style_combo.currentTextChanged.connect(self._push)
         cform.addRow("Spine style:", self.spine_style_combo)
-        outer.addWidget(cosmetic_box)
+        outer.addWidget(CollapsibleSection("Cosmetics", cosmetic_body, expanded=False))
 
-        legend_box = QGroupBox("Legend")
-        legend_box.setFlat(True)
-        gform = QFormLayout(legend_box)
+        legend_body = QWidget()
+        gform = QFormLayout(legend_body)
         _tighten(gform)
         self.legend_check = QCheckBox("Show legend")
         self.legend_check.toggled.connect(self._push)
@@ -292,7 +290,35 @@ class AxesStyleWidget(QWidget):
         self.legend_ncol_spin = QSpinBox(); self.legend_ncol_spin.setRange(1, 8)
         self.legend_ncol_spin.valueChanged.connect(self._push)
         gform.addRow("Columns:", self.legend_ncol_spin)
-        outer.addWidget(legend_box)
+        outer.addWidget(CollapsibleSection("Legend", legend_body, expanded=False))
+
+        grid_body = QWidget()
+        grform = QFormLayout(grid_body)
+        _tighten(grform)
+        self.grid_axis_combo = QComboBox(); self.grid_axis_combo.addItems(["both", "x", "y"])
+        self.grid_axis_combo.currentTextChanged.connect(self._push)
+        grform.addRow("Axes:", self.grid_axis_combo)
+        self.grid_ticks_combo = QComboBox(); self.grid_ticks_combo.addItems(["major", "minor", "both"])
+        self.grid_ticks_combo.currentTextChanged.connect(self._push)
+        grform.addRow("Ticks:", self.grid_ticks_combo)
+        self.grid_style_combo = QComboBox(); self.grid_style_combo.addItems(_LINESTYLE_ITEMS)
+        self.grid_style_combo.currentTextChanged.connect(self._push)
+        grform.addRow("Line style:", self.grid_style_combo)
+        self.grid_width_spin = _spin(0.1, 8.0, 0.1)
+        self.grid_width_spin.valueChanged.connect(self._push)
+        grform.addRow("Line width:", self.grid_width_spin)
+        self.grid_color_btn = ColorButton(color="#b0b0b0", label="Grid colour")
+        self.grid_color_btn.colorChanged.connect(lambda *_: self._push())
+        grform.addRow("Colour:", self.grid_color_btn)
+        self.grid_alpha_spin = _spin(0.0, 1.0, 0.05)
+        self.grid_alpha_spin.valueChanged.connect(self._push)
+        grform.addRow("Alpha:", self.grid_alpha_spin)
+        outer.addWidget(CollapsibleSection("Grid", grid_body, expanded=False))
+
+        self.image_widget = ImageStyleWidget()
+        self.image_widget.changed.connect(lambda: self.changed.emit())
+        self._image_section = CollapsibleSection("Image", self.image_widget, expanded=True)
+        outer.addWidget(self._image_section)
 
         outer.addStretch(1)
 
@@ -327,8 +353,16 @@ class AxesStyleWidget(QWidget):
             self.legend_frame_check.setChecked(sub.legend_frame)
             self.legend_fs_spin.setValue(sub.legend_fontsize)
             self.legend_ncol_spin.setValue(int(sub.legend_ncol))
+            self.grid_axis_combo.setCurrentText(sub.grid_axis)
+            self.grid_ticks_combo.setCurrentText(sub.grid_ticks)
+            self.grid_style_combo.setCurrentText(sub.grid_style)
+            self.grid_width_spin.setValue(sub.grid_width)
+            self.grid_color_btn.setColor(sub.grid_color)
+            self.grid_alpha_spin.setValue(sub.grid_alpha)
         finally:
             self._loading = False
+        self._image_section.setVisible(sub.image is not None)
+        self.image_widget.set_subplot(sub)
 
     def _push(self, *_):
         if self._loading or self._sub is None:
@@ -357,6 +391,88 @@ class AxesStyleWidget(QWidget):
         s.legend_frame = self.legend_frame_check.isChecked()
         s.legend_fontsize = self.legend_fs_spin.value()
         s.legend_ncol = self.legend_ncol_spin.value()
+        s.grid_axis = self.grid_axis_combo.currentText()
+        s.grid_ticks = self.grid_ticks_combo.currentText()
+        s.grid_style = self.grid_style_combo.currentText()
+        s.grid_width = self.grid_width_spin.value()
+        s.grid_color = self.grid_color_btn.color()
+        s.grid_alpha = self.grid_alpha_spin.value()
+        self.changed.emit()
+
+
+_IMAGE_CMAPS = ["viridis", "plasma", "inferno", "magma", "cividis", "gray",
+                "coolwarm", "turbo", "RdBu", "Spectral"]
+_INTERP = ["nearest", "antialiased", "bilinear", "bicubic", "none"]
+
+
+class ImageStyleWidget(QWidget):
+    """Bind to a :class:`~NoorSuite.model.SubplotModel` and edit ``sub.image`` (an ImageRef)."""
+
+    changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._ref = None
+        self._loading = False
+        form = QFormLayout(self)
+        _tighten(form)
+
+        self.cmap_combo = QComboBox(); self.cmap_combo.addItems(_IMAGE_CMAPS)
+        self.cmap_combo.setEditable(True)
+        self.cmap_combo.currentTextChanged.connect(self._push)
+        form.addRow("Colourmap:", self.cmap_combo)
+        self.vmin_edit = QLineEdit(); self.vmin_edit.setPlaceholderText("auto")
+        self.vmin_edit.editingFinished.connect(self._push)
+        self.vmax_edit = QLineEdit(); self.vmax_edit.setPlaceholderText("auto")
+        self.vmax_edit.editingFinished.connect(self._push)
+        form.addRow("vmin / vmax:", _pair(self.vmin_edit, self.vmax_edit))
+        self.interp_combo = QComboBox(); self.interp_combo.addItems(_INTERP)
+        self.interp_combo.currentTextChanged.connect(self._push)
+        form.addRow("Interpolation:", self.interp_combo)
+        self.origin_combo = QComboBox(); self.origin_combo.addItems(["upper", "lower"])
+        self.origin_combo.currentTextChanged.connect(self._push)
+        form.addRow("Origin:", self.origin_combo)
+        self.aspect_combo = QComboBox(); self.aspect_combo.addItems(["auto", "equal"])
+        self.aspect_combo.currentTextChanged.connect(self._push)
+        form.addRow("Aspect:", self.aspect_combo)
+        self.alpha_spin = _spin(0.05, 1.0, 0.05)
+        self.alpha_spin.valueChanged.connect(self._push)
+        form.addRow("Alpha:", self.alpha_spin)
+        self.colorbar_check = QCheckBox("Show colourbar")
+        self.colorbar_check.toggled.connect(self._push)
+        form.addRow("", self.colorbar_check)
+
+    def set_subplot(self, sub):
+        ref = sub.image if sub is not None else None
+        self._ref = ref
+        self._loading = True
+        try:
+            self.setEnabled(ref is not None)
+            if ref is None:
+                return
+            self.cmap_combo.setCurrentText(ref.cmap)
+            self.vmin_edit.setText(_fmt(ref.vmin))
+            self.vmax_edit.setText(_fmt(ref.vmax))
+            self.interp_combo.setCurrentText(ref.interpolation)
+            self.origin_combo.setCurrentText(ref.origin)
+            self.aspect_combo.setCurrentText(ref.aspect)
+            self.alpha_spin.setValue(ref.alpha)
+            self.colorbar_check.setChecked(ref.colorbar)
+        finally:
+            self._loading = False
+
+    def _push(self, *_):
+        if self._loading or self._ref is None:
+            return
+        r = self._ref
+        r.cmap = self.cmap_combo.currentText().strip() or "viridis"
+        r.vmin = _parse_float_or_none(self.vmin_edit.text())
+        r.vmax = _parse_float_or_none(self.vmax_edit.text())
+        r.interpolation = self.interp_combo.currentText()
+        r.origin = self.origin_combo.currentText()
+        r.aspect = self.aspect_combo.currentText()
+        r.alpha = self.alpha_spin.value()
+        r.colorbar = self.colorbar_check.isChecked()
         self.changed.emit()
 
 
@@ -447,6 +563,17 @@ class AxesDialog(_BaseEditDialog):
         super().__init__(subplot, SubplotModel._FIELDS, on_change, parent,
                          title="Axes / panel settings")
         widget = AxesStyleWidget()
+        widget.set_subplot(subplot)
+        widget.changed.connect(self._apply)
+        self._content_layout().addWidget(widget)
+
+
+class ImageDialog(_BaseEditDialog):
+    def __init__(self, subplot, on_change, parent=None):
+        from .model import ImageRef
+        ref = subplot.image
+        super().__init__(ref, ImageRef._FIELDS, on_change, parent, title="Image settings")
+        widget = ImageStyleWidget()
         widget.set_subplot(subplot)
         widget.changed.connect(self._apply)
         self._content_layout().addWidget(widget)

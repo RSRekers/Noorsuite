@@ -7,3 +7,6 @@ dist/
 .pytest_cache/
 .ipynb_checkpoints/
 .scisuite_session.json
+CLAUDE.md
+# project-file image sidecars (large .npy blobs next to a *.sciproj)
+/testproject/

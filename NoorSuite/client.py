@@ -18,12 +18,15 @@ import sys
 import numpy as np
 import pandas as pd
 
-from .protocol import (ACTION_ADD_TO_SHEET, ACTION_APPEND_DATAFRAME,
-                       ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_LIST_DATA,
+from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
+                       ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
+                       ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
+                       ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_LIST_TRACES, ACTION_REMOVE_DATA, DEFAULT_PORT,
                        IPCClient)
 
 _DATA_COLUMNS = ["id", "name", "columns", "nrows", "tags", "source"]
+_IMAGE_COLUMNS = ["id", "name", "shape", "dtype", "axis_names", "tags", "source"]
 _TRACE_COLUMNS = ["data_id", "data_name", "y_col", "x_col", "sheet", "subplot",
                   "enabled", "plot_type", "color"]
 
@@ -110,6 +113,75 @@ class SciSuiteClient:
             "color": color,
             "plot_type": plot_type,
         })
+
+    # --------------------------------------------------------------------- images
+    def push_image(self, arr, *, name, axis_names=None, axis_units=None, tags=None,
+                   mode="new"):
+        """Register an ND array as an image object in the pool (no display)."""
+        arr = np.ascontiguousarray(arr)
+        return self._ipc.send({
+            "action": ACTION_APPEND_IMAGE,
+            "name": name,
+            "bytes": arr.tobytes(),
+            "shape": list(arr.shape),
+            "dtype": str(arr.dtype),
+            "axis_names": list(axis_names) if axis_names else None,
+            "axis_units": dict(axis_units or {}),
+            "tags": list(tags or []),
+            "mode": mode,
+        })
+
+    def show_image(self, data, *, name=None, axis_names=None, sheet=None, subplot=0,
+                   axes=(-2, -1), new_sheet=False):
+        """Register (if given an array) and place an image on a sheet subplot.
+
+        ``axes`` are the two axes to display as (rows, cols); negatives allowed.
+        """
+        if isinstance(data, str):
+            img_name = data
+        else:
+            arr = np.asarray(data)
+            img_name = name or "image"
+            self.push_image(arr, name=img_name, axis_names=axis_names)
+            axes = tuple(a % arr.ndim for a in axes)
+        target = "__new__" if new_sheet else (sheet or "__active__")
+        return self._ipc.send({
+            "action": ACTION_ADD_IMAGE_TO_SHEET,
+            "name": img_name,
+            "sheet": target,
+            "subplot_index": int(subplot),
+            "display_axes": [int(axes[0]), int(axes[1])],
+        })
+
+    def list_images(self) -> pd.DataFrame:
+        """Return a summary of every image object in the pool."""
+        resp = self._ipc.send({"action": ACTION_LIST_IMAGES}) or {}
+        return pd.DataFrame(resp.get("images", []), columns=_IMAGE_COLUMNS)
+
+    def get_image(self, key) -> np.ndarray:
+        """Retrieve an image object's ND array from the GUI (by id or name)."""
+        resp = self._ipc.send({"action": ACTION_GET_IMAGE, "key": key}) or {}
+        if resp.get("status") != "success":
+            raise KeyError(resp.get("message", f"no image matching {key!r}"))
+        return np.frombuffer(resp["bytes"], dtype=resp["dtype"]).reshape(resp["shape"])
+
+    # ------------------------------------------------------------- pull / roundtrip
+    def get_data(self, key) -> pd.DataFrame:
+        """Retrieve a data object from the GUI as a DataFrame (by id or name).
+
+        Edit it and push it back to keep the GUI in sync::
+
+            df = suite.get_data("spectra")
+            df["ratio"] = df["a"] / df["b"]
+            suite.push_dataframe(df, name="spectra", mode="update")
+        """
+        resp = self._ipc.send({"action": ACTION_GET_DATA, "key": key}) or {}
+        if resp.get("status") != "success":
+            raise KeyError(resp.get("message", f"no data object matching {key!r}"))
+        order = resp.get("column_order") or list(resp.get("columns", {}))
+        return pd.DataFrame({c: resp["columns"][c] for c in order}, columns=order)
+
+    get_dataframe = get_data
 
     # ---------------------------------------------------------------------- plot
     def plot(self, data, x, y, *, name=None, sheet=None, subplot=0, new_sheet=False):

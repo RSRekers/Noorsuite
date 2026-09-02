@@ -1,7 +1,9 @@
+import numpy as np
 import pandas as pd
 
 from NoorSuite.client import SciSuiteClient
-from NoorSuite.protocol import (ACTION_ADD_TO_SHEET, ACTION_APPEND_DATAFRAME,
+from NoorSuite.protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
+                               ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                                ACTION_APPEND_TRACE)
 
 
@@ -112,3 +114,50 @@ def test_list_helpers_return_dataframes():
     }
     assert list(client.list_data()["name"]) == ["run"]
     assert list(client.list_traces()["y_col"]) == ["a"]
+
+
+def test_push_image_payload_is_bytes_shape_dtype():
+    client, rec = _client()
+    arr = np.arange(24, dtype="int16").reshape(2, 3, 4)
+    client.push_image(arr, name="stack", axis_names=["z", "y", "x"], tags=["t"])
+    p = rec.last
+    assert p["action"] == ACTION_APPEND_IMAGE
+    assert p["name"] == "stack"
+    assert p["shape"] == [2, 3, 4] and p["dtype"] == "int16"
+    assert np.frombuffer(p["bytes"], dtype="int16").reshape(2, 3, 4).tolist() == arr.tolist()
+    assert p["axis_names"] == ["z", "y", "x"]
+
+
+def test_show_image_from_array_sends_two_payloads():
+    client, rec = _client()
+    arr = np.zeros((5, 6, 7))
+    client.show_image(arr, name="cube", subplot=1, axes=(0, 1), new_sheet=True)
+    assert rec.payloads[0]["action"] == ACTION_APPEND_IMAGE
+    add = rec.payloads[1]
+    assert add["action"] == ACTION_ADD_IMAGE_TO_SHEET
+    assert add["name"] == "cube"
+    assert add["display_axes"] == [0, 1]
+    assert add["sheet"] == "__new__" and add["subplot_index"] == 1
+
+
+def test_show_image_negative_axes_resolved():
+    client, rec = _client()
+    client.show_image(np.zeros((3, 4, 5)), name="c")
+    assert rec.payloads[1]["display_axes"] == [1, 2]      # (-2, -1) on a 3-D array
+
+
+def test_get_data_builds_dataframe_and_roundtrips():
+    client, rec = _client()
+    rec.send = lambda payload, timeout=5.0: {  # type: ignore[assignment]
+        "status": "success", "name": "spectra", "column_order": ["wl", "a", "b"],
+        "columns": {"wl": [1, 2, 3], "a": [4, 5, 6], "b": [7, 8, 9]},
+    }
+    df = client.get_data("spectra")
+    assert list(df.columns) == ["wl", "a", "b"]
+    assert df["a"].tolist() == [4, 5, 6]
+    # add a column and push back
+    client, rec = _client()
+    df["ratio"] = df["a"] / df["b"]
+    client.push_dataframe(df, name="spectra", mode="update")
+    p = rec.last
+    assert p["mode"] == "update" and "ratio" in p["column_order"]
