@@ -165,6 +165,7 @@ class ColumnTree(QTreeWidget):
 class ProjectTree(QTreeWidget):
     sheetActivated = pyqtSignal(str)
     columnsDropped = pyqtSignal(object, dict)   # (sheet_id | None, selection)
+    deleteRequested = pyqtSignal()              # Delete/Backspace on the selection
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -172,13 +173,25 @@ class ProjectTree(QTreeWidget):
         self.setColumnCount(1)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setAcceptDrops(True)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Ctrl / Shift click to multi-select folders + sheets (bulk delete).
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.itemClicked.connect(self._on_activate)
         self.itemDoubleClicked.connect(self._on_activate)
 
     def _on_activate(self, item, _column):
+        # Don't switch tabs while the user is building a multi-selection.
+        if len(self.selectedItems()) > 1:
+            return
         if item is not None and item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
             self.sheetActivated.emit(item.data(0, ITEM_ID_ROLE))
+
+    def keyPressEvent(self, event):
+        if (event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
+                and self.state() != QAbstractItemView.State.EditingState
+                and self.selectedItems()):
+            self.deleteRequested.emit()
+            return
+        super().keyPressEvent(event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat(MIME_COLS):
@@ -216,6 +229,23 @@ class ReorderList(QListWidget):
     def dropEvent(self, event):
         super().dropEvent(event)
         self.reordered.emit()
+
+
+class DataPoolList(QListWidget):
+    """Data-pool list: Ctrl / Shift click to multi-select, Delete to remove them."""
+
+    deleteRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def keyPressEvent(self, event):
+        if (event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
+                and self.selectedItems()):
+            self.deleteRequested.emit()
+            return
+        super().keyPressEvent(event)
 
 
 class ImageAxesPanel(QWidget):
@@ -368,10 +398,11 @@ class SciSuiteWindow(QMainWindow):
         self.search_bar.textChanged.connect(self._filter_data_pool)
         pl.addWidget(self.search_bar)
         pl.addWidget(QLabel("Data pool"))
-        self.data_list = QListWidget()
+        self.data_list = DataPoolList()
         self.data_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.data_list.setMinimumHeight(70)
         self.data_list.currentItemChanged.connect(self._on_data_selected)
+        self.data_list.deleteRequested.connect(self._delete_selected_data)
         self.data_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.data_list.customContextMenuRequested.connect(self._data_menu)
         pl.addWidget(self.data_list)
@@ -420,6 +451,7 @@ class SciSuiteWindow(QMainWindow):
         self.tree = ProjectTree()
         self.tree.sheetActivated.connect(self._open_sheet_tab)
         self.tree.columnsDropped.connect(self._on_columns_dropped)
+        self.tree.deleteRequested.connect(self._delete_selected_tree_items)
         self.tree.itemChanged.connect(self._on_tree_item_changed)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
@@ -612,6 +644,13 @@ class SciSuiteWindow(QMainWindow):
         item = self.data_list.itemAt(pos)
         if item is None:
             return
+        selected = self.data_list.selectedItems()
+        if item in selected and len(selected) > 1:
+            menu = QMenu()
+            del_act = menu.addAction(f"Delete {len(selected)} selected")
+            if menu.exec(self.data_list.viewport().mapToGlobal(pos)) == del_act:
+                self._delete_selected_data()
+            return
         key = item.data(Qt.ItemDataRole.UserRole)
         img = self.images.get(key)
         if img is not None:
@@ -662,6 +701,37 @@ class SciSuiteWindow(QMainWindow):
         ) != QMessageBox.StandardButton.Yes:
             return
         self._remove_data(obj.id)
+
+    def _delete_selected_data(self):
+        """Remove every data object / image currently selected in the data pool."""
+        keys = [it.data(Qt.ItemDataRole.UserRole)
+                for it in self.data_list.selectedItems() if not it.isHidden()]
+        objs = [self.repository[k] for k in keys if k in self.repository]
+        imgs = [self.images[k] for k in keys if k in self.images]
+        if not objs and not imgs:
+            return
+        if len(objs) + len(imgs) == 1:
+            if objs:
+                self._confirm_remove_data(objs[0])
+            else:
+                self._remove_image(imgs[0].id)
+            return
+        obj_ids = {o.id for o in objs}
+        ntr = sum(1 for sm in self.sheets.values() for sub in sm.subplots
+                  for t in sub.traces if t.data_id in obj_ids)
+        what = " and ".join(p for p in (
+            f"{len(objs)} data object(s)" if objs else "",
+            f"{len(imgs)} image(s)" if imgs else "") if p)
+        msg = f"Delete {what}?"
+        if ntr:
+            msg += f"\n\nThis also removes {ntr} trace(s) that use them."
+        if QMessageBox.question(self, "Delete selected", msg) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        for obj in objs:
+            self._remove_data(obj.id)
+        for img in imgs:
+            self._remove_image(img.id)
 
     # -------------------------------------------------------------- add traces
     def _add_from_picker(self, target):
@@ -831,6 +901,13 @@ class SciSuiteWindow(QMainWindow):
 
     def _tree_menu(self, pos):
         item = self.tree.itemAt(pos)
+        selected = self.tree.selectedItems()
+        if item is not None and item in selected and len(selected) > 1:
+            menu = QMenu()
+            del_act = menu.addAction(f"Delete {len(selected)} selected")
+            if menu.exec(self.tree.viewport().mapToGlobal(pos)) == del_act:
+                self._delete_selected_tree_items()
+            return
         is_sheet = item is not None and item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET
         menu = QMenu()
         new_folder_act = menu.addAction("New Folder")
@@ -874,6 +951,38 @@ class SciSuiteWindow(QMainWindow):
             for i in reversed(range(item.childCount())):
                 self._delete_tree_item(item.child(i))
         (item.parent() or self.tree.invisibleRootItem()).removeChild(item)
+
+    @staticmethod
+    def _count_sheets_in(item) -> int:
+        if item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
+            return 1
+        return sum(SciSuiteWindow._count_sheets_in(item.child(i))
+                   for i in range(item.childCount()))
+
+    def _delete_selected_tree_items(self):
+        """Delete every selected folder / sheet (folders take their contents with them)."""
+        selected = self.tree.selectedItems()
+        sel_ids = {id(it) for it in selected}   # QTreeWidgetItem is unhashable
+        chosen = []
+        for it in selected:
+            p = it.parent()
+            while p is not None and id(p) not in sel_ids:
+                p = p.parent()
+            if p is None:                       # no selected ancestor -> a top-level pick
+                chosen.append(it)
+        if not chosen:
+            return
+        if len(chosen) == 1:
+            self._delete_tree_item(chosen[0])
+            return
+        nsheets = sum(self._count_sheets_in(it) for it in chosen)
+        msg = f"Delete {len(chosen)} selected item(s)"
+        msg += f" and the {nsheets} sheet(s) inside?" if nsheets else "?"
+        if QMessageBox.question(self, "Delete selected", msg) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        for it in chosen:
+            self._delete_tree_item(it)
 
     def _forget_sheet(self, sheet_id):
         ps = self.open_tabs.pop(sheet_id, None)

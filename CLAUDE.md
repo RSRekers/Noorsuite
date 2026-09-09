@@ -157,13 +157,18 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
 
 ### UI layout (`app.py`)
 
-Left is a vertical splitter: **data pool** list (DataObjects + ImageObjects, different icons)
+Left is a vertical splitter: **data pool** list (`DataPoolList` — DataObjects + ImageObjects,
+different icons; `ExtendedSelection` — Ctrl/Shift click to multi-pick, Delete or the
+"Delete N selected" context action removes them all via `_delete_selected_data`)
 → **middle `QStackedWidget`**: page 0 = **column picker** (`ColumnTree` X/Y ticks + `head()`
 preview + "Add to active/new sheet"; valid X+Y is draggable, MIME
 `application/x-scisuite-cols`), page 1 = **`ImageAxesPanel`** (row/col axis combos + add
 buttons) — `_on_data_selected` picks the page by object type → **project tree**
 (`ProjectTree`: folders + sheets, **single-click** to open a tab, right-click "Set tags…",
-accepts column drops). Center: one tab per open sheet, each a `QSplitter(Vertical)` — plot →
+accepts column drops; also `ExtendedSelection` — multi-pick folders/sheets, Delete or
+"Delete N selected" → `_delete_selected_tree_items`, which folds a selected child into its
+selected ancestor folder and confirms once; `_on_activate` won't switch tabs while >1 is
+selected). Center: one tab per open sheet, each a `QSplitter(Vertical)` — plot →
 image `slider_bar` → collapsible **Notes** pane (`current_sheet()` still returns the
 `PlotSheet`). Right, top→bottom: **rows/cols spinboxes**
 (`on_grid_changed`), the **subplot-order strip** (`ReorderList`, drag to reorder
