@@ -346,7 +346,7 @@
         "imaging"
       ],
       "source": "array",
-      "array_file": "testproject/img_333e6914.npy"
+      "array_file": "testproject/scan.npy"
     }
   ],
   "sheets": [

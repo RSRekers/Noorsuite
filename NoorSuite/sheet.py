@@ -324,9 +324,22 @@ class PlotSheet(QWidget):
                 except Exception:
                     pass
 
+            # auto-label from the image's axis names while the user hasn't set one
+            x_label, y_label = sub.x_label, sub.y_label
+            if sub.image is not None:
+                iobj = self._images.get(sub.image.data_id)
+                if iobj is not None and iobj.ndim >= 2:
+                    names = iobj.axis_names
+                    r, c = (int(sub.image.display_axes[0]),
+                            int(sub.image.display_axes[1]))
+                    if not x_label and 0 <= c < len(names):
+                        x_label = names[c]
+                    if not y_label and 0 <= r < len(names):
+                        y_label = names[r]
+
             title = ax.set_title(sub.title, fontsize=sub.title_fontsize)
-            xlab = ax.set_xlabel(sub.x_label, fontsize=sub.xlabel_fontsize)
-            ylab = ax.set_ylabel(sub.y_label, fontsize=sub.ylabel_fontsize)
+            xlab = ax.set_xlabel(x_label, fontsize=sub.xlabel_fontsize)
+            ylab = ax.set_ylabel(y_label, fontsize=sub.ylabel_fontsize)
             self._text_targets += [(title, "title", idx),
                                    (xlab, "xlabel", idx),
                                    (ylab, "ylabel", idx)]

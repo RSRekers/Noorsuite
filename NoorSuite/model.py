@@ -13,12 +13,36 @@ project files and the ``~/.scisuite_session.json`` autosave.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from pathlib import Path
 
 import numpy as np
 
 PROJECT_VERSION = 6
+
+
+def _safe_fragment(text: str, maxlen: int = 60) -> str:
+    """A filesystem-safe slug of ``text`` for use as a sidecar file name."""
+    frag = re.sub(r"[^A-Za-z0-9._ -]+", "", str(text)).strip()
+    frag = re.sub(r"\s+", "_", frag).strip("._-")
+    return frag[:maxlen].strip("._-") or "image"
+
+
+def resolve_sidecar_names(images) -> dict:
+    """Map each image ``id`` to its ``.npy`` sidecar file name.
+
+    The file is named after the image (``<name>.npy``); the short ``id`` is appended
+    only to disambiguate images whose names would otherwise collide.
+    """
+    base = {im.id: _safe_fragment(im.name) for im in images}
+    seen: dict[str, int] = {}
+    for name in base.values():
+        seen[name] = seen.get(name, 0) + 1
+    return {
+        oid: (f"{name}_{oid}.npy" if seen[name] > 1 else f"{name}.npy")
+        for oid, name in base.items()
+    }
 
 INDEX_COL = "__index__"   # x_col sentinel: use the row index as x
 
@@ -257,6 +281,14 @@ class ImageObject:
         axes = ", ".join(f"{n}={s}" for n, s in zip(self.axis_names, self.shape))
         return f"{self.data.dtype}  [{axes}]"
 
+    def sidecar_name(self) -> str:
+        """Default ``.npy`` sidecar file name for this image (``<name>.npy``).
+
+        The serializer uses :func:`resolve_sidecar_names` instead, which additionally
+        disambiguates images whose names would collide.
+        """
+        return f"{_safe_fragment(self.name)}.npy"
+
     def slice(self, display_axes, index) -> np.ndarray:
         """2-D slice: index every non-display axis, order as (rows, cols)."""
         r, c = int(display_axes[0]), int(display_axes[1])
@@ -316,7 +348,7 @@ class ImageRef:
         self.vmax = None
         self.interpolation = "nearest"
         self.origin = "upper"          # upper | lower
-        self.aspect = "auto"          # auto | equal
+        self.aspect = "equal"         # auto | equal
         self.alpha = 1.0
         self.colorbar = False
 
@@ -535,23 +567,52 @@ class ProjectModel:
         return Path(path).with_suffix("")     # report.sciproj -> report/
 
     def save(self, path) -> None:
-        """Write the project JSON to ``path`` and each image array to ``<stem>/``."""
+        """Write the project JSON to ``path`` and each image array to ``<stem>/``.
+
+        Sidecar files are named after the image (``<name>.npy``, see
+        :func:`resolve_sidecar_names`). Any ``*.npy`` in the folder that no current
+        image owns -- left behind by a delete or a rename -- is swept, and an
+        emptied folder is removed.
+        """
         path = Path(path)
         payload = self.to_dict()
+        assets = self._assets_dir(path)
+        names = resolve_sidecar_names(self.images)
         if self.images:
-            assets = self._assets_dir(path)
             assets.mkdir(parents=True, exist_ok=True)
             by_id = {im.id: im for im in self.images}
             for entry in payload["images"]:
                 obj = by_id[entry["id"]]
-                fname = f"img_{obj.id}.npy"
+                fname = names[obj.id]
                 target = assets / fname
                 if obj._dirty or not target.exists():
                     np.save(target, obj.data)
                     obj._dirty = False
                 entry["array_file"] = f"{assets.name}/{fname}"
+        self._sweep_assets(assets, set(names.values()))
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
+
+    @staticmethod
+    def _sweep_assets(assets: Path, keep: set) -> None:
+        """Delete every ``*.npy`` in ``assets`` not in ``keep``; drop the folder if empty."""
+        if not assets.is_dir():
+            return
+        for stale in assets.glob("*.npy"):
+            if stale.name not in keep:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        try:
+            next(assets.iterdir())
+        except StopIteration:
+            try:
+                assets.rmdir()
+            except OSError:
+                pass
+        except OSError:
+            pass
 
     @classmethod
     def load(cls, path) -> "ProjectModel":

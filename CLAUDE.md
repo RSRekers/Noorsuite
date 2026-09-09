@@ -67,8 +67,11 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   an `enabled` flag. An **`ImageRef`** (`SubplotModel.image`, or `None`) points at an
   `ImageObject` + `display_axes` [row, col] / `slice_axis` (which non-display axis the slider
   drives; `None` = auto) / `index` (per-axis slice position) / cmap / vmin-vmax /
-  interpolation / origin / aspect / alpha / colorbar. The image draws at `zorder=0` with
-  `extent=[0,ncols,0,nrows]`, so `TraceRef`s overlay on top in the same coords.
+  interpolation / origin / aspect (`"equal"` by default) / alpha / colorbar. The image draws
+  at `zorder=0` with `extent=[0,ncols,0,nrows]`, so `TraceRef`s overlay on top in the same
+  coords. `render` auto-labels the axes with the image's `axis_names` for the two
+  `display_axes` while the subplot's own `x_label` / `y_label` is blank (an explicit label
+  wins), so the labels follow the Row/Col/Slice dropdowns.
 - `x_col == "" or "__index__"` (`model.INDEX_COL`) means "use the row index".
 - A **`ColorMap`** is `{name, colors[hex], builtin}`. `SheetModel` owns `colormaps` (custom,
   per-sheet) + `active_colormap` (name; `""` = matplotlib prop-cycle); `ProjectModel.colormaps`
@@ -135,9 +138,15 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   `colormaps`/`active_colormap`), `tree`, and `colormaps` (library). Format is **v6 only**;
   `from_dict` raises `ValueError` on any other `version`. Save via `ProjectModel.save(path)` /
   load via `ProjectModel.load(path)` — image arrays go to a **sidecar folder**
-  `Path(path).with_suffix("")` (`report.sciproj` → `report/`), one `img_<id>.npy` each,
-  linked from the JSON by `array_file`; `to_json`/`from_json` alone keep metadata but drop
-  the arrays. `testproject.sciproj` (+ `testproject/`) is a regenerable v6 sample.
+  `Path(path).with_suffix("")` (`report.sciproj` → `report/`), one `.npy` per image **named
+  after the image** (`model.resolve_sidecar_names` — `<name>.npy`, sanitized; a short `_<id>`
+  is appended only to break a name collision), linked from the JSON by `array_file`;
+  `to_json`/`from_json` alone keep metadata but drop the arrays. The folder is fully managed:
+  `save()` and `SciSuiteWindow._sync_image_sidecars` (run by `_remove_image` / `_clear_all`)
+  both call `ProjectModel._sweep_assets`, which deletes every `*.npy` in the folder that no
+  current image owns — left by a delete or a rename, including legacy `img_<id>.npy` — and
+  removes the folder once empty. `testproject.sciproj` (+ `testproject/`) is a regenerable v6
+  sample.
 
 - **Project file identity & autosave.** `SciSuiteWindow.project_path` is set by *Save As…* /
   *Open* only (not by the session autosave). The toolbar `project_label` + window title show

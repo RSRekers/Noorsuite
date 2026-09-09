@@ -3,7 +3,7 @@ import pytest
 
 from NoorSuite.model import (INDEX_COL, PROJECT_VERSION, ColorMap, DataObject,
                             ImageObject, ImageRef, ProjectModel, SheetModel,
-                            SubplotModel, TraceRef)
+                            SubplotModel, TraceRef, resolve_sidecar_names)
 
 
 def _obj(name="run", n=6):
@@ -191,7 +191,8 @@ def test_project_save_load_roundtrips_image_array_via_sidecar(tmp_path):
 
     path = tmp_path / "proj.sciproj"
     project.save(path)
-    assert (tmp_path / "proj" / f"img_{img.id}.npy").is_file()
+    sidecar = tmp_path / "proj" / "stack.npy"
+    assert sidecar.is_file()                     # named after the image, no id noise
 
     restored = ProjectModel.load(path)
     assert restored.images[0].shape == (4, 5, 6)
@@ -202,3 +203,41 @@ def test_project_save_load_roundtrips_image_array_via_sidecar(tmp_path):
     meta = ProjectModel.from_json(project.to_json())
     assert meta.images[0].shape == (4, 5, 6)
     assert meta.images[0].data.sum() == 0
+
+
+def test_project_save_sweeps_orphaned_and_renamed_image_sidecars(tmp_path):
+    a = ImageObject("scan a", np.zeros((3, 3)))
+    b = ImageObject("scan b", np.zeros((3, 3)))
+    project = ProjectModel()
+    project.images = [a, b]
+    path = tmp_path / "proj.sciproj"
+    project.save(path)
+    assets = tmp_path / "proj"
+    assert (assets / "scan_a.npy").is_file()
+    assert (assets / "scan_b.npy").is_file()
+
+    # a legacy id-named sidecar from an older build is also swept
+    (assets / f"img_{a.id}.npy").write_bytes(b"stale")
+
+    # rename one, drop the other -> save rewrites the renamed sidecar, sweeps the rest
+    a.name = "scan a renamed"
+    a._dirty = True
+    project.images = [a]
+    project.save(path)
+    assert sorted(p.name for p in assets.glob("*.npy")) == ["scan_a_renamed.npy"]
+
+    # last image gone -> the whole sidecar folder is removed
+    project.images = []
+    project.save(path)
+    assert not assets.exists()
+
+
+def test_resolve_sidecar_names_disambiguates_only_on_collision():
+    a = ImageObject("Scan #3 / raw (2026)", np.zeros((2, 2)))
+    b = ImageObject("scan", np.zeros((2, 2)))
+    c = ImageObject("scan", np.zeros((2, 2)))
+    names = resolve_sidecar_names([a, b, c])
+    assert names[a.id] == "Scan_3_raw_2026.npy"     # unsafe chars stripped, spaces -> _
+    assert names[b.id] == f"scan_{b.id}.npy"        # b and c collide -> both get the id
+    assert names[c.id] == f"scan_{c.id}.npy"
+    assert ImageObject("", np.zeros((2, 2))).sidecar_name() == "image.npy"

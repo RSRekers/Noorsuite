@@ -38,7 +38,8 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_REMOVE_DATA,
                   ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
 from .model import (INDEX_COL, ColorMap, DataObject, ImageObject, ImageRef,
-                    ProjectModel, SheetModel, TraceRef, _new_id)
+                    ProjectModel, SheetModel, TraceRef, _new_id,
+                    resolve_sidecar_names)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
 
@@ -1512,11 +1513,21 @@ class SciSuiteWindow(QMainWindow):
         axes = payload.get("display_axes") or [max(0, obj.ndim - 2), max(0, obj.ndim - 1)]
         self._add_image_to_subplot(obj.id, sm.sheet_id, sub_idx, axes)
 
+    def _sync_image_sidecars(self):
+        """Make the project's ``<stem>/`` folder hold exactly one ``.npy`` per current
+        image (named after it); anything left by a delete or rename is removed."""
+        if not self.project_path:
+            return
+        assets = ProjectModel._assets_dir(self.project_path)
+        keep = set(resolve_sidecar_names(self.images.values()).values())
+        ProjectModel._sweep_assets(assets, keep)
+
     def _remove_image(self, key):
         obj = self._find_image(key)
         if obj is None:
             return
         self.images.pop(obj.id, None)
+        self._sync_image_sidecars()
         for sm in self.sheets.values():
             for sub in sm.subplots:
                 if sub.image is not None and sub.image.data_id == obj.id:
@@ -1589,6 +1600,7 @@ class SciSuiteWindow(QMainWindow):
     def _clear_all(self):
         self.repository.clear()
         self.images.clear()
+        self._sync_image_sidecars()
         for sm in self.sheets.values():
             for sub in sm.subplots:
                 sub.traces = []
