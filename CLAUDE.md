@@ -69,9 +69,13 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   drives; `None` = auto) / `index` (per-axis slice position) / cmap / vmin-vmax /
   interpolation / origin / aspect (`"equal"` by default) / alpha / colorbar. The image draws
   at `zorder=0` with `extent=[0,ncols,0,nrows]`, so `TraceRef`s overlay on top in the same
-  coords. `render` auto-labels the axes with the image's `axis_names` for the two
-  `display_axes` while the subplot's own `x_label` / `y_label` is blank (an explicit label
-  wins), so the labels follow the Row/Col/Slice dropdowns.
+  coords.
+- **Auto axis labels.** While a subplot's own `x_label` / `y_label` is blank, `render` fills
+  it in (an explicit label always wins): from the image's `axis_names` for the two
+  `display_axes` (so labels follow the Row/Col/Slice dropdowns), else from the plotted
+  columns via `PlotSheet._auto_trace_labels` — the shared x column name across the enabled
+  traces (`"index"` for the row index; blank if they disagree) and, only when a single trace
+  is shown, its y column name.
 - `x_col == "" or "__index__"` (`model.INDEX_COL`) means "use the row index".
 - A **`ColorMap`** is `{name, colors[hex], builtin}`. `SheetModel` owns `colormaps` (custom,
   per-sheet) + `active_colormap` (name; `""` = matplotlib prop-cycle); `ProjectModel.colormaps`

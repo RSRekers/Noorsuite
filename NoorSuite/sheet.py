@@ -18,7 +18,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QPlainTextEdit,
                              QSlider, QSplitter, QVBoxLayout, QWidget)
 
-from .model import ImageRef, SheetModel
+from .model import INDEX_COL, ImageRef, SheetModel
 from .widgets import CollapsibleSection
 
 _ACTIVE_ACCENT = "#ff7f0e"
@@ -324,7 +324,8 @@ class PlotSheet(QWidget):
                 except Exception:
                     pass
 
-            # auto-label from the image's axis names while the user hasn't set one
+            # auto-label the axes while the user hasn't set one: from the image's
+            # axis names, else from the plotted column names.
             x_label, y_label = sub.x_label, sub.y_label
             if sub.image is not None:
                 iobj = self._images.get(sub.image.data_id)
@@ -336,6 +337,10 @@ class PlotSheet(QWidget):
                         x_label = names[c]
                     if not y_label and 0 <= r < len(names):
                         y_label = names[r]
+            if not x_label or not y_label:
+                auto_x, auto_y = self._auto_trace_labels(sub, repository)
+                x_label = x_label or auto_x
+                y_label = y_label or auto_y
 
             title = ax.set_title(sub.title, fontsize=sub.title_fontsize)
             xlab = ax.set_xlabel(x_label, fontsize=sub.xlabel_fontsize)
@@ -396,6 +401,27 @@ class PlotSheet(QWidget):
         self._highlight_patch = None   # stale after clf(); redrawn by _on_draw
         self._rebuild_slider_bar()
         self.canvas.draw_idle()
+
+    @staticmethod
+    def _auto_trace_labels(sub, repository) -> tuple[str, str]:
+        """Default (x_label, y_label) from the plotted columns.
+
+        x: the shared x column name across the enabled traces (blank if they
+        disagree); ``"index"`` for the row index. y: the y column name, but only
+        when a single trace is shown (a legend disambiguates the rest).
+        """
+        x_names, y_names = [], []
+        for tref in sub.traces:
+            if not tref.enabled:
+                continue
+            data = repository.get(tref.data_id)
+            if data is None or tref.y_col not in data.columns:
+                continue
+            x_names.append("index" if tref.x_col in ("", INDEX_COL) else tref.x_col)
+            y_names.append(tref.y_col)
+        x_label = x_names[0] if x_names and len(set(x_names)) == 1 else ""
+        y_label = y_names[0] if len(y_names) == 1 else ""
+        return x_label, y_label
 
     def _draw_image(self, ax, ref, subplot_index):
         obj = self._images.get(ref.data_id)
