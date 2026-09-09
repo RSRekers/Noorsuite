@@ -992,7 +992,10 @@ class SciSuiteWindow(QMainWindow):
         self._refresh_ipc_snapshot()
 
     # ------------------------------------------------------- subplot trace list
-    def _sync_subplot_trace_list(self):
+    def _sync_subplot_trace_list(self, keep_selection=True):
+        prev = ({it.data(Qt.ItemDataRole.UserRole)
+                 for it in self.subplot_traces.selectedItems()}
+                if keep_selection else set())
         self.subplot_traces.blockSignals(True)
         self.subplot_traces.clear()
         sm = self._active_sheet_model()
@@ -1009,6 +1012,8 @@ class SciSuiteWindow(QMainWindow):
                                    else Qt.CheckState.Unchecked)
                 item.setData(Qt.ItemDataRole.UserRole, i)
                 self.subplot_traces.addItem(item)
+                if i in prev:
+                    item.setSelected(True)
         self.subplot_traces.blockSignals(False)
         self._on_subplot_trace_selection()
 
@@ -1042,6 +1047,7 @@ class SciSuiteWindow(QMainWindow):
             self.trace_widget.hide()
             self.bulk_widget.show()
             self.bulk_widget.set_traces(refs)
+            self.inspector_tabs.setCurrentIndex(1)   # surface the bulk editor
         else:
             self.bulk_widget.hide()
             self.trace_widget.show()
@@ -1057,7 +1063,7 @@ class SciSuiteWindow(QMainWindow):
         for i in idxs:
             if i is not None and i < len(sub.traces):
                 del sub.traces[i]
-        self._sync_subplot_trace_list()
+        self._sync_subplot_trace_list(keep_selection=False)
         self.render_current_sheet()
         self._refresh_ipc_snapshot()
 
