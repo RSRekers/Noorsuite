@@ -76,13 +76,22 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   right after the x/y scales. It's set *before* the image layer, so a subplot with an image
   ignores it: `ImageRef.aspect` (via `imshow`) is drawn later and wins there. UI: the
   "Cosmetics" section of `AxesStyleWidget`.
-- **Figure export size.** `SheetModel.fig_width_cm` / `fig_height_cm` (`None`, `None` by
-  default = auto) set a physical output size for *export only* — "Copy to clipboard" and
-  "Export as SVG" (`SciSuiteWindow._savefig_at_export_size`) temporarily
-  `fig.set_size_inches(cm/2.54, ...)` and drop `bbox_inches="tight"` so the saved file is
-  exactly that size, then restore the on-screen figure size afterward; on-screen rendering is
-  untouched (the canvas still fills its tab, standard `FigureCanvasQTAgg` resize behaviour).
-  UI: the "Export size W x H (cm)" row in `FigureDialog` (double-click the figure background).
+- **Figure size (shape + export), independent of any data/axes aspect.** `SheetModel.fig_width_cm`
+  / `fig_height_cm` (`None`, `None` by default = auto) drive two things from one pair of
+  numbers: (1) **on-screen shape** — `PlotSheet` wraps the canvas in `_AspectCanvasHost`, which
+  fills its tab as before when either is blank, but when both are set keeps the canvas
+  letterboxed (centered, capped to fit) at that width:height *ratio* on every resize —
+  `render()` recomputes the ratio and calls `canvas_host.set_ratio(...)` each pass; the host's
+  own `resizeEvent` reapplies it live. This is how to make a plot "look square" regardless of
+  panel shape or which columns/scales are plotted, without touching `SubplotModel.aspect`
+  (which is data units, not figure shape, and only applies to axes without an image). (2)
+  **export size** — "Copy to clipboard" / "Export as SVG" (`_savefig_at_export_size`)
+  temporarily `fig.set_size_inches(cm/2.54, ...)` at the *absolute* cm values and drop
+  `bbox_inches="tight"` so the saved file is exactly that size, then restore the figure
+  afterward. UI: the **"Figure"** inspector tab (`FigureStyleWidget`, bound to the active sheet
+  by `sync_active_subplot_inspector`) — same widget class embedded in `FigureDialog` (double-
+  click the figure background) — with "Make square" (mirrors whichever side is set, else
+  defaults to 10 cm) / "Auto (fill panel)" buttons alongside the W/H fields.
 - **Auto axis labels.** While a subplot's own `x_label` / `y_label` is blank, `render` fills
   it in (an explicit label always wins): from the image's `axis_names` for the two
   `display_axes` (so labels follow the Row/Col/Slice dropdowns), else from the plotted
@@ -179,22 +188,28 @@ different icons; `ExtendedSelection` — Ctrl/Shift click to multi-pick, Delete 
 "Delete N selected" context action removes them all via `_delete_selected_data`)
 → **middle `QStackedWidget`**: page 0 = **column picker** (`ColumnTree` X/Y ticks + `head()`
 preview + "Add to active/new sheet"; valid X+Y is draggable, MIME
-`application/x-scisuite-cols`), page 1 = **`ImageAxesPanel`** (row/col axis combos + add
-buttons) — `_on_data_selected` picks the page by object type → **project tree**
-(`ProjectTree`: folders + sheets, **single-click** to open a tab, right-click "Set tags…",
-accepts column drops; also `ExtendedSelection` — multi-pick folders/sheets, Delete or
-"Delete N selected" → `_delete_selected_tree_items`, which folds a selected child into its
-selected ancestor folder and confirms once; `_on_activate` won't switch tabs while >1 is
-selected). Center: one tab per open sheet, each a `QSplitter(Vertical)` — plot →
+`application/x-scisuite-cols`; also `ExtendedSelection` on the column rows — Ctrl/Shift-click
+several rows then tick one row's Y box to tick (or untick) that box on every selected row at
+once, so many traces can be queued in one go; the row selection itself never enters the
+drag/add payload, only the X/Y checkbox state does), page 1 = **`ImageAxesPanel`** (row/col
+axis combos + add buttons) — `_on_data_selected` picks the page by object type →
+**project tree** (`ProjectTree`: folders + sheets, **single-click** to open a tab, right-click
+"Set tags…", accepts column drops; also `ExtendedSelection` — multi-pick folders/sheets,
+Delete or "Delete N selected" → `_delete_selected_tree_items`, which folds a selected child
+into its selected ancestor folder and confirms once; `_on_activate` won't switch tabs while >1
+is selected). Center: one tab per open sheet, each a `QSplitter(Vertical)` — plot →
 image `slider_bar` → collapsible **Notes** pane (`current_sheet()` still returns the
 `PlotSheet`). Right, top→bottom: **rows/cols spinboxes**
 (`on_grid_changed`), the **subplot-order strip** (`ReorderList`, drag to reorder
 `SheetModel.subplots`; its multi-selection is the colormap "Selected subplots" scope), the
 active subplot's `TraceRef` list (`ExtendedSelection`; checkbox = `enabled`; >1 selected swaps
-`TraceStyleWidget` for `BulkTraceEditWidget`), the **`ColormapPanel`**, and the Axes/Trace
-inspectors. Fuzzy search (`fuzzy.fuzzy_match`) filters the data pool and the tree; the tree
-haystack per sheet is `_sheet_haystack` (name + tags + notes + referenced data-object /
-image names + every subplot title/x_label/y_label + trace labels).
+`TraceStyleWidget` for `BulkTraceEditWidget`), the **`ColormapPanel`**, and the
+Axes / Trace Style / **Figure** inspector tabs (`inspector_tabs`; the Figure tab is
+`FigureStyleWidget` bound to the *active sheet* via `sync_active_subplot_inspector`, the same
+widget class `FigureDialog` wraps for the figure-background double-click editor). Fuzzy
+search (`fuzzy.fuzzy_match`) filters the data pool and the tree; the tree haystack per sheet is
+`_sheet_haystack` (name + tags + notes + referenced data-object / image names + every subplot
+title/x_label/y_label + trace labels).
 
 ## Conventions / gotchas
 

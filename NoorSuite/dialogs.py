@@ -680,55 +680,105 @@ class TextDialog(_BaseEditDialog):
         self._apply()
 
 
-class FigureDialog(_BaseEditDialog):
-    """Figure background, outer frame (border), and export size settings."""
+class FigureStyleWidget(QWidget):
+    """Bind to a :class:`~NoorSuite.model.SheetModel` and edit its figure background,
+    outer frame (border), and size. Embedded both as the right-panel "Figure" tab and
+    inside :class:`FigureDialog` (the figure-background double-click editor)."""
+
+    changed = pyqtSignal()
 
     _FIELDS = ("fig_face_color", "fig_face_alpha", "fig_frame_on",
                "fig_edge_color", "fig_edge_width", "fig_edge_style",
                "fig_width_cm", "fig_height_cm")
 
-    def __init__(self, sheet_model, on_change, parent=None):
-        super().__init__(sheet_model, self._FIELDS, on_change, parent,
-                         title="Figure background & frame")
-        form = QFormLayout()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sheet = None
+        self._loading = False
+        form = QFormLayout(self)
         _tighten(form)
 
-        self.face_btn = ColorButton(color=sheet_model.fig_face_color, label="Background")
-        self.face_btn.colorChanged.connect(self._push)
+        self.face_btn = ColorButton(label="Background")
+        self.face_btn.colorChanged.connect(lambda *_: self._push())
         form.addRow("Background:", self.face_btn)
         self.face_alpha = _spin(0.0, 1.0, 0.05)
-        self.face_alpha.setValue(sheet_model.fig_face_alpha)
         self.face_alpha.valueChanged.connect(self._push)
         form.addRow("Background alpha:", self.face_alpha)
 
         self.frame_on = QCheckBox("Draw outer frame (border)")
-        self.frame_on.setChecked(sheet_model.fig_frame_on)
         self.frame_on.toggled.connect(self._push)
         form.addRow("", self.frame_on)
-        self.edge_btn = ColorButton(color=sheet_model.fig_edge_color, label="Border colour")
-        self.edge_btn.colorChanged.connect(self._push)
+        self.edge_btn = ColorButton(label="Border colour")
+        self.edge_btn.colorChanged.connect(lambda *_: self._push())
         form.addRow("Border colour:", self.edge_btn)
         self.edge_width = _spin(0.0, 20.0, 0.5)
-        self.edge_width.setValue(sheet_model.fig_edge_width)
         self.edge_width.valueChanged.connect(self._push)
         form.addRow("Border width:", self.edge_width)
         self.edge_style = QComboBox(); self.edge_style.addItems(_LINESTYLE_ITEMS)
-        self.edge_style.setCurrentText(sheet_model.fig_edge_style)
         self.edge_style.currentTextChanged.connect(self._push)
         form.addRow("Border style:", self.edge_style)
 
         self.width_cm_edit = QLineEdit(); self.width_cm_edit.setPlaceholderText("auto")
-        self.width_cm_edit.setText(_fmt(sheet_model.fig_width_cm))
         self.width_cm_edit.editingFinished.connect(self._push)
         self.height_cm_edit = QLineEdit(); self.height_cm_edit.setPlaceholderText("auto")
-        self.height_cm_edit.setText(_fmt(sheet_model.fig_height_cm))
         self.height_cm_edit.editingFinished.connect(self._push)
-        form.addRow("Export size W x H (cm):", _pair(self.width_cm_edit, self.height_cm_edit))
+        form.addRow("Figure size W x H (cm):", _pair(self.width_cm_edit, self.height_cm_edit))
 
-        self._content_layout().addLayout(form)
+        size_btns = QHBoxLayout()
+        self.square_btn = QPushButton("Make square")
+        self.square_btn.setToolTip(
+            "Fix the figure's on-screen shape to a square, independent of the data or "
+            "axes scaling -- unlike an axes aspect ratio, this never needs retuning "
+            "when the plotted columns change.")
+        self.square_btn.clicked.connect(self._make_square)
+        self.auto_btn = QPushButton("Auto (fill panel)")
+        self.auto_btn.clicked.connect(self._make_auto)
+        size_btns.addWidget(self.square_btn)
+        size_btns.addWidget(self.auto_btn)
+        form.addRow("", size_btns)
+        hint = QLabel("Both set: the figure keeps that width:height shape on screen "
+                      "(letterboxed to fit the tab) and exports at exactly that size. "
+                      "Blank: fills the tab like before.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray;")
+        form.addRow("", hint)
+
+    def set_sheet(self, sheet_model):
+        self._sheet = sheet_model
+        self._loading = True
+        try:
+            if sheet_model is None:
+                self.setEnabled(False)
+                return
+            self.setEnabled(True)
+            s = sheet_model
+            self.face_btn.setColor(s.fig_face_color)
+            self.face_alpha.setValue(s.fig_face_alpha)
+            self.frame_on.setChecked(s.fig_frame_on)
+            self.edge_btn.setColor(s.fig_edge_color)
+            self.edge_width.setValue(s.fig_edge_width)
+            self.edge_style.setCurrentText(s.fig_edge_style)
+            self.width_cm_edit.setText(_fmt(s.fig_width_cm))
+            self.height_cm_edit.setText(_fmt(s.fig_height_cm))
+        finally:
+            self._loading = False
+
+    def _make_square(self):
+        side = (_parse_float_or_none(self.width_cm_edit.text())
+                or _parse_float_or_none(self.height_cm_edit.text()) or 10.0)
+        self.width_cm_edit.setText(_fmt(side))
+        self.height_cm_edit.setText(_fmt(side))
+        self._push()
+
+    def _make_auto(self):
+        self.width_cm_edit.clear()
+        self.height_cm_edit.clear()
+        self._push()
 
     def _push(self, *_):
-        s = self._target
+        if self._loading or self._sheet is None:
+            return
+        s = self._sheet
         s.fig_face_color = self.face_btn.color()
         s.fig_face_alpha = self.face_alpha.value()
         s.fig_frame_on = self.frame_on.isChecked()
@@ -737,7 +787,22 @@ class FigureDialog(_BaseEditDialog):
         s.fig_edge_style = self.edge_style.currentText()
         s.fig_width_cm = _parse_float_or_none(self.width_cm_edit.text())
         s.fig_height_cm = _parse_float_or_none(self.height_cm_edit.text())
-        self._apply()
+        self.changed.emit()
+
+
+class FigureDialog(_BaseEditDialog):
+    """Figure background, outer frame (border), and size settings -- the double-click
+    entry point to the same controls embedded as the "Figure" inspector tab."""
+
+    _FIELDS = FigureStyleWidget._FIELDS
+
+    def __init__(self, sheet_model, on_change, parent=None):
+        super().__init__(sheet_model, self._FIELDS, on_change, parent,
+                         title="Figure background, frame & size")
+        widget = FigureStyleWidget()
+        widget.set_sheet(sheet_model)
+        widget.changed.connect(self._apply)
+        self._content_layout().addWidget(widget)
 
 
 # Backwards-compatible alias.

@@ -33,6 +33,43 @@ def rgba(color, alpha):
     return (r, g, b, float(alpha))
 
 
+class _AspectCanvasHost(QWidget):
+    """Hosts the figure canvas; fills its space normally, or -- when given a
+    width:height ratio -- keeps the canvas letterboxed at that fixed shape
+    (centered) regardless of the panel's own size. Independent of the axes'
+    own data aspect: this fixes the *figure's* shape, not any data units."""
+
+    def __init__(self, canvas, parent=None):
+        super().__init__(parent)
+        self._canvas = canvas
+        canvas.setParent(self)
+        self._ratio = None       # None -> fill; else width / height to maintain
+
+    def set_ratio(self, ratio: "float | None"):
+        ratio = float(ratio) if ratio else None
+        if ratio == self._ratio:
+            return
+        self._ratio = ratio
+        self._relayout()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._relayout()
+
+    def _relayout(self):
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        if not self._ratio:
+            self._canvas.setGeometry(0, 0, w, h)
+            return
+        if w / h > self._ratio:
+            new_h, new_w = h, max(1, round(h * self._ratio))
+        else:
+            new_w, new_h = w, max(1, round(w / self._ratio))
+        self._canvas.setGeometry((w - new_w) // 2, (h - new_h) // 2, new_w, new_h)
+
+
 class PlotSheet(QWidget):
     active_subplot_changed = pyqtSignal(int)
     element_double_clicked = pyqtSignal(object)   # dict: {"kind": ..., ...}
@@ -58,11 +95,13 @@ class PlotSheet(QWidget):
         self._highlight_patch = None  # figure-level Rectangle around the active subplot
         self._in_highlight = False    # reentrancy guard for the draw_event handler
 
+        self.canvas_host = _AspectCanvasHost(self.canvas)
+
         plot_page = QWidget()
         plot_layout = QVBoxLayout(plot_page)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         plot_layout.addWidget(self.toolbar)
-        plot_layout.addWidget(self.canvas)
+        plot_layout.addWidget(self.canvas_host, 1)
 
         # --- image navigation bar (between plot and notes; hidden unless ndim > 2) ---
         self._img_loading = False
@@ -411,6 +450,9 @@ class PlotSheet(QWidget):
             pass
         self._highlight_patch = None   # stale after clf(); redrawn by _on_draw
         self._rebuild_slider_bar()
+        ratio = (m.fig_width_cm / m.fig_height_cm
+                 if m.fig_width_cm and m.fig_height_cm else None)
+        self.canvas_host.set_ratio(ratio)
         self.canvas.draw_idle()
 
     @staticmethod

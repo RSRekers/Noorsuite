@@ -30,8 +30,8 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
 
 from .colormap import available_specs, load_file, resolve_spec, sample, save_file
 from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
-                      ColormapPanel, FigureDialog, ImageDialog, LegendDialog,
-                      TextDialog, TraceStyleDialog, TraceStyleWidget)
+                      ColormapPanel, FigureDialog, FigureStyleWidget, ImageDialog,
+                      LegendDialog, TextDialog, TraceStyleDialog, TraceStyleWidget)
 from .fuzzy import fuzzy_match
 from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
@@ -90,9 +90,11 @@ class ColumnTree(QTreeWidget):
         self.setRootIsDecorated(False)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        # SingleSelection (not NoSelection) so a drag can initiate; the X/Y
-        # checkboxes are what actually drives the selection payload.
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # ExtendedSelection: Ctrl/Shift click a range of column rows, then tick one
+        # row's Y box to check that same box on every selected row at once (a quick
+        # way to add several traces in one go). The X/Y checkboxes -- not this row
+        # selection -- are what actually drives the drag/"Add to sheet" payload.
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._data_id = None
         self._loading = False
         self.itemChanged.connect(self._on_item_changed)
@@ -128,6 +130,19 @@ class ColumnTree(QTreeWidget):
                 if other is not item:
                     other.setCheckState(1, Qt.CheckState.Unchecked)
             self._loading = False
+        elif column == 2:
+            # Shift/Ctrl-selected several rows? Ticking one row's Y box ticks (or
+            # unticks) the same box on every other selected row -- select a range,
+            # click once, get all of them as traces.
+            selected = self.selectedItems()
+            if item in selected and len(selected) > 1:
+                state = item.checkState(2)
+                self._loading = True
+                for other in selected:
+                    if other is not item and other.checkState(2) != state \
+                            and other.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                        other.setCheckState(2, state)
+                self._loading = False
         self._emit_valid()
 
     def _emit_valid(self):
@@ -538,6 +553,9 @@ class SciSuiteWindow(QMainWindow):
         _sl.addWidget(self.bulk_widget)
         self.bulk_widget.hide()
         self.inspector_tabs.addTab(_in_scroll(self._trace_tab_stack), "Trace Style")
+        self.figure_widget = FigureStyleWidget()
+        self.figure_widget.changed.connect(self._after_figure_edit)
+        self.inspector_tabs.addTab(_in_scroll(self.figure_widget), "Figure")
         self.inspector_tabs.setMinimumHeight(260)
         layout.addWidget(self.inspector_tabs, 1)
         return widget
@@ -1180,10 +1198,15 @@ class SciSuiteWindow(QMainWindow):
     def sync_active_subplot_inspector(self):
         sm = self._active_sheet_model()
         self.axes_widget.set_subplot(sm.get_active_subplot() if sm else None)
+        self.figure_widget.set_sheet(sm)
 
     def _after_trace_edit(self):
         self.render_current_sheet()
         self._sync_subplot_trace_list()
+        self._refresh_ipc_snapshot()
+
+    def _after_figure_edit(self):
+        self.render_current_sheet()
         self._refresh_ipc_snapshot()
 
     def _after_axes_edit(self):
