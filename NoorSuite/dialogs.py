@@ -271,6 +271,17 @@ class AxesStyleWidget(QWidget):
         self.spine_style_combo = QComboBox(); self.spine_style_combo.addItems(_LINESTYLE_ITEMS)
         self.spine_style_combo.currentTextChanged.connect(self._push)
         cform.addRow("Spine style:", self.spine_style_combo)
+        self.aspect_combo = QComboBox()
+        self.aspect_combo.addItem("Auto", "auto")
+        self.aspect_combo.addItem("Equal (1:1)", "equal")
+        self.aspect_combo.addItem("Custom ratio...", "custom")
+        self.aspect_combo.currentIndexChanged.connect(self._on_aspect_mode)
+        cform.addRow("Aspect ratio:", self.aspect_combo)
+        self.aspect_ratio_spin = _spin(0.001, 1000.0, 0.1)
+        self.aspect_ratio_spin.setDecimals(3)
+        self.aspect_ratio_spin.setToolTip("Data units of Y displayed per one data unit of X")
+        self.aspect_ratio_spin.valueChanged.connect(self._push)
+        cform.addRow("  Y : X ratio:", self.aspect_ratio_spin)
         outer.addWidget(CollapsibleSection("Cosmetics", cosmetic_body, expanded=False))
 
         legend_body = QWidget()
@@ -348,6 +359,10 @@ class AxesStyleWidget(QWidget):
             self.spine_btn.setColor(sub.spine_color)
             self.spine_width_spin.setValue(sub.spine_width)
             self.spine_style_combo.setCurrentText(sub.spine_style)
+            i = self.aspect_combo.findData(sub.aspect)
+            self.aspect_combo.setCurrentIndex(i if i >= 0 else 0)
+            self.aspect_ratio_spin.setValue(sub.aspect_ratio)
+            self.aspect_ratio_spin.setEnabled(sub.aspect == "custom")
             self.legend_check.setChecked(sub.legend_visible)
             self.legend_loc_combo.setCurrentText(sub.legend_loc)
             self.legend_frame_check.setChecked(sub.legend_frame)
@@ -363,6 +378,10 @@ class AxesStyleWidget(QWidget):
             self._loading = False
         self._image_section.setVisible(sub.image is not None)
         self.image_widget.set_subplot(sub)
+
+    def _on_aspect_mode(self, _i):
+        self.aspect_ratio_spin.setEnabled(self.aspect_combo.currentData() == "custom")
+        self._push()
 
     def _push(self, *_):
         if self._loading or self._sub is None:
@@ -386,6 +405,8 @@ class AxesStyleWidget(QWidget):
         s.spine_color = self.spine_btn.color()
         s.spine_width = self.spine_width_spin.value()
         s.spine_style = self.spine_style_combo.currentText()
+        s.aspect = self.aspect_combo.currentData()
+        s.aspect_ratio = self.aspect_ratio_spin.value()
         s.legend_visible = self.legend_check.isChecked()
         s.legend_loc = self.legend_loc_combo.currentText()
         s.legend_frame = self.legend_frame_check.isChecked()
@@ -660,10 +681,11 @@ class TextDialog(_BaseEditDialog):
 
 
 class FigureDialog(_BaseEditDialog):
-    """Figure background and outer frame (border) settings."""
+    """Figure background, outer frame (border), and export size settings."""
 
     _FIELDS = ("fig_face_color", "fig_face_alpha", "fig_frame_on",
-               "fig_edge_color", "fig_edge_width", "fig_edge_style")
+               "fig_edge_color", "fig_edge_width", "fig_edge_style",
+               "fig_width_cm", "fig_height_cm")
 
     def __init__(self, sheet_model, on_change, parent=None):
         super().__init__(sheet_model, self._FIELDS, on_change, parent,
@@ -695,6 +717,14 @@ class FigureDialog(_BaseEditDialog):
         self.edge_style.currentTextChanged.connect(self._push)
         form.addRow("Border style:", self.edge_style)
 
+        self.width_cm_edit = QLineEdit(); self.width_cm_edit.setPlaceholderText("auto")
+        self.width_cm_edit.setText(_fmt(sheet_model.fig_width_cm))
+        self.width_cm_edit.editingFinished.connect(self._push)
+        self.height_cm_edit = QLineEdit(); self.height_cm_edit.setPlaceholderText("auto")
+        self.height_cm_edit.setText(_fmt(sheet_model.fig_height_cm))
+        self.height_cm_edit.editingFinished.connect(self._push)
+        form.addRow("Export size W x H (cm):", _pair(self.width_cm_edit, self.height_cm_edit))
+
         self._content_layout().addLayout(form)
 
     def _push(self, *_):
@@ -705,6 +735,8 @@ class FigureDialog(_BaseEditDialog):
         s.fig_edge_color = self.edge_btn.color()
         s.fig_edge_width = self.edge_width.value()
         s.fig_edge_style = self.edge_style.currentText()
+        s.fig_width_cm = _parse_float_or_none(self.width_cm_edit.text())
+        s.fig_height_cm = _parse_float_or_none(self.height_cm_edit.text())
         self._apply()
 
 

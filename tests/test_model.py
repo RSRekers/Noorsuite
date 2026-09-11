@@ -96,6 +96,15 @@ def test_subplotmodel_defaults_have_no_image_and_look_unchanged():
     assert s.image is None
     assert s.grid_axis == "both" and s.grid_ticks == "major"
     assert s.grid_style == "--" and abs(s.grid_alpha - 0.5) < 1e-9
+    assert s.aspect == "auto" and s.aspect_ratio == 1.0
+
+
+def test_subplotmodel_custom_aspect_ratio_roundtrips():
+    s = SubplotModel()
+    s.aspect = "custom"
+    s.aspect_ratio = 2.5
+    restored = SubplotModel.from_dict(s.to_dict())
+    assert restored.aspect == "custom" and restored.aspect_ratio == 2.5
 
 
 def test_imageobject_slice_3d_and_4d():
@@ -147,6 +156,14 @@ def test_sheetmodel_roundtrip_keeps_id_frame_tags_notes_and_colormaps():
     assert [c.name for c in restored.colormaps] == ["mine"]
     assert restored.colormaps[0].colors == ["#111111", "#222222"]
     assert restored.rows == 1 and restored.cols == 2 and len(restored.subplots) == 2
+
+
+def test_sheetmodel_export_size_defaults_to_auto_and_roundtrips():
+    sh = SheetModel("S")
+    assert sh.fig_width_cm is None and sh.fig_height_cm is None   # auto by default
+    sh.fig_width_cm, sh.fig_height_cm = 12.0, 8.5
+    restored = SheetModel.from_dict(sh.to_dict())
+    assert restored.fig_width_cm == 12.0 and restored.fig_height_cm == 8.5
 
 
 def test_project_roundtrip_with_tree_and_colormaps():

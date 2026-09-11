@@ -373,7 +373,7 @@ class SubplotModel:
 
     _FIELDS = ("title", "x_label", "y_label", "x_scale", "y_scale", "show_grid",
                "grid_axis", "grid_ticks", "grid_style", "grid_width", "grid_color",
-               "grid_alpha",
+               "grid_alpha", "aspect", "aspect_ratio",
                "x_min", "x_max", "y_min", "y_max",
                "tick_label_size", "face_color", "face_alpha",
                "spine_color", "spine_width", "spine_style",
@@ -388,6 +388,11 @@ class SubplotModel:
         self.x_scale = "linear"        # linear | log
         self.y_scale = "linear"
         self.show_grid = True
+        # Data aspect: "auto" (default) | "equal" (1:1) | "custom" (aspect_ratio, y-per-x
+        # data units). Ignored when the subplot has an image -- its own ImageRef.aspect
+        # governs there instead.
+        self.aspect = "auto"
+        self.aspect_ratio = 1.0
         self.grid_axis = "both"        # both | x | y
         self.grid_ticks = "major"     # major | minor | both
         self.grid_style = "--"
@@ -443,7 +448,8 @@ class SheetModel:
     """A tab holding an NxM grid of subplots."""
 
     _FIG_FIELDS = ("fig_face_color", "fig_face_alpha", "fig_frame_on",
-                   "fig_edge_color", "fig_edge_width", "fig_edge_style")
+                   "fig_edge_color", "fig_edge_width", "fig_edge_style",
+                   "fig_width_cm", "fig_height_cm")
 
     def __init__(self, name="Sheet 1", rows=1, cols=1, sheet_id=None):
         self.sheet_id = sheet_id or _new_id()
@@ -459,6 +465,11 @@ class SheetModel:
         self.fig_edge_color = "#000000"
         self.fig_edge_width = 0.0
         self.fig_edge_style = "-"
+        # Physical export size in cm; None (either) -> auto (current on-screen aspect,
+        # trimmed to content). Used by "Copy to clipboard" / "Export as SVG" only -- the
+        # on-screen figure still fills its tab like before.
+        self.fig_width_cm = None
+        self.fig_height_cm = None
 
         self.tags: list[str] = []
         self.colormaps: list[ColorMap] = []   # custom colormaps owned by this sheet

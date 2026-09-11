@@ -355,6 +355,17 @@ class PlotSheet(QWidget):
                 except Exception:
                     pass
 
+            # data aspect ratio (an image, drawn below, sets its own and wins there)
+            if sub.aspect == "equal":
+                ax.set_aspect("equal", adjustable="box")
+            elif sub.aspect == "custom":
+                try:
+                    ax.set_aspect(max(1e-9, float(sub.aspect_ratio)), adjustable="box")
+                except (TypeError, ValueError):
+                    ax.set_aspect("auto")
+            else:
+                ax.set_aspect("auto")
+
             ax.grid(False)
             if sub.show_grid:
                 if sub.grid_ticks in ("minor", "both"):

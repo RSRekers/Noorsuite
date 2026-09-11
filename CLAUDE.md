@@ -70,6 +70,19 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   interpolation / origin / aspect (`"equal"` by default) / alpha / colorbar. The image draws
   at `zorder=0` with `extent=[0,ncols,0,nrows]`, so `TraceRef`s overlay on top in the same
   coords.
+- **Data aspect ratio (non-image subplots).** `SubplotModel.aspect` — `"auto"` (default,
+  matplotlib's normal autoscale), `"equal"` (1:1), or `"custom"` (`aspect_ratio`, y data-units
+  displayed per x data-unit) — applied in `render` via `ax.set_aspect(..., adjustable="box")`
+  right after the x/y scales. It's set *before* the image layer, so a subplot with an image
+  ignores it: `ImageRef.aspect` (via `imshow`) is drawn later and wins there. UI: the
+  "Cosmetics" section of `AxesStyleWidget`.
+- **Figure export size.** `SheetModel.fig_width_cm` / `fig_height_cm` (`None`, `None` by
+  default = auto) set a physical output size for *export only* — "Copy to clipboard" and
+  "Export as SVG" (`SciSuiteWindow._savefig_at_export_size`) temporarily
+  `fig.set_size_inches(cm/2.54, ...)` and drop `bbox_inches="tight"` so the saved file is
+  exactly that size, then restore the on-screen figure size afterward; on-screen rendering is
+  untouched (the canvas still fills its tab, standard `FigureCanvasQTAgg` resize behaviour).
+  UI: the "Export size W x H (cm)" row in `FigureDialog` (double-click the figure background).
 - **Auto axis labels.** While a subplot's own `x_label` / `y_label` is blank, `render` fills
   it in (an explicit label always wins): from the image's `axis_names` for the two
   `display_axes` (so labels follow the Row/Col/Slice dropdowns), else from the plotted

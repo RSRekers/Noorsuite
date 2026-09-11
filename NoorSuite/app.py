@@ -1397,14 +1397,36 @@ class SciSuiteWindow(QMainWindow):
             return
         self._load_project_model(pm)
 
+    @staticmethod
+    def _export_figsize_in(sm) -> "tuple[float, float] | None":
+        """Explicit (width_in, height_in) for exporting `sm`'s figure, from its
+        cm size in the Figure dialog -- or None to keep the current on-screen size."""
+        if sm is not None and sm.fig_width_cm and sm.fig_height_cm:
+            return sm.fig_width_cm / 2.54, sm.fig_height_cm / 2.54
+        return None
+
+    def _savefig_at_export_size(self, cs, dest, fmt: str):
+        """savefig(dest, format=fmt) at the sheet's configured export size (or the
+        current on-screen size, trimmed, if none is set); restores the figure after."""
+        size = self._export_figsize_in(cs.model)
+        old = cs.fig.get_size_inches().copy() if size else None
+        if size:
+            cs.fig.set_size_inches(*size)
+        try:
+            cs.fig.savefig(dest, format=fmt, dpi=300, bbox_inches=None if size else "tight",
+                           facecolor=cs.fig.get_facecolor(),
+                           edgecolor=cs.fig.patch.get_edgecolor())
+        finally:
+            if size:
+                cs.fig.set_size_inches(*old)
+                cs.canvas.draw_idle()
+
     def copy_plot_to_clipboard(self):
         cs = self.current_sheet()
         if cs is None:
             return
         buf = BytesIO()
-        cs.fig.savefig(buf, format="png", dpi=300, bbox_inches="tight",
-                       facecolor=cs.fig.get_facecolor(),
-                       edgecolor=cs.fig.patch.get_edgecolor())
+        self._savefig_at_export_size(cs, buf, "png")
         QApplication.clipboard().setImage(QImage.fromData(buf.getvalue()))
         QMessageBox.information(self, "Clipboard", "Active sheet copied to clipboard (300 DPI).")
 
@@ -1414,9 +1436,7 @@ class SciSuiteWindow(QMainWindow):
             return
         path, _ = QFileDialog.getSaveFileName(self, "Export Sheet as SVG", "", "SVG Files (*.svg)")
         if path:
-            cs.fig.savefig(path, format="svg", bbox_inches="tight",
-                           facecolor=cs.fig.get_facecolor(),
-                           edgecolor=cs.fig.patch.get_edgecolor())
+            self._savefig_at_export_size(cs, path, "svg")
             QMessageBox.information(self, "Export Successful", f"Saved: {path}")
 
     def closeEvent(self, event):
