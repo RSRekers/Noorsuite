@@ -523,10 +523,12 @@ class SciSuiteWindow(QMainWindow):
         traces_body = QWidget()
         tb = QVBoxLayout(traces_body)
         tb.setContentsMargins(0, 0, 0, 0)
-        self.subplot_traces = QListWidget()
+        self.subplot_traces = ReorderList()
         self.subplot_traces.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.subplot_traces.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.subplot_traces.itemChanged.connect(self._on_subplot_trace_toggled)
         self.subplot_traces.itemSelectionChanged.connect(self._on_subplot_trace_selection)
+        self.subplot_traces.reordered.connect(self._on_traces_reordered)
         tb.addWidget(self.subplot_traces)
         rm_btn = QPushButton("Remove selected trace(s)")
         rm_btn.clicked.connect(self._remove_selected_subplot_traces)
@@ -1082,6 +1084,28 @@ class SciSuiteWindow(QMainWindow):
             if i is not None and i < len(sub.traces):
                 del sub.traces[i]
         self._sync_subplot_trace_list(keep_selection=False)
+        self.render_current_sheet()
+        self._refresh_ipc_snapshot()
+
+    def _on_traces_reordered(self, *_):
+        """Drag-drop reorder of the active subplot's trace list (one or several
+        dragged together -- Qt's InternalMove handles a multi-selection natively)."""
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        sub = sm.get_active_subplot()
+        order = [self.subplot_traces.item(i).data(Qt.ItemDataRole.UserRole)
+                 for i in range(self.subplot_traces.count())]
+        if sorted(order) != list(range(len(sub.traces))):
+            return
+        old_traces = sub.traces
+        moved = {id(old_traces[it.data(Qt.ItemDataRole.UserRole)])
+                 for it in self.subplot_traces.selectedItems()}
+        sub.traces = [old_traces[i] for i in order]
+        self._sync_subplot_trace_list(keep_selection=False)
+        for i in range(self.subplot_traces.count()):
+            if id(sub.traces[i]) in moved:
+                self.subplot_traces.item(i).setSelected(True)
         self.render_current_sheet()
         self._refresh_ipc_snapshot()
 

@@ -202,8 +202,14 @@ image `slider_bar` → collapsible **Notes** pane (`current_sheet()` still retur
 `PlotSheet`). Right, top→bottom: **rows/cols spinboxes**
 (`on_grid_changed`), the **subplot-order strip** (`ReorderList`, drag to reorder
 `SheetModel.subplots`; its multi-selection is the colormap "Selected subplots" scope), the
-active subplot's `TraceRef` list (`ExtendedSelection`; checkbox = `enabled`; >1 selected swaps
-`TraceStyleWidget` for `BulkTraceEditWidget`), the **`ColormapPanel`**, and the
+active subplot's `TraceRef` list (`self.subplot_traces`, also a `ReorderList` —
+`ExtendedSelection` + `InternalMove`; checkbox = `enabled`; >1 selected swaps `TraceStyleWidget`
+for `BulkTraceEditWidget`; drag one or several selected rows to reorder `sub.traces` —
+`_on_traces_reordered` reads the post-drop `UserRole` order, validates it's a permutation,
+rebuilds `sub.traces` and `_sync_subplot_trace_list`s, then re-selects the moved trace(s) by
+object identity, since their positions changed. Trace order drives both z-order — later
+entries draw on top — and legend order, so this is how to fix "right traces, wrong order/
+stacking"), the **`ColormapPanel`**, and the
 Axes / Trace Style / **Figure** inspector tabs (`inspector_tabs`; the Figure tab is
 `FigureStyleWidget` bound to the *active sheet* via `sync_active_subplot_inspector`, the same
 widget class `FigureDialog` wraps for the figure-background double-click editor). Fuzzy
