@@ -246,15 +246,28 @@ def aggregate_series(arrays: list) -> dict:
     }
 
 
-def split_into_repeats(values, n: int) -> dict:
-    """Split *one* already-concatenated series into consecutive blocks of ``n``
-    repeats and summarize each block -- the same statistics as :func:`aggregate_series`,
-    but for a single trace whose data is literally several repeat measurements stacked
-    end-to-end (``[x1_1..x1_n, x2_1..x2_n, ..., xa_1..xa_n]``) rather than several
-    separate traces. ``a = len(values) / n`` blocks in, ``a``-length arrays out.
+SPLIT_LAYOUTS = ["block", "sequence"]
+SPLIT_LAYOUT_LABELS = ["Blocks  (a a a  b b b  c c c ...)", "Sequence  (a b c ... a b c ...)"]
+
+
+def split_into_repeats(values, n: int, layout: str = "block") -> dict:
+    """Split *one* already-concatenated series into repeats and summarize them -- the
+    same statistics as :func:`aggregate_series`, but for a single trace whose data is
+    literally several repeat measurements stacked together, rather than several
+    separate traces. Both layouts reshape ``values`` to ``(len(values)/n, n)``; they
+    only differ in which axis is the "repeat" to aggregate over:
+
+    - ``"block"`` (default): ``n`` repeats *per condition*, one block after another --
+      ``[a1..an, b1..bn, ..., z1..zn]`` -- aggregates *within* each row (each block),
+      giving ``len(values)/n`` points (one per block/condition).
+    - ``"sequence"``: one full cycle of ``n`` conditions, the whole cycle repeated --
+      ``[a,b,...,z, a,b,...,z, ...]`` -- aggregates *down each column* (across
+      repeats of the same position in the cycle), giving ``n`` points (one per
+      position), each summarizing ``len(values)/n`` repeats of it.
 
     Returns ``{"mean", "std", "err_min", "err_max"}``. Raises :class:`ValueError` if
-    ``n < 1`` or ``len(values)`` isn't an exact multiple of ``n``.
+    ``n < 1``, ``len(values)`` isn't an exact multiple of ``n``, or ``layout`` isn't
+    one of :data:`SPLIT_LAYOUTS`.
     """
     values = np.asarray(values, dtype=float)
     n = int(n)
@@ -262,14 +275,17 @@ def split_into_repeats(values, n: int) -> dict:
         raise ValueError("repeat count must be at least 1")
     if len(values) == 0 or len(values) % n != 0:
         raise ValueError(f"{len(values)} value(s) is not a multiple of the repeat count {n}")
+    if layout not in SPLIT_LAYOUTS:
+        raise ValueError(f"layout must be one of {SPLIT_LAYOUTS}, got {layout!r}")
     stack = values.reshape(-1, n)
-    mean = stack.mean(axis=1)
-    std = stack.std(axis=1, ddof=1) if n > 1 else np.zeros_like(mean)
+    axis = 0 if layout == "sequence" else 1
+    mean = stack.mean(axis=axis)
+    std = stack.std(axis=axis, ddof=1) if stack.shape[axis] > 1 else np.zeros_like(mean)
     return {
         "mean": mean,
         "std": std,
-        "err_min": mean - stack.min(axis=1),
-        "err_max": stack.max(axis=1) - mean,
+        "err_min": mean - stack.min(axis=axis),
+        "err_max": stack.max(axis=axis) - mean,
     }
 
 

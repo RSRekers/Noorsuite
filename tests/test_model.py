@@ -80,10 +80,10 @@ def test_aggregate_series_rejects_bad_input():
         aggregate_series([[1.0, 2.0], [1.0, 2.0, 3.0]])     # mismatched lengths
 
 
-def test_split_into_repeats_mean_std_minmax():
-    # one concatenated series: 3 blocks of n=3 repeats each
+def test_split_into_repeats_block_layout_mean_std_minmax():
+    # one concatenated series: 3 blocks of n=3 repeats each -- "a a a  b b b  c c c"
     values = [1.0, 2.0, 3.0,   10.0, 20.0, 30.0,   100.0, 200.0, 300.0]
-    agg = split_into_repeats(values, 3)
+    agg = split_into_repeats(values, 3, layout="block")
     np.testing.assert_allclose(agg["mean"], [2.0, 20.0, 200.0])
     np.testing.assert_allclose(agg["std"], [np.std([1.0, 2.0, 3.0], ddof=1),
                                             np.std([10.0, 20.0, 30.0], ddof=1),
@@ -92,13 +92,39 @@ def test_split_into_repeats_mean_std_minmax():
     np.testing.assert_allclose(agg["err_max"], [1.0, 10.0, 100.0])   # max - mean
 
 
-def test_split_into_repeats_rejects_bad_repeat_count():
+def test_split_into_repeats_sequence_layout_mean_std_minmax():
+    # one full cycle of n=3 positions (a,b,c), repeated 3 times -- "a b c  a b c  a b c"
+    a_vals, b_vals, c_vals = [1.0, 2.0, 3.0], [10.0, 20.0, 30.0], [100.0, 200.0, 300.0]
+    values = []
+    for i in range(3):
+        values += [a_vals[i], b_vals[i], c_vals[i]]
+    agg = split_into_repeats(values, 3, layout="sequence")
+    np.testing.assert_allclose(agg["mean"], [2.0, 20.0, 200.0])   # one point per position
+    np.testing.assert_allclose(agg["std"], [np.std(a_vals, ddof=1), np.std(b_vals, ddof=1),
+                                            np.std(c_vals, ddof=1)])
+    np.testing.assert_allclose(agg["err_min"], [1.0, 10.0, 100.0])
+    np.testing.assert_allclose(agg["err_max"], [1.0, 10.0, 100.0])
+
+
+def test_split_into_repeats_block_vs_sequence_differ_on_the_same_data():
+    # same raw values, different layout interpretation -> different groupings/results
+    values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    block = split_into_repeats(values, 3, layout="block")       # [1,2,3] | [4,5,6]
+    seq = split_into_repeats(values, 3, layout="sequence")      # cols: [1,4] [2,5] [3,6]
+    np.testing.assert_allclose(block["mean"], [2.0, 5.0])
+    np.testing.assert_allclose(seq["mean"], [2.5, 3.5, 4.5])
+    assert len(block["mean"]) != len(seq["mean"])
+
+
+def test_split_into_repeats_rejects_bad_repeat_count_or_layout():
     with pytest.raises(ValueError):
         split_into_repeats([1.0, 2.0, 3.0], 2)   # 3 is not a multiple of 2
     with pytest.raises(ValueError):
         split_into_repeats([1.0, 2.0, 3.0], 0)
     with pytest.raises(ValueError):
         split_into_repeats([], 1)
+    with pytest.raises(ValueError):
+        split_into_repeats([1.0, 2.0, 3.0, 4.0], 2, layout="nonsense")
 
 
 def test_common_label_prefix_and_suffix_and_fallback():

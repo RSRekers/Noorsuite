@@ -244,15 +244,29 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   dispatches on the count):
   - **One trace selected** → `_split_single_trace_dialog` / `SplitAggregateDialog`:
     for a trace whose own data is *itself* several repeat measurements concatenated
-    end-to-end (`[x1_1..x1_n, x2_1..x2_n, ..., xa_1..xa_n]`, e.g. `n` reps of `a`
-    conditions read off one instrument in one long sweep) — pick the repeat count `n`
-    and `model.split_into_repeats(values, n)` (Qt-free: reshapes to `(a, n)` and
-    summarizes each row; raises `ValueError` if `n < 1` or the length isn't an exact
-    multiple of `n`) turns the `a*n`-point trace into `a` points. The trace's x values
-    are reduced the same way (reshaped to `(a, n)`, meaned per row) via
-    `_split_and_aggregate_trace` — this only makes sense when x is constant (or a
-    tight sweep) *within* each block, e.g. a genuine per-condition x column, or a plain
-    row index where the mean-per-block is still a sane "block center".
+    together, rather than a genuinely single series. Two ways that can be laid out —
+    pick one from the dialog's "Layout" combo (`model.SPLIT_LAYOUTS` /
+    `SPLIT_LAYOUT_LABELS`) alongside the repeat count `n`:
+    - **`"block"`** (default): `n` repeats *per condition*, blocks back-to-back —
+      `[a1..an, b1..bn, ..., z1..zn]` — each block collapses to one point, so an
+      `a*n`-point trace becomes `a` points.
+    - **`"sequence"`**: one full cycle of `n` conditions, the whole cycle repeated —
+      `[a,b,...,z, a,b,...,z, ...]` — each *position in the cycle* collapses to one
+      point (aggregated across every repeat of it), so an `a*n`-point trace becomes
+      `n` points. This is the shape a single long instrument sweep across `n`
+      conditions, repeated `a` times, actually comes back as — reading it as `"block"`
+      instead silently mixes different conditions' values together into one "block",
+      giving wrong x positions and meaningless statistics.
+    `model.split_into_repeats(values, n, layout=...)` (Qt-free) does the work: both
+    layouts reshape to `(len(values)/n, n)` and only differ in *which axis* is
+    aggregated (`axis=1` per-row for `"block"`, `axis=0` per-column for `"sequence"`);
+    raises `ValueError` for `n < 1`, a length that isn't an exact multiple of `n`, or
+    an unrecognized `layout`. The trace's x values are reduced the same way in
+    `_split_and_aggregate_trace` (same reshape, same axis) — for `"block"` that's one
+    x per block (mean within it, so x must be ~constant within a block); for
+    `"sequence"` that's one x per cycle position (mean *across* repeats of it, so x
+    must repeat the same per-position values every cycle — e.g. a condition index or
+    a within-cycle time axis).
   - **2+ traces selected** → `_combine_multiple_traces_dialog` / `CombineTracesDialog`:
     for separate repeat traces already added individually (e.g. via the column
     picker), sharing the same x values — resolves each via its own

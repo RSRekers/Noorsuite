@@ -38,10 +38,10 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_REMOVE_DATA,
                   ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
-from .model import (INDEX_COL, PLOT_TYPES, ColorMap, DataObject, ImageObject,
-                    ImageRef, ProjectModel, SheetModel, SubplotModel, TraceRef,
-                    _new_id, aggregate_series, common_label, resolve_sidecar_names,
-                    split_into_repeats)
+from .model import (INDEX_COL, PLOT_TYPES, SPLIT_LAYOUT_LABELS, SPLIT_LAYOUTS,
+                    ColorMap, DataObject, ImageObject, ImageRef, ProjectModel,
+                    SheetModel, SubplotModel, TraceRef, _new_id, aggregate_series,
+                    common_label, resolve_sidecar_names, split_into_repeats)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
 
@@ -559,11 +559,10 @@ class CombineTracesDialog(QDialog):
 
 class SplitAggregateDialog(QDialog):
     """"Combine into mean +/- error trace..." on exactly ONE selected trace whose data
-    is itself several repeat measurements concatenated end-to-end -- e.g.
-    ``[x1_1..x1_n, x2_1..x2_n, ..., xa_1..xa_n]`` -- rather than several separate
-    traces. Splits it into consecutive blocks of the given repeat count and shows each
-    block's mean, with the std. deviation or min/max span available as an error-bar
-    overlay -- see model.split_into_repeats."""
+    is itself several repeat measurements concatenated together, rather than several
+    separate traces. Splits it into repeats per the chosen layout and shows the
+    resulting mean, with the std. deviation or min/max span available as an error-bar
+    overlay -- see model.split_into_repeats for what "Blocks" vs "Sequence" mean."""
 
     def __init__(self, ref, n_values: int, parent=None):
         super().__init__(parent)
@@ -572,11 +571,21 @@ class SplitAggregateDialog(QDialog):
         layout = QVBoxLayout(self)
         info = QLabel(
             f"'{ref.display_label}' has {n_values} points, read as several repeat "
-            "measurements stacked back-to-back. Pick the repeat count below to split "
-            "it into consecutive blocks and plot each block's mean, with the std. "
-            "deviation or the min/max span available as an error-bar overlay.")
+            "measurements. Pick how they're laid out and the repeat count below.")
         info.setWordWrap(True)
         layout.addWidget(info)
+
+        form0 = QHBoxLayout()
+        form0.addWidget(QLabel("Layout:"))
+        self.layout_combo = QComboBox()
+        self.layout_combo.addItems(SPLIT_LAYOUT_LABELS)
+        self.layout_combo.currentIndexChanged.connect(self._update_summary)
+        form0.addWidget(self.layout_combo, 1)
+        layout.addLayout(form0)
+        self.layout_info = QLabel()
+        self.layout_info.setWordWrap(True)
+        self.layout_info.setStyleSheet("color: #808080; font-style: italic;")
+        layout.addWidget(self.layout_info)
 
         form = QHBoxLayout()
         form.addWidget(QLabel("Repeat count (n):"))
@@ -608,17 +617,35 @@ class SplitAggregateDialog(QDialog):
         layout.addWidget(self.buttons)
         self._update_summary()
 
+    def _layout(self) -> str:
+        return SPLIT_LAYOUTS[self.layout_combo.currentIndex()]
+
     def _update_summary(self, *_):
         n = self.n_spin.value()
+        layout_kind = self._layout()
         ok = n >= 1 and self._n_values % n == 0
-        self.summary_label.setText(
-            f"{self._n_values} point(s) / n={n} -> {self._n_values // n} point(s)."
-            if ok else f"{self._n_values} point(s) is not a multiple of n={n}.")
+        if not ok:
+            self.summary_label.setText(f"{self._n_values} point(s) is not a multiple of n={n}.")
+        elif layout_kind == "block":
+            self.summary_label.setText(
+                f"{self._n_values} point(s) / n={n} repeats per block -> "
+                f"{self._n_values // n} point(s), one per block.")
+            self.layout_info.setText(
+                "n consecutive points are one block (repeats of the same condition); "
+                "each block collapses to one point.")
+        else:
+            self.summary_label.setText(
+                f"{self._n_values} point(s) / one cycle of n={n} -> {n} point(s), "
+                f"each averaged over {self._n_values // n} repeats of the cycle.")
+            self.layout_info.setText(
+                "n consecutive points are one full cycle through every condition; the "
+                "cycle repeats, and each position in it collapses to one point.")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
 
     def selection(self):
-        """Return ``(n, plot_type, remove_original)``."""
-        return self.n_spin.value(), self.style_combo.currentText(), self.remove_check.isChecked()
+        """Return ``(n, layout, plot_type, remove_original)``."""
+        return (self.n_spin.value(), self._layout(), self.style_combo.currentText(),
+                self.remove_check.isChecked())
 
 
 # =====================================================================
@@ -1177,9 +1204,9 @@ class SciSuiteWindow(QMainWindow):
             self._combine_multiple_traces_dialog(sm, refs)
 
     def _split_single_trace_dialog(self, sm, ref):
-        """Split one trace's own (already resolved) data into consecutive blocks of a
-        repeat count and aggregate each block -- see :class:`SplitAggregateDialog` /
-        model.split_into_repeats."""
+        """Split one trace's own (already resolved) data into repeats and aggregate
+        them -- see :class:`SplitAggregateDialog` / model.split_into_repeats for the
+        "block" vs "sequence" layouts."""
         data = self.repository.get(ref.data_id)
         if data is None or ref.y_col not in data.columns:
             QMessageBox.warning(self, "Can't split",
@@ -1197,16 +1224,21 @@ class SciSuiteWindow(QMainWindow):
         dlg = SplitAggregateDialog(ref, len(y), self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        n, plot_type, remove_original = dlg.selection()
-        self._split_and_aggregate_trace(sm, ref, x, y, n, plot_type, remove_original)
+        n, layout, plot_type, remove_original = dlg.selection()
+        self._split_and_aggregate_trace(sm, ref, x, y, n, layout, plot_type, remove_original)
 
-    def _split_and_aggregate_trace(self, sm, ref, x, y, n, plot_type, remove_original):
+    def _split_and_aggregate_trace(self, sm, ref, x, y, n, layout, plot_type, remove_original):
         try:
-            agg = split_into_repeats(y, n)
+            agg = split_into_repeats(y, n, layout=layout)
         except ValueError as e:
             QMessageBox.warning(self, "Can't split", str(e))
             return
-        x_reduced = np.asarray(x, dtype=float).reshape(-1, n).mean(axis=1)
+        # x is reduced the same way y was aggregated: one x per resulting point,
+        # averaged over whichever axis split_into_repeats collapsed for this layout --
+        # each block's x for "block", each cycle-position's x (across repeats) for
+        # "sequence".
+        x_axis = 0 if layout == "sequence" else 1
+        x_reduced = np.asarray(x, dtype=float).reshape(-1, n).mean(axis=x_axis)
         columns = {"x": x_reduced, "mean": agg["mean"], "std": agg["std"],
                   "err_min": agg["err_min"], "err_max": agg["err_max"]}
         new_obj = DataObject(f"{ref.display_label} (n={n} mean±err)", columns,
