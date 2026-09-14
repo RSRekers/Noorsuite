@@ -38,10 +38,12 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_REMOVE_DATA,
                   ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
-from .model import (INDEX_COL, PLOT_TYPES, SPLIT_LAYOUT_LABELS, SPLIT_LAYOUTS,
-                    ColorMap, DataObject, ImageObject, ImageRef, ProjectModel,
-                    SheetModel, SubplotModel, TraceRef, _new_id, aggregate_series,
-                    common_label, resolve_sidecar_names, split_into_repeats)
+from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
+                    REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
+                    SPLIT_LAYOUTS, ColorMap, DataObject, ImageObject, ImageRef,
+                    ProjectModel, SheetModel, SubplotModel, TraceRef, _new_id,
+                    aggregate_series, common_label, resolve_sidecar_names,
+                    split_into_repeats)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
 
@@ -648,6 +650,97 @@ class SplitAggregateDialog(QDialog):
                 self.remove_check.isChecked())
 
 
+class NormalizeTracesDialog(QDialog):
+    """"Normalize traces..." on 1+ selected traces in the active subplot's trace list --
+    rescale each as a relative change (fraction or percent) from a fixed value or from
+    its own value at a chosen row. Sets ``TraceRef.scale_factor`` (``REL_VALUE_PREFIX``
+    / ``REL_INDEX_PREFIX``), the same mechanism the Trace Style tab's Y-transform combo
+    uses, just applied to the whole selection in one action -- so it works exactly the
+    same whether or not a trace carries an error-bar overlay: ``TraceRef.resolve_yerr``
+    rescales the error to match (see model._yerr_scale)."""
+
+    def __init__(self, refs: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Normalize traces")
+        layout = QVBoxLayout(self)
+        names = ", ".join(r.display_label for r in refs)
+        n_err = sum(1 for r in refs if r.has_error_data)
+        note = (f" {n_err} of them carry an error-bar overlay -- its error is "
+                "rescaled to match." if n_err else "")
+        info = QLabel(
+            f"Normalize {len(refs)} trace(s) ({names}) as a relative change from a "
+            f"reference, applied to every one of them.{note}")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QHBoxLayout()
+        form.addWidget(QLabel("Reference:"))
+        self.ref_combo = QComboBox()
+        self.ref_combo.addItems(
+            ["No normalization (1x)", "Fixed value", "Each trace's own nth point"])
+        self.ref_combo.currentIndexChanged.connect(self._update_visibility)
+        form.addWidget(self.ref_combo, 1)
+        layout.addLayout(form)
+
+        form2 = QHBoxLayout()
+        self.value_label = QLabel("Value:")
+        form2.addWidget(self.value_label)
+        self.value_edit = QLineEdit()
+        self.value_edit.setPlaceholderText("reference value, e.g. 100")
+        form2.addWidget(self.value_edit, 1)
+        layout.addLayout(form2)
+
+        form3 = QHBoxLayout()
+        self.index_label = QLabel("Row index (n):")
+        form3.addWidget(self.index_label)
+        self.index_spin = QSpinBox()
+        self.index_spin.setRange(0, 1_000_000)
+        self.index_spin.setToolTip(
+            "Each trace is normalized to its OWN value at this row -- not a shared "
+            "value -- so traces with different baselines still end up comparable.")
+        form3.addWidget(self.index_spin)
+        layout.addLayout(form3)
+
+        form4 = QHBoxLayout()
+        self.mode_label = QLabel("Expressed as:")
+        form4.addWidget(self.mode_label)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(REL_MODE_LABELS)
+        form4.addWidget(self.mode_combo, 1)
+        layout.addLayout(form4)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self._update_visibility()
+
+    def _update_visibility(self, *_):
+        kind = self.ref_combo.currentIndex()   # 0 none, 1 fixed value, 2 nth point
+        for w in (self.value_label, self.value_edit):
+            w.setVisible(kind == 1)
+        for w in (self.index_label, self.index_spin):
+            w.setVisible(kind == 2)
+        for w in (self.mode_label, self.mode_combo):
+            w.setVisible(kind in (1, 2))
+
+    def selection(self) -> str:
+        """Return the ``scale_factor`` token to apply to every selected trace."""
+        kind = self.ref_combo.currentIndex()
+        mode = REL_MODES[self.mode_combo.currentIndex()]
+        if kind == 1:
+            try:
+                value = float(self.value_edit.text())
+            except ValueError:
+                value = 0.0
+            return f"{REL_VALUE_PREFIX}{mode}:{value}"
+        if kind == 2:
+            return f"{REL_INDEX_PREFIX}{mode}:{self.index_spin.value()}"
+        return "1x"
+
+
 # =====================================================================
 # Main window
 # =====================================================================
@@ -859,6 +952,15 @@ class SciSuiteWindow(QMainWindow):
         self.combine_btn.setEnabled(False)
         self.combine_btn.clicked.connect(self._combine_selected_traces_dialog)
         tb.addWidget(self.combine_btn)
+        self.normalize_btn = QPushButton("Normalize traces...")
+        self.normalize_btn.setToolTip(
+            "Rescale the selected trace(s) as a relative change (fraction or percent) "
+            "from a fixed value or from each trace's own value at a chosen row -- "
+            "works the same on a plain trace or one with an error-bar overlay (the "
+            "error is rescaled to match).")
+        self.normalize_btn.setEnabled(False)
+        self.normalize_btn.clicked.connect(self._normalize_selected_traces_dialog)
+        tb.addWidget(self.normalize_btn)
         layout.addWidget(CollapsibleSection("Active subplot traces (tick = shown)", traces_body))
 
         self.colormap_panel = ColormapPanel(self)
@@ -1183,6 +1285,27 @@ class SciSuiteWindow(QMainWindow):
         self._render_sheet(sm.sheet_id)
         if sm is self._active_sheet_model():
             self._sync_subplot_trace_list()
+        self._refresh_ipc_snapshot()
+
+    def _normalize_selected_traces_dialog(self):
+        """"Normalize traces..." on 1+ selected traces -- see
+        :class:`NormalizeTracesDialog`. Just sets ``scale_factor`` on each (the same
+        field the Trace Style tab's Y-transform combo edits one trace at a time), so it
+        renders instantly and works identically for a trace with or without an
+        error-bar overlay -- no new data object, nothing to undo but resetting the
+        transform."""
+        refs = self._selected_trace_refs()
+        if not refs:
+            return
+        dlg = NormalizeTracesDialog(refs, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        token = dlg.selection()
+        for ref in refs:
+            ref.scale_factor = token
+        self.render_current_sheet()
+        if len(refs) == 1:
+            self.trace_widget.set_trace(refs[0])   # refresh the now-stale style panel
         self._refresh_ipc_snapshot()
 
     def _combine_selected_traces_dialog(self):
@@ -1635,6 +1758,7 @@ class SciSuiteWindow(QMainWindow):
             self.inspector_tabs.setCurrentIndex(1)   # surface the (bulk or single) editor
         self.trace_broadcast_btn.setEnabled(len(refs) == 1)
         self.combine_btn.setEnabled(len(refs) >= 1)
+        self.normalize_btn.setEnabled(len(refs) >= 1)
 
     def _apply_trace_style_to_all_traces(self):
         """Copy the one selected trace's line/marker style to every other trace in

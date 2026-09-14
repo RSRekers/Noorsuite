@@ -173,16 +173,17 @@ def apply_numeric_expr(current: float, expr: str):
         return None
 
 
-def _yerr_scale(factor: str) -> float:
+def _yerr_scale(factor: str, y=None) -> float:
     """Linear multiplier implied by a ``TraceRef.scale_factor`` token, used to keep an
     error-bar column consistent with :meth:`TraceRef.resolve`'s y-transform. ``Log10``
-    and ``Norm`` don't have a meaningful error-bar scaling, so they're left at 1.0, and
-    neither does ``REL_INDEX_PREFIX`` (its reference comes from the data itself, not the
-    token, so there's no fixed multiplier to derive) -- normalize each series *before*
-    aggregating it instead (see :func:`aggregate_series`) if error bars need to reflect
-    a per-row-index baseline. ``REL_VALUE_PREFIX`` (a fixed reference for every point) is
-    linear -- (y-ref)/ref -- so its 1/ref (or 100/ref for percent) multiplier applies
-    cleanly to an error column, which only needs its magnitude scaled, not shifted."""
+    and ``Norm`` don't have a meaningful error-bar scaling, so they're left at 1.0.
+    ``REL_VALUE_PREFIX`` (a fixed reference for every point) is linear -- (y-ref)/ref --
+    so its 1/ref (or 100/ref for percent) multiplier applies cleanly to an error column,
+    which only needs its magnitude scaled, not shifted. ``REL_INDEX_PREFIX``'s reference
+    comes from the data itself (``y[row index]``) rather than the token, so it also
+    needs the trace's own *raw* y column (the same array :func:`apply_y_transform` uses
+    to resolve that same reference for the y-transform, so they stay consistent) --
+    when ``y`` isn't given, it degrades to 1.0 (unscaled)."""
     if factor.startswith(CUSTOM_FACTOR_PREFIX):
         try:
             return float(factor[len(CUSTOM_FACTOR_PREFIX):])
@@ -194,6 +195,19 @@ def _yerr_scale(factor: str) -> float:
             ref = float(rest)
         except ValueError:
             return 1.0
+        if ref == 0:
+            return 1.0
+        return (100.0 if mode == "pct" else 1.0) / ref
+    if factor.startswith(REL_INDEX_PREFIX):
+        if y is None or len(y) == 0:
+            return 1.0
+        mode, _, rest = factor[len(REL_INDEX_PREFIX):].partition(":")
+        try:
+            idx = int(float(rest))
+        except ValueError:
+            return 1.0
+        y = np.asarray(y, dtype=float)
+        ref = float(y[int(np.clip(idx, 0, len(y) - 1))])
         if ref == 0:
             return 1.0
         return (100.0 if mode == "pct" else 1.0) / ref
@@ -443,7 +457,11 @@ class TraceRef:
         (lower, upper) offsets from :attr:`yerr_low_col` / :attr:`yerr_high_col`;
         otherwise a 1-D symmetric array from :attr:`yerr_col`.
         """
-        scale = _yerr_scale(self.scale_factor)
+        try:
+            y_raw = data_object.get(self.y_col)
+        except KeyError:
+            y_raw = None
+        scale = _yerr_scale(self.scale_factor, y_raw)
         if self.yerr_mode == "minmax" and self.yerr_low_col and self.yerr_high_col:
             lo = np.asarray(data_object.get(self.yerr_low_col), dtype=float) * scale
             hi = np.asarray(data_object.get(self.yerr_high_col), dtype=float) * scale

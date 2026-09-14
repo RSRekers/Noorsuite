@@ -313,6 +313,25 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   row index, depending which of the two is picked) and `relmode_combo` (frac/pct) only
   for these two transform choices (`_on_transform_changed` / `_set_row_visible`, the
   same show/hide pattern as the "Show error bars" row and the "custom factor" field).
+  `_yerr_scale(factor, y=None)` derives the matching multiplier for an error column:
+  `REL_VALUE_PREFIX` is linear in the token alone (`100/ref` or `1/ref`); `REL_INDEX_PREFIX`
+  needs the trace's own *raw* y column to resolve `y[row index]` the same way
+  `apply_y_transform` does, which `TraceRef.resolve_yerr` now fetches itself
+  (`data_object.get(self.y_col)`, the pre-transform values) and passes through — so an
+  error-bar trace normalized to "its own nth point" gets its std/min-max rescaled to
+  match the mean, not left at the raw scale. Without a `y` array (or `ref == 0`),
+  `_yerr_scale` degrades to `1.0` (unscaled) rather than raising.
+
+  **Batch UI**: select 1+ traces in the trace list and click **"Normalize traces..."**
+  (`self.normalize_btn`, enabled at 1+ selected, next to "Combine...") →
+  `_normalize_selected_traces_dialog` / `NormalizeTracesDialog` — pick "No
+  normalization" / "Fixed value" / "Each trace's own nth point" or plus fraction/percent,
+  and it sets that one `scale_factor` token on *every* selected trace at once (the same
+  field the Trace Style tab's Y-transform combo edits one at a time) — no new data
+  object, so it's instant and trivially reversible ("No normalization" resets to
+  `"1x"`), and it already works identically on a plain trace or one with an error-bar
+  overlay via the `_yerr_scale` fix above (the dialog surfaces how many of the
+  selection carry one, as a reminder that their error rescales too).
 
 - **`ProjectModel` is the only serialization root** — `.sciproj` files *and* the
   `~/.scisuite_session.json` autosave. It carries `data_objects`, `images`, `sheets`
@@ -392,9 +411,11 @@ identity, since their positions changed. Trace order drives both z-order — lat
 on top — and legend order, so this is how to fix "right traces, wrong order/stacking".
 Selecting any trace(s) here — one or several — also flips `inspector_tabs` to "Trace Style",
 so the style/Y-transform controls are visible regardless of which tab was open; any
-selection also enables **"Combine into mean ± error trace..."** below "Remove selected
-trace(s)" (one selected -> split its own data into repeats; 2+ -> combine them) — see
-"Error bars are an overlay, not a plot type" above), the
+selection also enables two buttons below "Remove selected trace(s)": **"Combine into
+mean ± error trace..."** (one selected -> split its own data into repeats; 2+ ->
+combine them — see "Error bars are an overlay, not a plot type" above) and
+**"Normalize traces..."** (batch-sets a relative-change `scale_factor` on the whole
+selection — see "Relative-change Y-transforms" above)), the
 **`ColormapPanel`**, and the
 Axes / Trace Style / **Figure** inspector tabs (`inspector_tabs`; the Figure tab is
 `FigureStyleWidget` bound to the *active sheet* via `sync_active_subplot_inspector`, the same

@@ -4,8 +4,9 @@ import pytest
 from NoorSuite.model import (INDEX_COL, PROJECT_VERSION, REL_INDEX_PREFIX,
                             REL_VALUE_PREFIX, ColorMap, DataObject, ImageObject,
                             ImageRef, ProjectModel, SheetModel, SubplotModel,
-                            TraceRef, aggregate_series, apply_y_transform,
-                            common_label, resolve_sidecar_names, split_into_repeats)
+                            TraceRef, _yerr_scale, aggregate_series,
+                            apply_y_transform, common_label, resolve_sidecar_names,
+                            split_into_repeats)
 
 
 def _obj(name="run", n=6):
@@ -213,22 +214,33 @@ def test_relative_change_handles_zero_reference_gracefully():
     np.testing.assert_allclose(out, [0.0, 1.0, 2.0])   # denom falls back to 1.0, no crash
 
 
-def test_yerr_scale_linear_for_rel_value_not_for_rel_index():
-    obj = DataObject("agg", {"t": [0.0], "mean": [50.0], "std": [10.0]},
+def test_yerr_scale_linear_for_rel_value_and_rel_index():
+    obj = DataObject("agg", {"t": [0.0, 1.0], "mean": [50.0, 100.0], "std": [10.0, 5.0]},
                      column_order=["t", "mean", "std"])
     ref = TraceRef(obj.id, "t", "mean")
     ref.yerr_col = "std"
 
     ref.scale_factor = f"{REL_VALUE_PREFIX}pct:50"    # (y-ref)/ref*100 -> multiplier 100/50=2
-    np.testing.assert_allclose(ref.resolve_yerr(obj), [20.0])
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [20.0, 10.0])
 
     ref.scale_factor = f"{REL_VALUE_PREFIX}frac:50"   # (y-ref)/ref -> multiplier 1/50
-    np.testing.assert_allclose(ref.resolve_yerr(obj), [0.2])
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [0.2, 0.1])
 
-    # REL_INDEX's reference comes from the data, not the token -- no fixed multiplier
-    # can be derived from scale_factor alone, so the error is left unscaled (1.0)
-    ref.scale_factor = f"{REL_INDEX_PREFIX}frac:0"
-    np.testing.assert_allclose(ref.resolve_yerr(obj), [10.0])
+    # REL_INDEX's reference comes from the trace's own y column (y[row index]) rather
+    # than the token -- resolve_yerr fetches that same raw column itself, so the error
+    # scales consistently with the y-transform even though the ref isn't in the token
+    ref.scale_factor = f"{REL_INDEX_PREFIX}frac:0"    # ref = mean[0] = 50 -> multiplier 1/50
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [0.2, 0.1])
+
+    ref.scale_factor = f"{REL_INDEX_PREFIX}pct:1"     # ref = mean[1] = 100 -> multiplier 100/100=1
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [10.0, 5.0])
+
+
+def test_yerr_scale_rel_index_degrades_gracefully_without_y_data():
+    # _yerr_scale itself falls back to 1.0 when no y array is available at all
+    assert _yerr_scale(f"{REL_INDEX_PREFIX}frac:0") == 1.0
+    assert _yerr_scale(f"{REL_INDEX_PREFIX}frac:0", []) == 1.0
+    assert _yerr_scale(f"{REL_INDEX_PREFIX}frac:0", [0.0, 0.0]) == 1.0   # ref == 0
 
 
 def test_subplotmodel_roundtrip_includes_traces_grid_and_image():
