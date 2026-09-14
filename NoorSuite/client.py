@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
@@ -183,6 +184,30 @@ class SciSuiteClient:
         return pd.DataFrame({c: resp["columns"][c] for c in order}, columns=order)
 
     get_dataframe = get_data
+
+    @contextmanager
+    def edit_data(self, key):
+        """Pull, edit, and push back a data object in one block -- there is no live
+        link between a DataFrame in your notebook and the object in the pool, so a
+        change is only visible in the GUI once it's pushed back; this is that in one
+        step instead of two, and can't forget the push::
+
+            with suite.edit_data("spectra") as df:
+                df["ratio"] = df["a"] / df["b"]
+            # pushed back automatically here, open sheets already re-rendered
+
+        Raises the same ``KeyError`` as :meth:`get_data` if ``key`` isn't found, and
+        does *not* push if the block raises. ``key`` may be an id or a name --
+        either way the push-back targets the object's actual name, so it lands back
+        on the same object even if you looked it up by id.
+        """
+        resp = self._ipc.send({"action": ACTION_GET_DATA, "key": key}) or {}
+        if resp.get("status") != "success":
+            raise KeyError(resp.get("message", f"no data object matching {key!r}"))
+        order = resp.get("column_order") or list(resp.get("columns", {}))
+        df = pd.DataFrame({c: resp["columns"][c] for c in order}, columns=order)
+        yield df
+        self.push_dataframe(df, name=resp["name"], mode="update")
 
     # ---------------------------------------------------------------------- plot
     def plot(self, data, x, y, *, name=None, sheet=None, subplot=0, new_sheet=False):

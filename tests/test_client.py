@@ -4,7 +4,7 @@ import pandas as pd
 from NoorSuite.client import SciSuiteClient
 from NoorSuite.protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                                ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
-                               ACTION_APPEND_TRACE)
+                               ACTION_APPEND_TRACE, ACTION_GET_DATA)
 
 
 class _Recorder:
@@ -171,3 +171,42 @@ def test_get_data_builds_dataframe_and_roundtrips():
     client.push_dataframe(df, name="spectra", mode="update")
     p = rec.last
     assert p["mode"] == "update" and "ratio" in p["column_order"]
+
+
+def test_edit_data_pulls_edits_and_pushes_back_in_one_block():
+    client, rec = _client()
+    get_response = {
+        "status": "success", "id": "d1", "name": "spectra",
+        "column_order": ["wl", "a", "b"],
+        "columns": {"wl": [1, 2, 3], "a": [4, 5, 6], "b": [7, 8, 9]},
+    }
+
+    def fake_send(payload, timeout=5.0):
+        rec.payloads.append(payload)
+        return get_response if payload["action"] == ACTION_GET_DATA else {"status": "success"}
+
+    rec.send = fake_send
+    with client.edit_data("d1") as df:      # looked up by id...
+        df["ratio"] = df["a"] / df["b"]
+    p = rec.payloads[-1]
+    assert p["action"] == ACTION_APPEND_DATAFRAME
+    assert p["mode"] == "update"
+    assert p["name"] == "spectra"           # ...but pushed back by its actual name
+    assert "ratio" in p["column_order"]
+
+
+def test_edit_data_raises_for_unknown_key_and_does_not_push():
+    client, rec = _client()
+
+    def fake_send(payload, timeout=5.0):
+        rec.payloads.append(payload)
+        return {"status": "error", "message": "nope"}
+
+    rec.send = fake_send
+    try:
+        with client.edit_data("missing") as df:
+            df["x"] = 1
+        assert False, "expected KeyError"
+    except KeyError:
+        pass
+    assert len(rec.payloads) == 1   # only the failed lookup -- no push was attempted

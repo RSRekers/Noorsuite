@@ -1091,14 +1091,18 @@ class SciSuiteWindow(QMainWindow):
         if self.current_sheet():
             self._sync_grid_spinners()
             self.sync_active_subplot_inspector()
-            self._sync_subplot_trace_list()
+            self._sync_subplot_trace_list(keep_selection=False)
             self._sync_subplot_strip()
             self.render_current_sheet()
             self.colormap_panel.refresh()
 
     def on_subplot_selection_changed(self, _idx):
+        # A different sheet/subplot's trace list has nothing to do with whatever row
+        # was selected before -- keep_selection is index-based, so without this a
+        # coincidentally-same row index in the new subplot would get carried over and
+        # silently pop the inspector to "Trace Style" (see _on_subplot_trace_selection).
         self.sync_active_subplot_inspector()
-        self._sync_subplot_trace_list()
+        self._sync_subplot_trace_list(keep_selection=False)
         self._sync_subplot_strip()
 
     def on_grid_changed(self, _value=None):
@@ -1107,7 +1111,7 @@ class SciSuiteWindow(QMainWindow):
             return
         sm.set_grid(self.rows_spin.value(), self.cols_spin.value())
         self.sync_active_subplot_inspector()
-        self._sync_subplot_trace_list()
+        self._sync_subplot_trace_list(keep_selection=False)
         self._sync_subplot_strip()
         self.render_current_sheet()
         self.colormap_panel.refresh()
@@ -1368,7 +1372,7 @@ class SciSuiteWindow(QMainWindow):
             if cs is not None:
                 cs.canvas.draw_idle()
             self.sync_active_subplot_inspector()
-            self._sync_subplot_trace_list()
+            self._sync_subplot_trace_list(keep_selection=False)
 
     def selected_subplots(self) -> list:
         """Subplot models highlighted in the arrangement strip (for colormap scope)."""

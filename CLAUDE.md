@@ -128,15 +128,21 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   `snapshot["data_full"]`, the full column values that back `client.get_data()` — call only on
   data-object add/update/remove/clear/load).
 
-- **Jupyter round-trip.** `client.get_data(name)` → DataFrame from `data_full`;
+- **Jupyter round-trip is pull-edit-push, never automatic.** There's no live link between a
+  notebook DataFrame and the pool's `DataObject` — editing one does nothing to the other until
+  explicitly pushed back. `client.get_data(name)` → DataFrame from `data_full`;
   `client.get_image(name)` → ndarray from `image_full` (both rebuilt by `_refresh_ipc_data`).
   Edit and `push_dataframe(df, name=name, mode="update")` / `push_image(arr, name=name,
   mode="update")` → `update_from` refreshes the object in place (id preserved), open sheets
-  re-render, the `ColumnTree` / data pool rebuild. `list_data` / `list_images` / `list_traces` /
-  `list_sheets` are the metadata listings (`list_sheets`: id, name, rows, cols, subplot count,
-  tags, `duplicate_name` — flags a sheet whose name collides with another's, since
-  `client.plot(..., sheet=<name>)` resolves by id first, then by *first* name match; check this
-  or target by id when a name might not be unique).
+  re-render, the `ColumnTree` / data pool rebuild. `client.edit_data(key)` is a context manager
+  wrapping exactly that pull/push pair in one block (`with suite.edit_data("spectra") as df: df["ratio"] = ...`)
+  — it resolves `key` (id or name) to the object's actual name up front so the push-back always
+  lands on the same object even when looked up by id, and skips the push if the block raises.
+  `list_data` / `list_images` / `list_traces` / `list_sheets` are the metadata listings
+  (`list_sheets`: id, name, rows, cols, subplot count, tags, `duplicate_name` — flags a sheet
+  whose name collides with another's, since `client.plot(..., sheet=<name>)` resolves by id
+  first, then by *first* name match; check this or target by id when a name might not be
+  unique).
 - **Mutations ack immediately, before the GUI thread processes them** (`IPCBridge._handle`'s
   catch-all returns `{"status": "success"}` the instant the socket receives anything not a
   query — see IPC threading above), so a Jupyter-side call can never learn that e.g. `plot()`'s
@@ -157,13 +163,17 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   `SciSuiteWindow._on_canvas_right_click`, a small `QMenu` ("Edit style..." / "Delete trace")
   positioned at `guiEvent.globalPosition()`; `_delete_trace_ref` removes that exact `TraceRef`
   (by identity) from whichever subplot holds it. `render` also computes `text_scale` once per
-  pass — 1.0 when `SheetModel.fig_width_cm`/`fig_height_cm` are blank (unchanged), else this
-  figure's cm diagonal over the default 8x6in figure's (`_REFERENCE_DIAG_CM`), clamped to
+  pass — `size_scale` (1.0 when `SheetModel.fig_width_cm`/`fig_height_cm` are blank, else this
+  figure's cm diagonal over the default 8x6in figure's, `_REFERENCE_DIAG_CM`) times
+  `grid_scale = 1 / max(rows, cols)` (1.0 for the default 1x1 grid), the product clamped to
   [0.3, 3.0] — and multiplies every *fontsize* (title/x-label/y-label/tick-label/legend) by it
-  before handing them to matplotlib, so a much smaller (or larger) physical figure keeps text
-  proportionate instead of `tight_layout()` squeezing the axes box down to fit fixed-point-size
-  text (line widths / spine widths are left alone — text is what actually reserves layout
-  margin). Each subplot's `x_tick_format`/`y_tick_format` (`"auto"` | `"plain"` | `"scientific"`
+  before handing them to matplotlib. Fontsizes are stored in points, an absolute unit deaf to
+  both the figure's physical size *and* how many subplots divide it up, so without this a
+  bigger grid or a smaller physical figure would keep full-size text and `tight_layout()`
+  would squeeze every axes box down to fit it; `text_scale` keeps the text-to-cell proportion
+  consistent regardless of grid size or physical size (line widths / spine widths are left
+  alone — text is what actually reserves layout margin). Each subplot's
+  `x_tick_format`/`y_tick_format` (`"auto"` | `"plain"` | `"scientific"`
   | `"fixed"`, with `*_tick_digits` for `"fixed"`) is applied right after the aspect ratio via
   `_apply_tick_format` (`ax.ticklabel_format(style=...)` or a `FormatStrFormatter`) — display
   only, independent of `TraceRef.scale_factor` (which rescales the underlying data) and of the
@@ -291,6 +301,13 @@ title/x_label/y_label + trace labels).
   `_STYLE_FIELDS` / `_FIG_FIELDS` tuple (drives (de)serialization *and* the dialog snapshot),
   and add a control to the matching `*StyleWidget` (or dialog).
 - `apply_y_transform` matches `"1e-3"` before `"1e3"` on purpose — order matters there.
+- `_sync_subplot_trace_list`'s `keep_selection=True` default re-selects rows *by index*, which
+  is only correct when the trace list itself didn't change identity underneath (a same-subplot
+  edit/reorder/bulk-apply refresh). Anything that changes *which subplot or sheet* is active
+  (`on_subplot_selection_changed`, `on_sheet_tab_changed`, `on_grid_changed`, `_on_strip_selection`)
+  must pass `keep_selection=False` — otherwise a coincidentally-same row index in the
+  newly-active (unrelated) subplot gets carried over and silently pops the inspector to
+  "Trace Style" (`_on_subplot_trace_selection`).
 - Branding lives in `app.py`: `APP_NAME` / `APP_ID` / `icon_path()` / `app_icon()`; the logo
   is `NoorSuite/NOORSUITE_ICON.jpg` (copy also at repo root). `__main__.main` sets the Windows
   AppUserModelID so the taskbar shows our icon.

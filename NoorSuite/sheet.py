@@ -354,13 +354,18 @@ class PlotSheet(QWidget):
         self._text_targets = []
         self._image_axes = {}
 
+        rows, cols = m.rows, m.cols
         if m.fig_width_cm and m.fig_height_cm:
             diag_cm = (float(m.fig_width_cm) ** 2 + float(m.fig_height_cm) ** 2) ** 0.5
-            text_scale = max(0.3, min(diag_cm / _REFERENCE_DIAG_CM, 3.0))
+            size_scale = diag_cm / _REFERENCE_DIAG_CM
         else:
-            text_scale = 1.0
+            size_scale = 1.0
+        # each subplot only gets 1/rows x 1/cols of the figure -- shrink text so a
+        # bigger grid doesn't just keep the same absolute (point) sizes and squeeze
+        # every cell's axes box to fit them (1x1 grid -> unchanged, matches before).
+        grid_scale = 1.0 / max(1, max(rows, cols))
+        text_scale = max(0.3, min(size_scale * grid_scale, 3.0))
 
-        rows, cols = m.rows, m.cols
         for idx in range(rows * cols):
             sub = m.subplots[idx]
             ax = self.fig.add_subplot(rows, cols, idx + 1)
