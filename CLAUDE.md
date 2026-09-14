@@ -238,26 +238,42 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   `ErrorbarContainer` isn't itself a picker-friendly `Artist`, so hit-testing maps every
   `container.lines[2]` bar (the vertical whiskers) to the `TraceRef` in `artist_map`.
 
-  **Building one**: select 2+ traces that share the same x values in the active
-  subplot's trace list (`self.subplot_traces`, e.g. several repeat measurements each
-  already added the normal way via the column picker) and click **"Combine into mean ±
-  error trace..."** (`app._combine_selected_traces_dialog` / `CombineTracesDialog`) —
-  it resolves each selected trace via its own `TraceRef.resolve(data)` (so each one's
-  *own* `scale_factor` is already baked in — see the per-series normalization note
-  below), rejects the set if their x arrays don't match (`np.allclose`, a
-  `QMessageBox.warning`, nothing changed), then `model.aggregate_series(arrays)`
-  (Qt-free: row-wise mean/std/min-max across equal-length arrays, `err_min`/`err_max`
-  already mean-relative offsets; raises `ValueError` for fewer than 2 arrays or
-  mismatched lengths) builds one **new derived `DataObject`** (`"<label> (n=<n>
-  mean±err)"`, columns `x`/`mean`/`std`/`err_min`/`err_max`, `source="combined"` —
-  computed once at combine time, not live-linked back to the originals) and one new
+  **Building one** — select trace(s) in the active subplot's trace list
+  (`self.subplot_traces`) and click **"Combine into mean ± error trace..."**
+  (`self.combine_btn`, enabled at 1+ selected — `app._combine_selected_traces_dialog`
+  dispatches on the count):
+  - **One trace selected** → `_split_single_trace_dialog` / `SplitAggregateDialog`:
+    for a trace whose own data is *itself* several repeat measurements concatenated
+    end-to-end (`[x1_1..x1_n, x2_1..x2_n, ..., xa_1..xa_n]`, e.g. `n` reps of `a`
+    conditions read off one instrument in one long sweep) — pick the repeat count `n`
+    and `model.split_into_repeats(values, n)` (Qt-free: reshapes to `(a, n)` and
+    summarizes each row; raises `ValueError` if `n < 1` or the length isn't an exact
+    multiple of `n`) turns the `a*n`-point trace into `a` points. The trace's x values
+    are reduced the same way (reshaped to `(a, n)`, meaned per row) via
+    `_split_and_aggregate_trace` — this only makes sense when x is constant (or a
+    tight sweep) *within* each block, e.g. a genuine per-condition x column, or a plain
+    row index where the mean-per-block is still a sane "block center".
+  - **2+ traces selected** → `_combine_multiple_traces_dialog` / `CombineTracesDialog`:
+    for separate repeat traces already added individually (e.g. via the column
+    picker), sharing the same x values — resolves each via its own
+    `TraceRef.resolve(data)` (so each one's *own* `scale_factor` is already baked in —
+    see the per-series normalization note below), rejects the set if their x arrays
+    don't match (`np.allclose`, a `QMessageBox.warning`, nothing changed), then
+    `model.aggregate_series(arrays)` (Qt-free: row-wise mean/std/min-max across
+    equal-length arrays; raises `ValueError` for fewer than 2 arrays or mismatched
+    lengths) does the same job across traces instead of within one.
+
+  Either path's summary dict is `{"mean", "std", "err_min", "err_max"}`
+  (`err_min`/`err_max` already mean-relative offsets, ready for an asymmetric
+  errorbar) and lands the same way: a **new derived `DataObject`** (`"<label> (n=<n>
+  mean±err)"`, columns `x`/`mean`/`std`/`err_min`/`err_max`, `source="split"` or
+  `"combined"` — computed once, not live-linked back to the source) plus one new
   `TraceRef` (`plot_type` from the dialog's "Base plot style" combo, `show_errorbar =
-  True`, colour = the first selected trace's) that by default replaces the selected
-  traces at the earliest one's position (`CombineTracesDialog`'s "Remove the original
-  traces" checkbox, on by default) — the multi-select button itself
-  (`self.combine_btn`) only enables at 2+ selected (`_on_subplot_trace_selection`).
-  `model.common_label(names)` (also used for the combined trace's label) takes a common
-  prefix, else a common suffix, else the first name, e.g. `["a_1","a_2","a_3"] -> "a"`.
+  True`, colour = the source trace's / first selected trace's) that by default
+  replaces the original(s) at the earliest one's position (each dialog's "Remove the
+  original trace(s)" checkbox, on by default). `model.common_label(names)` (used for
+  the *combine* path's label) takes a common prefix, else a common suffix, else the
+  first name, e.g. `["a_1","a_2","a_3"] -> "a"`.
 
   **`yerr_mode`** is editable afterwards from the Trace Style tab/dialog
   (`TraceStyleWidget.errbar_check` + `errbar_mode_combo`, shown/enabled only when
@@ -361,8 +377,9 @@ would get) before `_sync_subplot_trace_list`, then re-selects the moved trace(s)
 identity, since their positions changed. Trace order drives both z-order — later entries draw
 on top — and legend order, so this is how to fix "right traces, wrong order/stacking".
 Selecting any trace(s) here — one or several — also flips `inspector_tabs` to "Trace Style",
-so the style/Y-transform controls are visible regardless of which tab was open; 2+ selected
-also enables **"Combine into mean ± error trace..."** below "Remove selected trace(s)" — see
+so the style/Y-transform controls are visible regardless of which tab was open; any
+selection also enables **"Combine into mean ± error trace..."** below "Remove selected
+trace(s)" (one selected -> split its own data into repeats; 2+ -> combine them) — see
 "Error bars are an overlay, not a plot type" above), the
 **`ColormapPanel`**, and the
 Axes / Trace Style / **Figure** inspector tabs (`inspector_tabs`; the Figure tab is

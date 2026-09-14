@@ -40,7 +40,8 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                   ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
 from .model import (INDEX_COL, PLOT_TYPES, ColorMap, DataObject, ImageObject,
                     ImageRef, ProjectModel, SheetModel, SubplotModel, TraceRef,
-                    _new_id, aggregate_series, common_label, resolve_sidecar_names)
+                    _new_id, aggregate_series, common_label, resolve_sidecar_names,
+                    split_into_repeats)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
 
@@ -556,6 +557,70 @@ class CombineTracesDialog(QDialog):
         return self.style_combo.currentText(), self.remove_check.isChecked()
 
 
+class SplitAggregateDialog(QDialog):
+    """"Combine into mean +/- error trace..." on exactly ONE selected trace whose data
+    is itself several repeat measurements concatenated end-to-end -- e.g.
+    ``[x1_1..x1_n, x2_1..x2_n, ..., xa_1..xa_n]`` -- rather than several separate
+    traces. Splits it into consecutive blocks of the given repeat count and shows each
+    block's mean, with the std. deviation or min/max span available as an error-bar
+    overlay -- see model.split_into_repeats."""
+
+    def __init__(self, ref, n_values: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Split into repeats & aggregate")
+        self._n_values = n_values
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            f"'{ref.display_label}' has {n_values} points, read as several repeat "
+            "measurements stacked back-to-back. Pick the repeat count below to split "
+            "it into consecutive blocks and plot each block's mean, with the std. "
+            "deviation or the min/max span available as an error-bar overlay.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QHBoxLayout()
+        form.addWidget(QLabel("Repeat count (n):"))
+        self.n_spin = QSpinBox()
+        self.n_spin.setRange(1, max(1, n_values))
+        self.n_spin.setValue(2 if n_values >= 2 else 1)
+        self.n_spin.valueChanged.connect(self._update_summary)
+        form.addWidget(self.n_spin)
+        layout.addLayout(form)
+
+        self.summary_label = QLabel()
+        layout.addWidget(self.summary_label)
+
+        form2 = QHBoxLayout()
+        form2.addWidget(QLabel("Base plot style:"))
+        self.style_combo = QComboBox()
+        self.style_combo.addItems(PLOT_TYPES)
+        form2.addWidget(self.style_combo, 1)
+        layout.addLayout(form2)
+
+        self.remove_check = QCheckBox("Remove the original trace")
+        self.remove_check.setChecked(True)
+        layout.addWidget(self.remove_check)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self._update_summary()
+
+    def _update_summary(self, *_):
+        n = self.n_spin.value()
+        ok = n >= 1 and self._n_values % n == 0
+        self.summary_label.setText(
+            f"{self._n_values} point(s) / n={n} -> {self._n_values // n} point(s)."
+            if ok else f"{self._n_values} point(s) is not a multiple of n={n}.")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
+
+    def selection(self):
+        """Return ``(n, plot_type, remove_original)``."""
+        return self.n_spin.value(), self.style_combo.currentText(), self.remove_check.isChecked()
+
+
 # =====================================================================
 # Main window
 # =====================================================================
@@ -752,14 +817,18 @@ class SciSuiteWindow(QMainWindow):
         self.subplot_traces.itemSelectionChanged.connect(self._on_subplot_trace_selection)
         self.subplot_traces.reordered.connect(self._on_traces_reordered)
         tb.addWidget(self.subplot_traces)
+        hint = QLabel("Ctrl/Shift-click to select several traces above")
+        hint.setStyleSheet("color: #808080; font-style: italic;")
+        tb.addWidget(hint)
         rm_btn = QPushButton("Remove selected trace(s)")
         rm_btn.clicked.connect(self._remove_selected_subplot_traces)
         tb.addWidget(rm_btn)
         self.combine_btn = QPushButton("Combine into mean ± error trace...")
         self.combine_btn.setToolTip(
-            "Select 2 or more traces that share the same x values (e.g. repeat "
-            "measurements) and merge them into one trace showing their mean, with an "
-            "error-bar overlay (std. deviation or min/max span).")
+            "One trace selected: read its own data as several repeat measurements "
+            "stacked back-to-back and split it into blocks. 2+ traces selected (same "
+            "x values): combine them row-wise instead. Either way, shows the mean "
+            "with an error-bar overlay (std. deviation or min/max span).")
         self.combine_btn.setEnabled(False)
         self.combine_btn.clicked.connect(self._combine_selected_traces_dialog)
         tb.addWidget(self.combine_btn)
@@ -1090,6 +1159,85 @@ class SciSuiteWindow(QMainWindow):
         self._refresh_ipc_snapshot()
 
     def _combine_selected_traces_dialog(self):
+        """"Combine into mean +/- error trace...": with exactly one trace selected,
+        its own data is read as several repeat measurements concatenated end-to-end
+        (``[x1_1..x1_n, x2_1..x2_n, ...]``) and split into blocks (see
+        :meth:`_split_single_trace_dialog`); with 2+ selected, they're treated as
+        separate repeat traces to combine row-wise instead (see
+        :meth:`_combine_multiple_traces_dialog`). Either way the result is one new
+        trace showing the mean with an error-bar overlay (std. deviation or min/max
+        span)."""
+        refs = self._selected_trace_refs()
+        sm = self._active_sheet_model()
+        if not refs or sm is None:
+            return
+        if len(refs) == 1:
+            self._split_single_trace_dialog(sm, refs[0])
+        else:
+            self._combine_multiple_traces_dialog(sm, refs)
+
+    def _split_single_trace_dialog(self, sm, ref):
+        """Split one trace's own (already resolved) data into consecutive blocks of a
+        repeat count and aggregate each block -- see :class:`SplitAggregateDialog` /
+        model.split_into_repeats."""
+        data = self.repository.get(ref.data_id)
+        if data is None or ref.y_col not in data.columns:
+            QMessageBox.warning(self, "Can't split",
+                                f"'{ref.display_label}' has no data to resolve.")
+            return
+        try:
+            x, y = ref.resolve(data)
+        except Exception as e:
+            QMessageBox.warning(self, "Can't split", str(e))
+            return
+        if len(y) < 2:
+            QMessageBox.information(self, "Not enough points",
+                                    "Need at least 2 points to split into repeats.")
+            return
+        dlg = SplitAggregateDialog(ref, len(y), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        n, plot_type, remove_original = dlg.selection()
+        self._split_and_aggregate_trace(sm, ref, x, y, n, plot_type, remove_original)
+
+    def _split_and_aggregate_trace(self, sm, ref, x, y, n, plot_type, remove_original):
+        try:
+            agg = split_into_repeats(y, n)
+        except ValueError as e:
+            QMessageBox.warning(self, "Can't split", str(e))
+            return
+        x_reduced = np.asarray(x, dtype=float).reshape(-1, n).mean(axis=1)
+        columns = {"x": x_reduced, "mean": agg["mean"], "std": agg["std"],
+                  "err_min": agg["err_min"], "err_max": agg["err_max"]}
+        new_obj = DataObject(f"{ref.display_label} (n={n} mean±err)", columns,
+                             ["x", "mean", "std", "err_min", "err_max"], source="split")
+        self.repository[new_obj.id] = new_obj
+
+        sub = sm.get_active_subplot()
+        insert_at = sub.traces.index(ref) if ref in sub.traces else len(sub.traces)
+
+        new_ref = TraceRef(new_obj.id, "x", "mean", label=ref.display_label)
+        new_ref.plot_type = plot_type
+        new_ref.color = ref.color
+        new_ref.show_errorbar = True
+        new_ref.yerr_col = "std"
+        new_ref.yerr_low_col = "err_min"
+        new_ref.yerr_high_col = "err_max"
+
+        if remove_original:
+            sub.traces.remove(ref)
+            sub.traces.insert(min(insert_at, len(sub.traces)), new_ref)
+        else:
+            sub.traces.append(new_ref)
+
+        self._render_sheet(sm.sheet_id)
+        if sm is self._active_sheet_model():
+            self._sync_subplot_trace_list()
+        self._refresh_data_list()
+        self._refresh_ipc_snapshot()
+        self._refresh_ipc_data()
+
+    def _combine_multiple_traces_dialog(self, sm, refs):
         """"Combine into mean +/- error trace..." on 2+ selected traces in the active
         subplot's trace list -- a "joint series" (e.g. several repeat measurements each
         already added as their own trace). Each is resolved with its own current style
@@ -1097,12 +1245,6 @@ class SciSuiteWindow(QMainWindow):
         in if the user set one on each first), row-wise aggregated into mean/std/min-max,
         and replaces the selection with one new trace carrying the result plus an
         errorbar overlay -- see :class:`CombineTracesDialog`."""
-        refs = self._selected_trace_refs()
-        if len(refs) < 2:
-            return
-        sm = self._active_sheet_model()
-        if sm is None:
-            return
         resolved = []
         for ref in refs:
             data = self.repository.get(ref.data_id)
@@ -1460,7 +1602,7 @@ class SciSuiteWindow(QMainWindow):
         if refs:
             self.inspector_tabs.setCurrentIndex(1)   # surface the (bulk or single) editor
         self.trace_broadcast_btn.setEnabled(len(refs) == 1)
-        self.combine_btn.setEnabled(len(refs) >= 2)
+        self.combine_btn.setEnabled(len(refs) >= 1)
 
     def _apply_trace_style_to_all_traces(self):
         """Copy the one selected trace's line/marker style to every other trace in

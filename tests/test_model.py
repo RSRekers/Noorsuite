@@ -5,7 +5,7 @@ from NoorSuite.model import (INDEX_COL, PROJECT_VERSION, REL_INDEX_PREFIX,
                             REL_VALUE_PREFIX, ColorMap, DataObject, ImageObject,
                             ImageRef, ProjectModel, SheetModel, SubplotModel,
                             TraceRef, aggregate_series, apply_y_transform,
-                            common_label, resolve_sidecar_names)
+                            common_label, resolve_sidecar_names, split_into_repeats)
 
 
 def _obj(name="run", n=6):
@@ -78,6 +78,27 @@ def test_aggregate_series_rejects_bad_input():
         aggregate_series([[1.0, 2.0]])                     # only one series
     with pytest.raises(ValueError):
         aggregate_series([[1.0, 2.0], [1.0, 2.0, 3.0]])     # mismatched lengths
+
+
+def test_split_into_repeats_mean_std_minmax():
+    # one concatenated series: 3 blocks of n=3 repeats each
+    values = [1.0, 2.0, 3.0,   10.0, 20.0, 30.0,   100.0, 200.0, 300.0]
+    agg = split_into_repeats(values, 3)
+    np.testing.assert_allclose(agg["mean"], [2.0, 20.0, 200.0])
+    np.testing.assert_allclose(agg["std"], [np.std([1.0, 2.0, 3.0], ddof=1),
+                                            np.std([10.0, 20.0, 30.0], ddof=1),
+                                            np.std([100.0, 200.0, 300.0], ddof=1)])
+    np.testing.assert_allclose(agg["err_min"], [1.0, 10.0, 100.0])   # mean - min
+    np.testing.assert_allclose(agg["err_max"], [1.0, 10.0, 100.0])   # max - mean
+
+
+def test_split_into_repeats_rejects_bad_repeat_count():
+    with pytest.raises(ValueError):
+        split_into_repeats([1.0, 2.0, 3.0], 2)   # 3 is not a multiple of 2
+    with pytest.raises(ValueError):
+        split_into_repeats([1.0, 2.0, 3.0], 0)
+    with pytest.raises(ValueError):
+        split_into_repeats([], 1)
 
 
 def test_common_label_prefix_and_suffix_and_fallback():

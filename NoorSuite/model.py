@@ -246,6 +246,33 @@ def aggregate_series(arrays: list) -> dict:
     }
 
 
+def split_into_repeats(values, n: int) -> dict:
+    """Split *one* already-concatenated series into consecutive blocks of ``n``
+    repeats and summarize each block -- the same statistics as :func:`aggregate_series`,
+    but for a single trace whose data is literally several repeat measurements stacked
+    end-to-end (``[x1_1..x1_n, x2_1..x2_n, ..., xa_1..xa_n]``) rather than several
+    separate traces. ``a = len(values) / n`` blocks in, ``a``-length arrays out.
+
+    Returns ``{"mean", "std", "err_min", "err_max"}``. Raises :class:`ValueError` if
+    ``n < 1`` or ``len(values)`` isn't an exact multiple of ``n``.
+    """
+    values = np.asarray(values, dtype=float)
+    n = int(n)
+    if n < 1:
+        raise ValueError("repeat count must be at least 1")
+    if len(values) == 0 or len(values) % n != 0:
+        raise ValueError(f"{len(values)} value(s) is not a multiple of the repeat count {n}")
+    stack = values.reshape(-1, n)
+    mean = stack.mean(axis=1)
+    std = stack.std(axis=1, ddof=1) if n > 1 else np.zeros_like(mean)
+    return {
+        "mean": mean,
+        "std": std,
+        "err_min": mean - stack.min(axis=1),
+        "err_max": stack.max(axis=1) - mean,
+    }
+
+
 class ColorMap:
     """A named list of hex colours, or a reference to a matplotlib built-in.
 
