@@ -50,9 +50,13 @@ INDEX_COL = "__index__"   # x_col sentinel: use the row index as x
 PLOT_TYPES = ["Line", "Scatter", "Line+Scatter", "Step", "Bar"]
 LINE_STYLES = ["-", "--", "-.", ":"]
 LINE_STYLE_LABELS = ["Solid (-)", "Dashed (--)", "Dash-Dot (-.)", "Dotted (:)"]
-MARKERS = ["None", "o", "s", "^", "D", "x", "+"]
-MARKER_LABELS = ["None", "Circle (o)", "Square (s)", "Triangle (^)",
-                 "Diamond (D)", "Cross (x)", "Plus (+)"]
+MARKERS = ["None", ".", "o", "s", "D", "d", "^", "v", "<", ">",
+           "p", "h", "8", "*", "x", "+", "1", "2", "3", "4"]
+MARKER_LABELS = ["None", "Point (.)", "Circle (o)", "Square (s)", "Diamond (D)",
+                 "Thin diamond (d)", "Triangle up (^)", "Triangle down (v)",
+                 "Triangle left (<)", "Triangle right (>)", "Pentagon (p)",
+                 "Hexagon (h)", "Octagon (8)", "Star (*)", "Cross (x)", "Plus (+)",
+                 "Tri down (1)", "Tri up (2)", "Tri left (3)", "Tri right (4)"]
 Y_TRANSFORMS = ["1x", "1e3", "1e-3", "1e-6", "1e-9", "Log10", "Norm"]
 Y_TRANSFORM_LABELS = ["1x", "1e3 (kilo)", "1e-3 (milli)", "1e-6 (micro)",
                       "1e-9 (nano)", "Log10", "Norm (0-1)"]

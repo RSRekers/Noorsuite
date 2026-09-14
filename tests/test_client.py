@@ -111,9 +111,19 @@ def test_list_helpers_return_dataframes():
         "traces": [{"data_id": "d1", "data_name": "run", "y_col": "a", "x_col": "t",
                     "sheet": "Sheet 1", "subplot": 0, "enabled": True,
                     "plot_type": "Line", "color": "#111"}],
+        "sheets": [{"id": "s1", "name": "Sheet 1", "rows": 1, "cols": 1,
+                   "subplots": 1, "tags": [], "duplicate_name": False},
+                  {"id": "s2", "name": "Results", "rows": 2, "cols": 2,
+                   "subplots": 4, "tags": [], "duplicate_name": True},
+                  {"id": "s3", "name": "Results", "rows": 1, "cols": 1,
+                   "subplots": 1, "tags": [], "duplicate_name": True}],
     }
     assert list(client.list_data()["name"]) == ["run"]
     assert list(client.list_traces()["y_col"]) == ["a"]
+    sheets = client.list_sheets()
+    assert list(sheets["id"]) == ["s1", "s2", "s3"]
+    assert list(sheets["duplicate_name"]) == [False, True, True]
+    assert list(sheets.loc[sheets["name"] == "Results", "subplots"]) == [4, 1]
 
 
 def test_push_image_payload_is_bytes_shape_dtype():

@@ -20,13 +20,14 @@ import numpy as np
 from matplotlib import rcParams
 from PyQt6.QtCore import QByteArray, QMimeData, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QDrag, QIcon, QImage, QKeySequence
-from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
-                             QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-                             QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                             QMessageBox, QPushButton, QComboBox, QSpinBox,
-                             QSplitter, QStackedWidget, QStyle, QTableWidget,
-                             QTableWidgetItem, QTabWidget, QToolBar, QTreeWidget,
-                             QTreeWidgetItem, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QDialog,
+                             QDialogButtonBox, QFileDialog, QHBoxLayout,
+                             QInputDialog, QLabel, QLineEdit, QListWidget,
+                             QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+                             QPushButton, QComboBox, QSpinBox, QSplitter,
+                             QStackedWidget, QStyle, QTableWidget, QTableWidgetItem,
+                             QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem,
+                             QVBoxLayout, QWidget)
 
 from .colormap import available_specs, load_file, resolve_spec, sample, save_file
 from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
@@ -424,6 +425,84 @@ class ImageAxesPanel(QWidget):
                                 "display_axes": [int(r), int(c)]}, target)
 
 
+class CommonColumnsDialog(QDialog):
+    """Pick a column common to several selected :class:`DataObject`s and add it as
+    one trace per object in a single action (right-click a multi-selection in the
+    data pool -> "Add common column(s) to sheet...")."""
+
+    def __init__(self, objs: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add common column(s)")
+        self.target = None      # set to "active" / "new" by whichever button is clicked
+        self._loading = False
+
+        common = sorted(set.intersection(*(set(o.column_order) for o in objs)))
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            f"{len(objs)} data objects: " + ", ".join(o.name for o in objs) + "\n"
+            f"{len(common)} column(s) in common -- tick one X, one-or-more Y; a trace is "
+            "added for each selected object, for each ticked Y column.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["Column", "X", "Y"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setStyleSheet(_CHECKBOX_QSS)
+        idx_item = QTreeWidgetItem(self.tree, ["row index", "", ""])
+        idx_item.setData(0, Qt.ItemDataRole.UserRole, INDEX_COL)
+        idx_item.setFlags(idx_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        idx_item.setCheckState(1, Qt.CheckState.Checked)
+        for name in common:
+            it = QTreeWidgetItem(self.tree, [name, "", ""])
+            it.setData(0, Qt.ItemDataRole.UserRole, name)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(1, Qt.CheckState.Unchecked)
+            it.setCheckState(2, Qt.CheckState.Unchecked)
+        self.tree.itemChanged.connect(self._on_item_changed)
+        for i in range(3):
+            self.tree.resizeColumnToContents(i)
+        layout.addWidget(self.tree)
+
+        btns = QHBoxLayout()
+        self.active_btn = QPushButton("Add to active subplot")
+        self.active_btn.clicked.connect(lambda: self._choose("active"))
+        self.new_btn = QPushButton("Add to new sheet")
+        self.new_btn.clicked.connect(lambda: self._choose("new"))
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(self.active_btn)
+        btns.addWidget(self.new_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+
+    def _on_item_changed(self, item, column):
+        if self._loading or column != 1 or item.checkState(1) != Qt.CheckState.Checked:
+            return
+        self._loading = True
+        for i in range(self.tree.topLevelItemCount()):
+            other = self.tree.topLevelItem(i)
+            if other is not item:
+                other.setCheckState(1, Qt.CheckState.Unchecked)
+        self._loading = False
+
+    def _choose(self, target):
+        self.target = target
+        self.accept()
+
+    def selection(self):
+        x_col, y_cols = None, []
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            col = it.data(0, Qt.ItemDataRole.UserRole)
+            if it.checkState(1) == Qt.CheckState.Checked:
+                x_col = col
+            if it.checkState(2) == Qt.CheckState.Checked:
+                y_cols.append(col)
+        return x_col, y_cols
+
+
 # =====================================================================
 # Main window
 # =====================================================================
@@ -756,9 +835,17 @@ class SciSuiteWindow(QMainWindow):
             return
         selected = self.data_list.selectedItems()
         if item in selected and len(selected) > 1:
+            keys = [it.data(Qt.ItemDataRole.UserRole) for it in selected]
+            objs = [self.repository[k] for k in keys if k in self.repository]
             menu = QMenu()
+            common_act = None
+            if len(objs) > 1 and len(objs) == len(keys):   # no images mixed in
+                common_act = menu.addAction("Add common column(s) to sheet...")
             del_act = menu.addAction(f"Delete {len(selected)} selected")
-            if menu.exec(self.data_list.viewport().mapToGlobal(pos)) == del_act:
+            action = menu.exec(self.data_list.viewport().mapToGlobal(pos))
+            if action == common_act:
+                self._add_common_columns_dialog(objs)
+            elif action == del_act:
                 self._delete_selected_data()
             return
         key = item.data(Qt.ItemDataRole.UserRole)
@@ -875,6 +962,42 @@ class SciSuiteWindow(QMainWindow):
             ref.color = self._next_trace_color(sm, sub)
             sub.traces.append(ref)
         self._render_sheet(sheet_id)
+        if sm is self._active_sheet_model():
+            self._sync_subplot_trace_list()
+        self._refresh_ipc_snapshot()
+
+    def _add_common_columns_dialog(self, objs: list):
+        """Right-click action on several selected data objects: pick a column they
+        all share and add it as one trace per object, in a single action."""
+        common = sorted(set.intersection(*(set(o.column_order) for o in objs)))
+        if not common:
+            QMessageBox.information(
+                self, "No common columns",
+                "The selected data objects don't share any column names.")
+            return
+        dlg = CommonColumnsDialog(objs, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.target is None:
+            return
+        x_col, y_cols = dlg.selection()
+        if not y_cols:
+            return
+        self._add_common_columns(objs, x_col or INDEX_COL, y_cols, dlg.target)
+
+    def _add_common_columns(self, objs: list, x_col: str, y_cols: list, target: str):
+        """Add one trace per (object, y_col) pair -- ``objs`` share ``x_col``/``y_cols``
+        by construction (see `_add_common_columns_dialog`)."""
+        sm = self._create_sheet_model() if target == "new" \
+            else (self._active_sheet_model() or self._create_sheet_model())
+        self._open_sheet_tab(sm.sheet_id)
+        sub = sm.get_active_subplot()
+        for obj in objs:
+            for y_col in y_cols:
+                if y_col not in obj.columns:
+                    continue
+                ref = TraceRef(obj.id, x_col, y_col, label=f"{obj.name}: {y_col}")
+                ref.color = self._next_trace_color(sm, sub)
+                sub.traces.append(ref)
+        self._render_sheet(sm.sheet_id)
         if sm is self._active_sheet_model():
             self._sync_subplot_trace_list()
         self._refresh_ipc_snapshot()
@@ -1677,8 +1800,17 @@ class SciSuiteWindow(QMainWindow):
                         "sheet": sm.name, "subplot": i, "enabled": t.enabled,
                         "plot_type": t.plot_type, "color": t.color,
                     })
+        name_counts: dict[str, int] = {}
+        for sm in self.sheets.values():
+            name_counts[sm.name] = name_counts.get(sm.name, 0) + 1
+        sheets = [{
+            "id": sm.sheet_id, "name": sm.name, "rows": sm.rows, "cols": sm.cols,
+            "subplots": len(sm.subplots), "tags": list(sm.tags),
+            "duplicate_name": name_counts[sm.name] > 1,
+        } for sm in self.sheets.values()]
         self.ipc.snapshot = {"data_objects": data_objects, "images": images,
-                             "traces": traces, "data_full": self._ipc_data_full,
+                             "traces": traces, "sheets": sheets,
+                             "data_full": self._ipc_data_full,
                              "image_full": self._ipc_image_full}
 
     def _find_data(self, key):
@@ -1840,8 +1972,18 @@ class SciSuiteWindow(QMainWindow):
         self._refresh_ipc_snapshot()
 
     def _handle_add_to_sheet(self, payload: dict):
-        obj = self._find_data(payload.get("data_name") or payload.get("data_id"))
+        # ACTION_ADD_TO_SHEET (and every mutation) is fire-and-forget over IPC -- the
+        # Jupyter side always gets {"status": "success"} back the instant the socket
+        # receives it, before this GUI-thread handler even runs, so it has no way to
+        # learn about a lookup miss below. Surface it here instead, so it's at least
+        # visible in the GUI rather than a silent no-op ("I entered the sheet name
+        # but it did not work").
+        key = payload.get("data_name") or payload.get("data_id")
+        obj = self._find_data(key)
         if obj is None:
+            self.statusBar().showMessage(
+                f"plot(): no data object named/id {key!r} -- nothing added "
+                "(check suite.list_data())", 8000)
             return
         target = payload.get("sheet", "__active__")
         if target == "__new__":
@@ -1849,12 +1991,21 @@ class SciSuiteWindow(QMainWindow):
         elif target in ("__active__", "", None):
             sm = self._active_sheet_model() or self._create_sheet_model()
         else:
-            sm = self.sheets.get(target) or next(
-                (s for s in self.sheets.values() if s.name == target), None)
+            matches = [s for s in self.sheets.values() if s.name == target]
+            sm = self.sheets.get(target) or (matches[0] if matches else None)
             if sm is None:
                 sm = self._create_sheet_model(target if isinstance(target, str) else None)
+            elif len(matches) > 1:
+                self.statusBar().showMessage(
+                    f"plot(): {len(matches)} sheets are named {target!r} -- used the "
+                    f"first (id {sm.sheet_id}); target sheet=<id> to be exact", 8000)
         self._open_sheet_tab(sm.sheet_id)
-        sub_idx = min(int(payload.get("subplot_index", 0)), len(sm.subplots) - 1)
+        requested = int(payload.get("subplot_index", 0))
+        sub_idx = min(requested, len(sm.subplots) - 1)
+        if requested != sub_idx:
+            self.statusBar().showMessage(
+                f"plot(): subplot {requested} doesn't exist on '{sm.name}' "
+                f"({len(sm.subplots)} subplot(s)) -- used subplot {sub_idx} instead", 8000)
         sel = {"data_id": obj.id,
                "x_col": payload.get("x_col", INDEX_COL) or INDEX_COL,
                "y_cols": list(payload.get("y_cols", []))}

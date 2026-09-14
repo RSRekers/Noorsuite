@@ -22,13 +22,14 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
-                       ACTION_LIST_TRACES, ACTION_REMOVE_DATA, DEFAULT_PORT,
-                       IPCClient)
+                       ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_REMOVE_DATA,
+                       DEFAULT_PORT, IPCClient)
 
 _DATA_COLUMNS = ["id", "name", "columns", "nrows", "tags", "source"]
 _IMAGE_COLUMNS = ["id", "name", "shape", "dtype", "axis_names", "tags", "source"]
 _TRACE_COLUMNS = ["data_id", "data_name", "y_col", "x_col", "sheet", "subplot",
                   "enabled", "plot_type", "color"]
+_SHEET_COLUMNS = ["id", "name", "rows", "cols", "subplots", "tags", "duplicate_name"]
 
 
 class SciSuiteClient:
@@ -218,6 +219,15 @@ class SciSuiteClient:
         """Return every trace currently placed on a sheet."""
         resp = self._ipc.send({"action": ACTION_LIST_TRACES}) or {}
         return pd.DataFrame(resp.get("traces", []), columns=_TRACE_COLUMNS)
+
+    def list_sheets(self) -> pd.DataFrame:
+        """Return every sheet in the project: id, name, grid size, tags, and whether
+        its name collides with another sheet's (``duplicate_name``). ``plot(...,
+        sheet=...)`` matches by id first, then by name -- picking the first match
+        when several sheets share a name -- so check this (or use the id) before
+        targeting a sheet by name if you're not sure it's unique."""
+        resp = self._ipc.send({"action": ACTION_LIST_SHEETS}) or {}
+        return pd.DataFrame(resp.get("sheets", []), columns=_SHEET_COLUMNS)
 
     def remove_data(self, key):
         """Remove a data object (and every trace referencing it) by id or name."""

@@ -19,16 +19,17 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
-                       ACTION_LIST_TRACES, ACTION_PING, ACTION_REMOVE_DATA,
-                       ACTION_REMOVE_TRACE, DEFAULT_PORT, MUTATION_ACTIONS,
-                       QUERY_ACTIONS, IPCClient, frame, read_frame)
+                       ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_PING,
+                       ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT,
+                       MUTATION_ACTIONS, QUERY_ACTIONS, IPCClient, frame, read_frame)
 
 __all__ = ["IPCBridge", "IPCClient", "frame", "read_frame", "DEFAULT_PORT",
            "ACTION_PING", "ACTION_APPEND_TRACE", "ACTION_APPEND_DATAFRAME",
            "ACTION_APPEND_IMAGE", "ACTION_ADD_TO_SHEET", "ACTION_ADD_IMAGE_TO_SHEET",
            "ACTION_LIST_DATA", "ACTION_LIST_IMAGES", "ACTION_LIST_TRACES",
-           "ACTION_GET_DATA", "ACTION_GET_IMAGE", "ACTION_REMOVE_DATA",
-           "ACTION_REMOVE_TRACE", "ACTION_CLEAR", "MUTATION_ACTIONS", "QUERY_ACTIONS"]
+           "ACTION_LIST_SHEETS", "ACTION_GET_DATA", "ACTION_GET_IMAGE",
+           "ACTION_REMOVE_DATA", "ACTION_REMOVE_TRACE", "ACTION_CLEAR",
+           "MUTATION_ACTIONS", "QUERY_ACTIONS"]
 
 
 class IPCBridge(QObject):
@@ -42,7 +43,8 @@ class IPCBridge(QObject):
         self.server_socket = None
         self.running = False
         # Read-only view of the repository, refreshed by the GUI thread.
-        self.snapshot = {"data_objects": [], "images": [], "traces": [], "data_full": {}}
+        self.snapshot = {"data_objects": [], "images": [], "traces": [], "sheets": [],
+                         "data_full": {}}
 
     def start(self) -> None:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -92,6 +94,8 @@ class IPCBridge(QObject):
             return {"status": "success", "images": self.snapshot.get("images", [])}
         if action == ACTION_LIST_TRACES:
             return {"status": "success", "traces": self.snapshot.get("traces", [])}
+        if action == ACTION_LIST_SHEETS:
+            return {"status": "success", "sheets": self.snapshot.get("sheets", [])}
         if action == ACTION_GET_DATA:
             key = payload.get("key")
             for entry in self.snapshot.get("data_full", {}).values():

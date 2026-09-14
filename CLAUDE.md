@@ -125,8 +125,19 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   `client.get_image(name)` → ndarray from `image_full` (both rebuilt by `_refresh_ipc_data`).
   Edit and `push_dataframe(df, name=name, mode="update")` / `push_image(arr, name=name,
   mode="update")` → `update_from` refreshes the object in place (id preserved), open sheets
-  re-render, the `ColumnTree` / data pool rebuild. `list_data` / `list_images` / `list_traces`
-  are the metadata listings.
+  re-render, the `ColumnTree` / data pool rebuild. `list_data` / `list_images` / `list_traces` /
+  `list_sheets` are the metadata listings (`list_sheets`: id, name, rows, cols, subplot count,
+  tags, `duplicate_name` — flags a sheet whose name collides with another's, since
+  `client.plot(..., sheet=<name>)` resolves by id first, then by *first* name match; check this
+  or target by id when a name might not be unique).
+- **Mutations ack immediately, before the GUI thread processes them** (`IPCBridge._handle`'s
+  catch-all returns `{"status": "success"}` the instant the socket receives anything not a
+  query — see IPC threading above), so a Jupyter-side call can never learn that e.g. `plot()`'s
+  `data`/`sheet` didn't resolve to anything. `_handle_add_to_sheet` compensates by posting a
+  `statusBar()` warning instead (visible in the GUI, not returned to the caller) when: the data
+  object isn't found; the `sheet=` name matches more than one sheet (uses the first, states its
+  id); or `subplot=` doesn't exist on the target sheet (falls back to the last valid one) — the
+  three ways "I called plot() and nothing happened" usually shows up.
 
 - **Rendering is full clear-and-rebuild.** `PlotSheet.render(repository)` does `fig.clf()`,
   applies the figure frame (`fig.patch` edge/width/style, only visible with `fig_frame_on` and
@@ -156,7 +167,10 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   embedded both in the right-hand inspector and the pop-up dialogs. `AxesStyleWidget`'s groups
   are `CollapsibleSection`s (Labels & scale / Axis limits open; Cosmetics / Legend / Grid
   folded; Image auto-hidden when `sub.image is None`). Dialogs (`_BaseEditDialog`) wrap
-  content in a capped-height `QScrollArea` with the button box outside it.
+  content in a capped-height `QScrollArea` with the button box outside it. `model.MARKERS` /
+  `MARKER_LABELS` (index-aligned, like every other option-vocabulary pair) list every marker
+  the trace style combos offer — all valid matplotlib marker codes, so adding one is just
+  appending to both lists.
 
 - **`ProjectModel` is the only serialization root** — `.sciproj` files *and* the
   `~/.scisuite_session.json` autosave. It carries `data_objects`, `images`, `sheets`
@@ -185,7 +199,13 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
 
 Left is a vertical splitter: **data pool** list (`DataPoolList` — DataObjects + ImageObjects,
 different icons; `ExtendedSelection` — Ctrl/Shift click to multi-pick, Delete or the
-"Delete N selected" context action removes them all via `_delete_selected_data`)
+"Delete N selected" context action removes them all via `_delete_selected_data`; right-click a
+multi-selection of two-or-more DataObjects for **"Add common column(s) to sheet..."** —
+`CommonColumnsDialog` lists the columns common to every selected object (`set.intersection`
+over `column_order`; a plain info box if there are none) with the same tick-one-X/tick-many-Y
+`QTreeWidget` pattern as `ColumnTree`, then `_add_common_columns` adds one `TraceRef` per
+`(object, ticked y column)` pair — same x column, each labeled `"<object name>: <y column>"` —
+to the active or a new sheet, each getting its own colour-cycle colour via `_next_trace_color`)
 → **middle `QStackedWidget`**: page 0 = **column picker** (`ColumnTree` X/Y ticks + `head()`
 preview + "Add to active/new sheet"; valid X+Y is draggable, MIME
 `application/x-scisuite-cols`; also `ExtendedSelection` on the column rows — Ctrl/Shift-click
