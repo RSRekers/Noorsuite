@@ -17,10 +17,11 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox,
                              QRadioButton, QScrollArea, QSpinBox, QVBoxLayout,
                              QWidget)
 
-from .model import (CUSTOM_FACTOR_PREFIX, LEGEND_LOCS, LINE_STYLE_LABELS,
-                    LINE_STYLES, MARKER_LABELS, MARKERS, PLOT_TYPES,
-                    TICK_FORMAT_LABELS, TICK_FORMATS, Y_TRANSFORM_LABELS,
-                    Y_TRANSFORMS, ColorMap, apply_numeric_expr)
+from .model import (CUSTOM_FACTOR_PREFIX, ERROR_MODE_LABELS, ERROR_MODES,
+                    LEGEND_LOCS, LINE_STYLE_LABELS, LINE_STYLES, MARKER_LABELS,
+                    MARKERS, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
+                    REL_MODES, REL_VALUE_PREFIX, TICK_FORMAT_LABELS, TICK_FORMATS,
+                    Y_TRANSFORM_LABELS, Y_TRANSFORMS, ColorMap, apply_numeric_expr)
 from .widgets import CollapsibleSection
 
 _LINESTYLE_ITEMS = ["-", "--", "-.", ":"]
@@ -150,6 +151,17 @@ class TraceStyleWidget(QWidget):
         self.alpha_spin.valueChanged.connect(self._push)
         form.addRow("Opacity (alpha):", self.alpha_spin)
 
+        # Error-bar overlay: independent of plot type (see TraceRef.show_errorbar) --
+        # only enabled when the trace actually has error column(s) to show (usually
+        # built by "Combine into mean +/- error trace..." on several selected traces).
+        self.errbar_check = QCheckBox("Show error bars")
+        self.errbar_check.toggled.connect(self._on_errbar_toggled)
+        form.addRow("", self.errbar_check)
+        self.errbar_mode_combo = QComboBox()
+        self.errbar_mode_combo.addItems(ERROR_MODE_LABELS)
+        self.errbar_mode_combo.currentIndexChanged.connect(self._push)
+        form.addRow("  Error source:", self.errbar_mode_combo)
+
         self.transform_combo = QComboBox()
         self.transform_combo.addItems(Y_TRANSFORM_LABELS)
         self.transform_combo.currentIndexChanged.connect(self._on_transform_changed)
@@ -158,11 +170,35 @@ class TraceStyleWidget(QWidget):
         self.custom_factor_edit.setPlaceholderText("e.g. 2.54")
         self.custom_factor_edit.editingFinished.connect(self._push)
         form.addRow("  Custom factor:", self.custom_factor_edit)
+        self.relref_edit = QLineEdit()
+        self.relref_edit.editingFinished.connect(self._push)
+        form.addRow("  Reference:", self.relref_edit)
+        self.relmode_combo = QComboBox()
+        self.relmode_combo.addItems(REL_MODE_LABELS)
+        self.relmode_combo.currentIndexChanged.connect(self._push)
+        form.addRow("  Expressed as:", self.relmode_combo)
 
     def _on_transform_changed(self, _i):
-        self.custom_factor_edit.setEnabled(
-            self.transform_combo.currentIndex() == Y_TRANSFORMS.index("custom"))
+        token = Y_TRANSFORMS[self.transform_combo.currentIndex()]
+        self.custom_factor_edit.setEnabled(token == "custom")
+        self._set_row_visible(self.custom_factor_edit, token == "custom")
+        show_rel = token in ("rel_value", "rel_index")
+        self._set_row_visible(self.relref_edit, show_rel)
+        self._set_row_visible(self.relmode_combo, show_rel)
+        self.relref_edit.setPlaceholderText(
+            "reference value, e.g. 100" if token == "rel_value" else
+            "row index, e.g. 0" if token == "rel_index" else "")
         self._push()
+
+    def _on_errbar_toggled(self, checked):
+        self._set_row_visible(self.errbar_mode_combo, checked)
+        self._push()
+
+    def _set_row_visible(self, widget, show: bool):
+        widget.setVisible(show)
+        label = self.layout().labelForField(widget)
+        if label is not None:
+            label.setVisible(show)
 
     def set_trace(self, ref):
         self._ref = ref
@@ -186,15 +222,36 @@ class TraceStyleWidget(QWidget):
                 MARKERS.index(ref.marker) if ref.marker in MARKERS else 0)
             self.marker_size_spin.setValue(ref.marker_size)
             self.alpha_spin.setValue(ref.alpha)
-            if ref.scale_factor.startswith(CUSTOM_FACTOR_PREFIX):
+
+            self.errbar_check.setChecked(ref.show_errorbar and ref.has_error_data)
+            self.errbar_check.setEnabled(ref.has_error_data)
+            self.errbar_check.setToolTip(
+                "" if ref.has_error_data else
+                "This trace has no error data -- build one with \"Combine into mean "
+                "+/- error trace...\" on several selected traces.")
+            self.errbar_mode_combo.setCurrentIndex(
+                ERROR_MODES.index(ref.yerr_mode) if ref.yerr_mode in ERROR_MODES else 0)
+            self._set_row_visible(self.errbar_mode_combo, self.errbar_check.isChecked())
+
+            sf = ref.scale_factor
+            if sf.startswith(CUSTOM_FACTOR_PREFIX):
                 self.transform_combo.setCurrentIndex(Y_TRANSFORMS.index("custom"))
-                self.custom_factor_edit.setText(ref.scale_factor[len(CUSTOM_FACTOR_PREFIX):])
+                self.custom_factor_edit.setText(sf[len(CUSTOM_FACTOR_PREFIX):])
+                self.relref_edit.clear()
+            elif sf.startswith(REL_VALUE_PREFIX) or sf.startswith(REL_INDEX_PREFIX):
+                is_value = sf.startswith(REL_VALUE_PREFIX)
+                prefix = REL_VALUE_PREFIX if is_value else REL_INDEX_PREFIX
+                mode, _, rest = sf[len(prefix):].partition(":")
+                self.transform_combo.setCurrentIndex(
+                    Y_TRANSFORMS.index("rel_value" if is_value else "rel_index"))
+                self.relref_edit.setText(rest)
+                self.relmode_combo.setCurrentIndex(REL_MODES.index(mode) if mode in REL_MODES else 0)
             else:
                 self.transform_combo.setCurrentIndex(
-                    Y_TRANSFORMS.index(ref.scale_factor)
-                    if ref.scale_factor in Y_TRANSFORMS else 0)
-            self.custom_factor_edit.setEnabled(
-                self.transform_combo.currentIndex() == Y_TRANSFORMS.index("custom"))
+                    Y_TRANSFORMS.index(sf) if sf in Y_TRANSFORMS else 0)
+                self.custom_factor_edit.clear()
+                self.relref_edit.clear()
+            self._on_transform_changed(self.transform_combo.currentIndex())
         finally:
             self._loading = False
 
@@ -212,10 +269,22 @@ class TraceStyleWidget(QWidget):
         r.marker = MARKERS[self.marker_combo.currentIndex()]
         r.marker_size = self.marker_size_spin.value()
         r.alpha = self.alpha_spin.value()
+        r.show_errorbar = self.errbar_check.isChecked() and self.errbar_check.isEnabled()
+        r.yerr_mode = ERROR_MODES[self.errbar_mode_combo.currentIndex()]
         token = Y_TRANSFORMS[self.transform_combo.currentIndex()]
+        rel_mode = REL_MODES[self.relmode_combo.currentIndex()]
         if token == "custom":
             factor = _parse_float_or_none(self.custom_factor_edit.text())
             r.scale_factor = f"{CUSTOM_FACTOR_PREFIX}{factor if factor is not None else 1}"
+        elif token == "rel_value":
+            ref = _parse_float_or_none(self.relref_edit.text())
+            r.scale_factor = f"{REL_VALUE_PREFIX}{rel_mode}:{ref if ref is not None else 0}"
+        elif token == "rel_index":
+            try:
+                idx = int(float(self.relref_edit.text()))
+            except ValueError:
+                idx = 0
+            r.scale_factor = f"{REL_INDEX_PREFIX}{rel_mode}:{idx}"
         else:
             r.scale_factor = token
         self.changed.emit()

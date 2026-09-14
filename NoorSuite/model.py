@@ -13,6 +13,7 @@ project files and the ``~/.scisuite_session.json`` autosave.
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from pathlib import Path
@@ -47,7 +48,12 @@ def resolve_sidecar_names(images) -> dict:
 INDEX_COL = "__index__"   # x_col sentinel: use the row index as x
 
 # Shared option vocabularies (also used by the UI form widgets).
+# Errorbars are NOT a plot type -- they're an overlay any of these can carry
+# (TraceRef.show_errorbar), so "Scatter + errorbar" and "Line + errorbar" are both
+# just this plot type with that flag on. See "Errorbar overlay" below.
 PLOT_TYPES = ["Line", "Scatter", "Line+Scatter", "Step", "Bar"]
+ERROR_MODES = ["std", "minmax"]
+ERROR_MODE_LABELS = ["Std. deviation", "Min / max span"]
 LINE_STYLES = ["-", "--", "-.", ":"]
 LINE_STYLE_LABELS = ["Solid (-)", "Dashed (--)", "Dash-Dot (-.)", "Dotted (:)"]
 MARKERS = ["None", ".", "o", "s", "D", "d", "^", "v", "<", ">",
@@ -57,9 +63,13 @@ MARKER_LABELS = ["None", "Point (.)", "Circle (o)", "Square (s)", "Diamond (D)",
                  "Triangle left (<)", "Triangle right (>)", "Pentagon (p)",
                  "Hexagon (h)", "Octagon (8)", "Star (*)", "Cross (x)", "Plus (+)",
                  "Tri down (1)", "Tri up (2)", "Tri left (3)", "Tri right (4)"]
-Y_TRANSFORMS = ["1x", "1e3", "1e-3", "1e-6", "1e-9", "Log10", "Norm", "custom"]
+Y_TRANSFORMS = ["1x", "1e3", "1e-3", "1e-6", "1e-9", "Log10", "Norm", "custom",
+                "rel_value", "rel_index"]
 Y_TRANSFORM_LABELS = ["1x", "1e3 (kilo)", "1e-3 (milli)", "1e-6 (micro)",
-                      "1e-9 (nano)", "Log10", "Norm (0-1)", "Custom factor..."]
+                      "1e-9 (nano)", "Log10", "Norm (0-1)", "Custom factor...",
+                      "Relative to value...", "Relative to nth point..."]
+REL_MODES = ["frac", "pct"]
+REL_MODE_LABELS = ["Fraction (0-1)", "Percent (%)"]
 TICK_FORMATS = ["auto", "plain", "scientific", "fixed"]
 TICK_FORMAT_LABELS = ["Auto", "Plain (no sci. notation)", "Scientific (1.2e4)",
                       "Fixed decimals"]
@@ -73,15 +83,31 @@ def _new_id() -> str:
 
 
 CUSTOM_FACTOR_PREFIX = "custom:"   # scale_factor = f"{CUSTOM_FACTOR_PREFIX}{multiplier}"
+# Relative-change tokens: f"{PREFIX}{mode}:{ref}" -- mode is "frac" ((y-ref)/ref) or
+# "pct" (same, x100). REL_VALUE's ref is a fixed number, the same for every series.
+# REL_INDEX's ref is resolved from y itself (y[index]), so it's naturally *per-series*
+# when applied to each of several repeat traces individually before aggregating them --
+# each trace is normalized to its own value at that row, not a shared one.
+REL_VALUE_PREFIX = "relval:"
+REL_INDEX_PREFIX = "relidx:"
+
+
+def _relative_change(y: np.ndarray, ref, mode: str) -> np.ndarray:
+    denom = np.where(ref == 0, 1.0, ref)   # degrade gracefully instead of dividing by 0
+    rel = (y - ref) / denom
+    return rel * 100.0 if mode == "pct" else rel
 
 
 def apply_y_transform(y, factor: str):
     """Return ``y`` transformed according to a scale-factor token.
 
     ``factor`` is one of :data:`Y_TRANSFORMS` (or a longer label that merely
-    *contains* one, e.g. ``"1e3 (kilo)"``), or ``f"{CUSTOM_FACTOR_PREFIX}<number>"``
-    for an arbitrary constant multiplier. Unknown/unparseable tokens return ``y``
-    unchanged.
+    *contains* one, e.g. ``"1e3 (kilo)"``), ``f"{CUSTOM_FACTOR_PREFIX}<number>"`` for an
+    arbitrary constant multiplier, ``f"{REL_VALUE_PREFIX}<frac|pct>:<number>"`` for the
+    relative change from a fixed reference value, or ``f"{REL_INDEX_PREFIX}<frac|pct>:<row
+    index>"`` for the relative change from ``y``'s own value at that row (a per-series
+    baseline when applied to each of several repeat traces before aggregating them).
+    Unknown/unparseable tokens return ``y`` unchanged.
     """
     y = np.asarray(y, dtype=float)
     if factor.startswith(CUSTOM_FACTOR_PREFIX):
@@ -89,6 +115,22 @@ def apply_y_transform(y, factor: str):
             return y * float(factor[len(CUSTOM_FACTOR_PREFIX):])
         except ValueError:
             return y
+    if factor.startswith(REL_VALUE_PREFIX):
+        mode, _, rest = factor[len(REL_VALUE_PREFIX):].partition(":")
+        try:
+            return _relative_change(y, float(rest), mode)
+        except ValueError:
+            return y
+    if factor.startswith(REL_INDEX_PREFIX):
+        mode, _, rest = factor[len(REL_INDEX_PREFIX):].partition(":")
+        try:
+            idx = int(float(rest))
+        except ValueError:
+            return y
+        if not len(y):
+            return y
+        ref = y[int(np.clip(idx, 0, len(y) - 1))]
+        return _relative_change(y, ref, mode)
     if "1e-3" in factor:
         return y * 1e-3
     if "1e-6" in factor:
@@ -129,6 +171,79 @@ def apply_numeric_expr(current: float, expr: str):
         return float(expr)
     except ValueError:
         return None
+
+
+def _yerr_scale(factor: str) -> float:
+    """Linear multiplier implied by a ``TraceRef.scale_factor`` token, used to keep an
+    error-bar column consistent with :meth:`TraceRef.resolve`'s y-transform. ``Log10``
+    and ``Norm`` don't have a meaningful error-bar scaling, so they're left at 1.0, and
+    neither does ``REL_INDEX_PREFIX`` (its reference comes from the data itself, not the
+    token, so there's no fixed multiplier to derive) -- normalize each series *before*
+    aggregating it instead (see :func:`aggregate_series`) if error bars need to reflect
+    a per-row-index baseline. ``REL_VALUE_PREFIX`` (a fixed reference for every point) is
+    linear -- (y-ref)/ref -- so its 1/ref (or 100/ref for percent) multiplier applies
+    cleanly to an error column, which only needs its magnitude scaled, not shifted."""
+    if factor.startswith(CUSTOM_FACTOR_PREFIX):
+        try:
+            return float(factor[len(CUSTOM_FACTOR_PREFIX):])
+        except ValueError:
+            return 1.0
+    if factor.startswith(REL_VALUE_PREFIX):
+        mode, _, rest = factor[len(REL_VALUE_PREFIX):].partition(":")
+        try:
+            ref = float(rest)
+        except ValueError:
+            return 1.0
+        if ref == 0:
+            return 1.0
+        return (100.0 if mode == "pct" else 1.0) / ref
+    if "1e-3" in factor:
+        return 1e-3
+    if "1e-6" in factor:
+        return 1e-6
+    if "1e-9" in factor:
+        return 1e-9
+    if "1e3" in factor:
+        return 1e3
+    return 1.0
+
+
+def common_label(names: list) -> str:
+    """A short label for a group of related names, e.g. ``["a_1","a_2","a_3"]`` ->
+    ``"a"``. Falls back to a common suffix, then the first name, if they don't share a
+    usable prefix."""
+    prefix = os.path.commonprefix(names).rstrip("_- ")
+    if prefix:
+        return prefix
+    suffix = os.path.commonprefix([n[::-1] for n in names])[::-1].lstrip("_- ")
+    return suffix or names[0]
+
+
+def aggregate_series(arrays: list) -> dict:
+    """Row-wise mean / std / min-max summary across several equal-length y arrays --
+    e.g. one per repeat trace of the same measurement, each already resolved (so each
+    one's own :attr:`TraceRef.scale_factor` -- a per-series baseline normalization via
+    ``REL_INDEX_PREFIX``, say -- is already baked in if the caller wants that).
+
+    Returns ``{"mean", "std", "err_min", "err_max"}``, arrays the same length as the
+    input. ``err_min``/``err_max`` are already offsets from the mean (``mean - min`` /
+    ``max - mean``), ready to feed straight into an asymmetric errorbar. Raises
+    :class:`ValueError` for fewer than 2 arrays, or if their lengths differ.
+    """
+    if len(arrays) < 2:
+        raise ValueError("need at least 2 series to aggregate")
+    arrays = [np.asarray(a, dtype=float) for a in arrays]
+    lengths = {len(a) for a in arrays}
+    if len(lengths) != 1:
+        raise ValueError(f"series have different lengths: {sorted(lengths)}")
+    stack = np.column_stack(arrays)
+    mean = stack.mean(axis=1)
+    return {
+        "mean": mean,
+        "std": stack.std(axis=1, ddof=1),
+        "err_min": mean - stack.min(axis=1),
+        "err_max": stack.max(axis=1) - mean,
+    }
 
 
 class ColorMap:
@@ -220,7 +335,8 @@ class TraceRef:
     """A pointer from a subplot to one ``(data object, x col, y col)`` + its style."""
 
     _STYLE_FIELDS = ("plot_type", "color", "edge_color", "line_style", "line_width",
-                     "marker", "marker_size", "alpha", "scale_factor")
+                     "marker", "marker_size", "alpha", "scale_factor",
+                     "show_errorbar", "yerr_mode")
 
     def __init__(self, data_id, x_col, y_col, label="", enabled=True):
         self.data_id = data_id
@@ -238,6 +354,25 @@ class TraceRef:
         self.marker_size = 6.0
         self.alpha = 1.0
         self.scale_factor = "1x"
+
+        # Errorbar overlay: independent of plot_type, so any of them (Line, Scatter,
+        # ...) can carry error whiskers -- "Scatter + errorbar" is just plot_type
+        # "Scatter" with show_errorbar True. yerr_col / yerr_low_col / yerr_high_col
+        # point at the column(s) holding the error (usually on a derived DataObject
+        # built by combining several repeat traces -- see app._combine_selected_traces);
+        # yerr_mode picks which of them resolve_yerr() actually returns.
+        self.show_errorbar = False
+        self.yerr_col = ""          # symmetric error, used when yerr_mode == "std"
+        self.yerr_low_col = ""      # offset below the mean (mean - min)
+        self.yerr_high_col = ""     # offset above the mean (max - mean)
+        self.yerr_mode = "std"      # "std" | "minmax" -- see model.ERROR_MODES
+
+    @property
+    def has_error_data(self) -> bool:
+        """Whether this trace has error column(s) to show at all (regardless of
+        whether :attr:`show_errorbar` is currently on) -- gates the "Show error bars"
+        checkbox in the UI."""
+        return bool(self.yerr_col or (self.yerr_low_col and self.yerr_high_col))
 
     @property
     def display_label(self) -> str:
@@ -257,9 +392,28 @@ class TraceRef:
         y = apply_y_transform(data_object.get(self.y_col), self.scale_factor)
         return x, np.asarray(y, dtype=float)
 
+    def resolve_yerr(self, data_object: DataObject):
+        """Return the y-error data (independent of :attr:`show_errorbar` -- that flag
+        only gates whether *rendering* draws it), or ``None`` if there's none set.
+
+        ``yerr_mode == "minmax"`` (with both columns set) returns a ``(2, N)`` array of
+        (lower, upper) offsets from :attr:`yerr_low_col` / :attr:`yerr_high_col`;
+        otherwise a 1-D symmetric array from :attr:`yerr_col`.
+        """
+        scale = _yerr_scale(self.scale_factor)
+        if self.yerr_mode == "minmax" and self.yerr_low_col and self.yerr_high_col:
+            lo = np.asarray(data_object.get(self.yerr_low_col), dtype=float) * scale
+            hi = np.asarray(data_object.get(self.yerr_high_col), dtype=float) * scale
+            return np.vstack([lo, hi])
+        if self.yerr_col:
+            return np.asarray(data_object.get(self.yerr_col), dtype=float) * scale
+        return None
+
     def to_dict(self) -> dict:
         d = {"data_id": self.data_id, "x_col": self.x_col, "y_col": self.y_col,
-             "label": self.label, "enabled": self.enabled}
+             "label": self.label, "enabled": self.enabled,
+             "yerr_col": self.yerr_col, "yerr_low_col": self.yerr_low_col,
+             "yerr_high_col": self.yerr_high_col}
         d.update(self.style_dict())
         return d
 
@@ -267,6 +421,9 @@ class TraceRef:
     def from_dict(cls, d: dict) -> "TraceRef":
         t = cls(d["data_id"], d.get("x_col", ""), d["y_col"],
                 d.get("label", ""), d.get("enabled", True))
+        t.yerr_col = d.get("yerr_col", "")
+        t.yerr_low_col = d.get("yerr_low_col", "")
+        t.yerr_high_col = d.get("yerr_high_col", "")
         t.apply_style(d)
         return t
 

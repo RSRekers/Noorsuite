@@ -179,6 +179,19 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   only, independent of `TraceRef.scale_factor` (which rescales the underlying data) and of the
   axis's own data aspect.
 
+- **Resizing re-runs `tight_layout()` too, not just `render()`.** `render()` ends with
+  `fig.tight_layout()`, but the canvas gets resized far more often than the model
+  actually changes — letterboxing (`_AspectCanvasHost`, a fixed figure aspect), a
+  splitter drag, undocking, maximizing, or just resizing the window all resize the
+  underlying `FigureCanvasQTAgg` without going through `render()`. Without a matching
+  re-layout, the axes rect stays at the fraction-of-figure `tight_layout()` picked for
+  the *previous* size, so labels/ticks sized for that size can end up clipped
+  (invisible) at the new one — toggling something that forces a full `render()` (e.g.
+  border width) was the only thing that "fixed" it, since `render()` recomputes the
+  layout as a side effect. Fixed by `self.canvas.mpl_connect("resize_event",
+  self._on_canvas_resize)` in `PlotSheet.__init__` — the handler just re-runs
+  `fig.tight_layout()` (guarded, same as in `render()`) and `canvas.draw_idle()`.
+
 - **Active-subplot cue is a figure-level rectangle, not spine styling.** A `draw_event`
   handler (`PlotSheet._on_draw`, reentrancy-guarded) places `self._highlight_patch` — a dashed
   `Rectangle` around the active axes' `get_tightbbox` (which includes the title and labels),
@@ -204,6 +217,73 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   the trace style combos offer — all valid matplotlib marker codes, so adding one is just
   appending to both lists.
 
+- **Error bars are an overlay, not a plot type.** `PLOT_TYPES` stays `Line` / `Scatter` /
+  `Line+Scatter` / `Step` / `Bar` — error whiskers are `TraceRef.show_errorbar` (bool),
+  independent of `plot_type`, so "Scatter + errorbar" is just plot type `"Scatter"` with
+  that flag on (a `Line`/`Bar`/etc. trace can carry it too). `yerr_col` (symmetric, e.g.
+  std. deviation) or `yerr_low_col`/`yerr_high_col` (asymmetric offsets from the mean,
+  e.g. min/max span) hold the error data; `yerr_mode` (`"std"` | `"minmax"`,
+  `model.ERROR_MODES`) picks which `TraceRef.resolve_yerr(data_object)` returns — a 1-D
+  array or a `(2, N)` array — regardless of `show_errorbar` (that flag only gates
+  *rendering*, so the data stays resolvable even while the overlay is off).
+  `TraceRef.has_error_data` is `bool(yerr_col or (yerr_low_col and yerr_high_col))`,
+  used to disable the "Show error bars" checkbox on a trace with nothing to show.
+  `_yerr_scale` keeps `resolve_yerr` consistent with `scale_factor` for the constant-
+  multiplier tokens and `REL_VALUE_PREFIX` (all linear); `REL_INDEX_PREFIX` and
+  Log10/Norm aren't linear (or their reference isn't in the token), so they leave the
+  error unscaled. In `sheet.py`, `render` draws each trace's normal `_draw_trace` first,
+  then, if `show_errorbar` and `resolve_yerr` isn't `None`, layers whiskers on top via
+  `_draw_error_overlay` — `ax.errorbar(x, y, yerr=..., fmt="none", ...)` (`fmt="none"`
+  so it draws only the whiskers, not a second line/marker); the returned
+  `ErrorbarContainer` isn't itself a picker-friendly `Artist`, so hit-testing maps every
+  `container.lines[2]` bar (the vertical whiskers) to the `TraceRef` in `artist_map`.
+
+  **Building one**: select 2+ traces that share the same x values in the active
+  subplot's trace list (`self.subplot_traces`, e.g. several repeat measurements each
+  already added the normal way via the column picker) and click **"Combine into mean ±
+  error trace..."** (`app._combine_selected_traces_dialog` / `CombineTracesDialog`) —
+  it resolves each selected trace via its own `TraceRef.resolve(data)` (so each one's
+  *own* `scale_factor` is already baked in — see the per-series normalization note
+  below), rejects the set if their x arrays don't match (`np.allclose`, a
+  `QMessageBox.warning`, nothing changed), then `model.aggregate_series(arrays)`
+  (Qt-free: row-wise mean/std/min-max across equal-length arrays, `err_min`/`err_max`
+  already mean-relative offsets; raises `ValueError` for fewer than 2 arrays or
+  mismatched lengths) builds one **new derived `DataObject`** (`"<label> (n=<n>
+  mean±err)"`, columns `x`/`mean`/`std`/`err_min`/`err_max`, `source="combined"` —
+  computed once at combine time, not live-linked back to the originals) and one new
+  `TraceRef` (`plot_type` from the dialog's "Base plot style" combo, `show_errorbar =
+  True`, colour = the first selected trace's) that by default replaces the selected
+  traces at the earliest one's position (`CombineTracesDialog`'s "Remove the original
+  traces" checkbox, on by default) — the multi-select button itself
+  (`self.combine_btn`) only enables at 2+ selected (`_on_subplot_trace_selection`).
+  `model.common_label(names)` (also used for the combined trace's label) takes a common
+  prefix, else a common suffix, else the first name, e.g. `["a_1","a_2","a_3"] -> "a"`.
+
+  **`yerr_mode`** is editable afterwards from the Trace Style tab/dialog
+  (`TraceStyleWidget.errbar_check` + `errbar_mode_combo`, shown/enabled only when
+  `has_error_data`) — switching it is instant since both error columns already exist;
+  it's in `_STYLE_FIELDS` (serializes, included in the Cancel-dialog snapshot) and in
+  `app._TRACE_STYLE_BROADCAST_FIELDS` ("Apply this trace's style to all traces" can
+  carry it over too — `show_errorbar` itself deliberately isn't broadcast, since
+  copying "on" onto a trace with no error columns would be a no-op at best).
+
+- **Relative-change Y-transforms** (`model.REL_VALUE_PREFIX` / `REL_INDEX_PREFIX`,
+  tokens `Y_TRANSFORMS` entries `"rel_value"` / `"rel_index"`) express `(y-ref)/ref`,
+  as a fraction or `*100` as a percent (`model.REL_MODES`/`REL_MODE_LABELS`, `"frac"` |
+  `"pct"`) — token shape `f"{PREFIX}{mode}:{ref}"`, e.g. `"relval:pct:100"`.
+  `REL_VALUE_PREFIX`'s `ref` is a fixed number, the same for every point.
+  `REL_INDEX_PREFIX`'s `ref` is resolved from `y` itself (`y[row index]`), so applying
+  it to each of several repeat traces *individually* (each keeps its own `scale_factor`)
+  normalizes each to **its own** baseline before they're ever aggregated — exactly what
+  "Combine into mean ± error trace..." needs for a meaningful spread when the repeats
+  don't share one absolute baseline: set each trace's Y transform to "Relative to nth
+  point..." first, *then* combine (resolving each via its own transform, per above) —
+  aggregating raw values and rescaling only the combined mean afterward would blur that
+  per-series difference. `TraceStyleWidget` shows a `relref_edit` (reference value or
+  row index, depending which of the two is picked) and `relmode_combo` (frac/pct) only
+  for these two transform choices (`_on_transform_changed` / `_set_row_visible`, the
+  same show/hide pattern as the "Show error bars" row and the "custom factor" field).
+
 - **`ProjectModel` is the only serialization root** — `.sciproj` files *and* the
   `~/.scisuite_session.json` autosave. It carries `data_objects`, `images`, `sheets`
   (subplots + `TraceRef`s + `image` + figure-frame + grid + `tags` + `notes` + per-sheet
@@ -223,9 +303,13 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
 - **Project file identity & autosave.** `SciSuiteWindow.project_path` is set by *Save As…* /
   *Open* only (not by the session autosave). The toolbar `project_label` + window title show
   `_project_name()` (`Path(project_path).stem` or "Untitled project"). Ctrl+S → `_quick_save`
-  (writes `project_path`, or falls back to Save As); a `QTimer` (`_AUTOSAVE_SECONDS`) calls
-  `_autosave_project` which re-writes `project_path` if set. `closeEvent` does one last
-  autosave.
+  (writes `project_path`, or falls back to Save As). A `QTimer` (`_AUTOSAVE_SECONDS`, 120s)
+  fires `_periodic_autosave`, which **always** calls `save_session()` (crash-recovery file
+  `~/.scisuite_session.json`, via `_project_model()`) regardless of whether a project file
+  is set, then also `_autosave_project()` (re-writes `project_path`) when one is. Previously
+  `save_session()` only ran from `closeEvent` — a crash or killed process between saves lost
+  everything since the last clean close; the timer now covers that gap too. `closeEvent`
+  still does one last `save_session()` (+ `_autosave_project()` if a project file is set).
 
 ### UI layout (`app.py`)
 
@@ -237,7 +321,8 @@ multi-selection of two-or-more DataObjects for **"Add common column(s) to sheet.
 over `column_order`; a plain info box if there are none) with the same tick-one-X/tick-many-Y
 `QTreeWidget` pattern as `ColumnTree`, then `_add_common_columns` adds one `TraceRef` per
 `(object, ticked y column)` pair — same x column, each labeled `"<object name>: <y column>"` —
-to the active or a new sheet, each getting its own colour-cycle colour via `_next_trace_color`)
+to the active or a new sheet, each getting its own colour-cycle colour via `_next_trace_color`;
+right-click a **single** DataObject instead for rename/tags/delete)
 → **middle `QStackedWidget`**: page 0 = **column picker** (`ColumnTree` X/Y ticks + `head()`
 preview + "Add to active/new sheet"; valid X+Y is draggable, MIME
 `application/x-scisuite-cols`; also `ExtendedSelection` on the column rows — Ctrl/Shift-click
@@ -276,7 +361,9 @@ would get) before `_sync_subplot_trace_list`, then re-selects the moved trace(s)
 identity, since their positions changed. Trace order drives both z-order — later entries draw
 on top — and legend order, so this is how to fix "right traces, wrong order/stacking".
 Selecting any trace(s) here — one or several — also flips `inspector_tabs` to "Trace Style",
-so the style/Y-transform controls are visible regardless of which tab was open), the
+so the style/Y-transform controls are visible regardless of which tab was open; 2+ selected
+also enables **"Combine into mean ± error trace..."** below "Remove selected trace(s)" — see
+"Error bars are an overlay, not a plot type" above), the
 **`ColormapPanel`**, and the
 Axes / Trace Style / **Figure** inspector tabs (`inspector_tabs`; the Figure tab is
 `FigureStyleWidget` bound to the *active sheet* via `sync_active_subplot_inspector`, the same

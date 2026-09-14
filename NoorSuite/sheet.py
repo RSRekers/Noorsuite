@@ -95,6 +95,7 @@ class PlotSheet(QWidget):
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.canvas.mpl_connect("button_press_event", self.on_canvas_click)
         self.canvas.mpl_connect("draw_event", self._on_draw)
+        self.canvas.mpl_connect("resize_event", self._on_canvas_resize)
 
         # Render-pass bookkeeping for hit-testing.
         self.artist_map = {}          # Artist -> TraceRef / ImageRef
@@ -452,6 +453,13 @@ class PlotSheet(QWidget):
                 except Exception:
                     continue
                 self._draw_trace(ax, tref, x, y)
+                if tref.show_errorbar:
+                    try:
+                        yerr = tref.resolve_yerr(data)
+                    except Exception:
+                        yerr = None
+                    if yerr is not None:
+                        self._draw_error_overlay(ax, tref, x, y, yerr)
                 n_drawn += 1
 
             if sub.x_min is not None or sub.x_max is not None:
@@ -566,6 +574,33 @@ class PlotSheet(QWidget):
                                edgecolor=tref.edge_color, alpha=tref.alpha)
             for art in container:
                 self.artist_map[art] = tref
+
+    def _draw_error_overlay(self, ax, tref, x, y, yerr):
+        """Error-bar whiskers on top of whatever :meth:`_draw_trace` already drew --
+        independent of ``plot_type``, so "Scatter + errorbar" and "Line + errorbar" are
+        both just this on top of their normal trace (see TraceRef.show_errorbar).
+        ``fmt="none"`` so this call draws only the whiskers, not another line/marker."""
+        container = ax.errorbar(
+            x, y, yerr=yerr, fmt="none", ecolor=tref.color,
+            elinewidth=max(0.6, tref.line_width * 0.6), capsize=3, alpha=tref.alpha,
+            zorder=2.5)
+        for lc in container.lines[2]:
+            self.artist_map[lc] = tref
+
+    def _on_canvas_resize(self, event):
+        """Re-run tight_layout() whenever the canvas actually changes pixel size --
+        letterboxing (fixed figure aspect), a splitter drag, undocking, maximizing, or
+        just resizing the window all resize the underlying FigureCanvasQTAgg without
+        recomputing the subplot layout on their own. Without this, the axes rect stays
+        at the fraction-of-figure tight_layout() picked for the *previous* size, so
+        labels/ticks sized for that size can end up clipped (invisible) at the new one
+        -- toggling something that forces a full render() (e.g. border width) was the
+        only thing that "fixed" it, because render() itself ends with tight_layout()."""
+        try:
+            self.fig.tight_layout()
+        except Exception:
+            pass
+        self.canvas.draw_idle()
 
     # ----------------------------------------------------- active-subplot cue
     def _on_draw(self, event):

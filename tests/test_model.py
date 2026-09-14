@@ -1,9 +1,11 @@
 import numpy as np
 import pytest
 
-from NoorSuite.model import (INDEX_COL, PROJECT_VERSION, ColorMap, DataObject,
-                            ImageObject, ImageRef, ProjectModel, SheetModel,
-                            SubplotModel, TraceRef, resolve_sidecar_names)
+from NoorSuite.model import (INDEX_COL, PROJECT_VERSION, REL_INDEX_PREFIX,
+                            REL_VALUE_PREFIX, ColorMap, DataObject, ImageObject,
+                            ImageRef, ProjectModel, SheetModel, SubplotModel,
+                            TraceRef, aggregate_series, apply_y_transform,
+                            common_label, resolve_sidecar_names)
 
 
 def _obj(name="run", n=6):
@@ -60,6 +62,126 @@ def test_traceref_resolve_with_index_x():
     x, y = ref.resolve(obj)
     np.testing.assert_array_equal(x, [0, 1, 2, 3])
     np.testing.assert_allclose(y, obj.columns["b"])
+
+
+def test_aggregate_series_mean_std_minmax():
+    agg = aggregate_series([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]])
+    np.testing.assert_allclose(agg["mean"], [2.0, 20.0])
+    np.testing.assert_allclose(agg["std"], [np.std([1.0, 2.0, 3.0], ddof=1),
+                                            np.std([10.0, 20.0, 30.0], ddof=1)])
+    np.testing.assert_allclose(agg["err_min"], [1.0, 10.0])   # mean - min
+    np.testing.assert_allclose(agg["err_max"], [1.0, 10.0])   # max - mean
+
+
+def test_aggregate_series_rejects_bad_input():
+    with pytest.raises(ValueError):
+        aggregate_series([[1.0, 2.0]])                     # only one series
+    with pytest.raises(ValueError):
+        aggregate_series([[1.0, 2.0], [1.0, 2.0, 3.0]])     # mismatched lengths
+
+
+def test_common_label_prefix_and_suffix_and_fallback():
+    assert common_label(["a_1", "a_2", "a_3"]) == "a"
+    assert common_label(["run1_x", "run2_x"]) == "run"
+    assert common_label(["foo", "bar"]) == "foo"
+
+
+def test_traceref_resolve_yerr_std_and_minmax_modes_independent_of_show_errorbar():
+    obj = DataObject("agg", {
+        "t": [0.0, 1.0], "mean": [5.0, 6.0], "std": [0.5, 0.6],
+        "err_min": [1.0, 1.2], "err_max": [2.0, 2.4],
+    }, column_order=["t", "mean", "std", "err_min", "err_max"])
+    ref = TraceRef(obj.id, "t", "mean")
+    ref.plot_type = "Line"          # errorbars are an overlay, not a plot type
+    ref.yerr_col = "std"
+    ref.yerr_low_col = "err_min"
+    ref.yerr_high_col = "err_max"
+    assert ref.has_error_data
+
+    ref.yerr_mode = "std"
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [0.5, 0.6])
+
+    ref.yerr_mode = "minmax"
+    lo_hi = ref.resolve_yerr(obj)
+    np.testing.assert_allclose(lo_hi[0], [1.0, 1.2])
+    np.testing.assert_allclose(lo_hi[1], [2.0, 2.4])
+
+    # resolve_yerr is available regardless of show_errorbar -- that flag only gates
+    # whether rendering draws it
+    assert ref.show_errorbar is False
+    assert ref.resolve_yerr(obj) is not None
+
+
+def test_traceref_no_error_columns_has_no_error_data():
+    ref = TraceRef("d1", "t", "a")
+    assert not ref.has_error_data
+    obj = DataObject("d", {"t": [0.0], "a": [1.0]}, column_order=["t", "a"])
+    assert ref.resolve_yerr(obj) is None
+
+
+def test_traceref_resolve_yerr_scales_with_linear_scale_factor():
+    obj = DataObject("agg", {"t": [0.0], "mean": [1.0], "std": [0.1]},
+                     column_order=["t", "mean", "std"])
+    ref = TraceRef(obj.id, "t", "mean")
+    ref.yerr_col = "std"
+    ref.scale_factor = "1e3"
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [100.0])
+
+
+def test_traceref_roundtrip_preserves_yerr_and_show_errorbar_fields():
+    obj = _obj(n=3)
+    ref = TraceRef(obj.id, "t", "a")
+    ref.show_errorbar = True
+    ref.yerr_col = "err"
+    ref.yerr_low_col = "lo"
+    ref.yerr_high_col = "hi"
+    ref.yerr_mode = "minmax"
+    restored = TraceRef.from_dict(ref.to_dict())
+    assert restored.show_errorbar is True
+    assert restored.yerr_col == "err"
+    assert restored.yerr_low_col == "lo"
+    assert restored.yerr_high_col == "hi"
+    assert restored.yerr_mode == "minmax"
+
+
+def test_relative_change_value_reference_fraction_and_percent():
+    y = [50.0, 100.0, 150.0]
+    frac = apply_y_transform(y, f"{REL_VALUE_PREFIX}frac:100")
+    np.testing.assert_allclose(frac, [-0.5, 0.0, 0.5])
+    pct = apply_y_transform(y, f"{REL_VALUE_PREFIX}pct:100")
+    np.testing.assert_allclose(pct, [-50.0, 0.0, 50.0])
+
+
+def test_relative_change_index_reference_is_per_series():
+    # each series normalized to ITS OWN value at row 0 -- different baselines
+    a = apply_y_transform([10.0, 20.0, 30.0], f"{REL_INDEX_PREFIX}frac:0")
+    b = apply_y_transform([5.0, 10.0, 15.0], f"{REL_INDEX_PREFIX}frac:0")
+    np.testing.assert_allclose(a, [0.0, 1.0, 2.0])
+    np.testing.assert_allclose(b, [0.0, 1.0, 2.0])   # same relative growth, different abs values
+
+
+def test_relative_change_handles_zero_reference_gracefully():
+    y = [0.0, 1.0, 2.0]
+    out = apply_y_transform(y, f"{REL_VALUE_PREFIX}frac:0")
+    np.testing.assert_allclose(out, [0.0, 1.0, 2.0])   # denom falls back to 1.0, no crash
+
+
+def test_yerr_scale_linear_for_rel_value_not_for_rel_index():
+    obj = DataObject("agg", {"t": [0.0], "mean": [50.0], "std": [10.0]},
+                     column_order=["t", "mean", "std"])
+    ref = TraceRef(obj.id, "t", "mean")
+    ref.yerr_col = "std"
+
+    ref.scale_factor = f"{REL_VALUE_PREFIX}pct:50"    # (y-ref)/ref*100 -> multiplier 100/50=2
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [20.0])
+
+    ref.scale_factor = f"{REL_VALUE_PREFIX}frac:50"   # (y-ref)/ref -> multiplier 1/50
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [0.2])
+
+    # REL_INDEX's reference comes from the data, not the token -- no fixed multiplier
+    # can be derived from scale_factor alone, so the error is left unscaled (1.0)
+    ref.scale_factor = f"{REL_INDEX_PREFIX}frac:0"
+    np.testing.assert_allclose(ref.resolve_yerr(obj), [10.0])
 
 
 def test_subplotmodel_roundtrip_includes_traces_grid_and_image():

@@ -20,7 +20,7 @@ import numpy as np
 from matplotlib import rcParams
 from PyQt6.QtCore import QByteArray, QMimeData, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QDrag, QIcon, QImage, QKeySequence
-from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QDialog,
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog,
                              QDialogButtonBox, QFileDialog, QHBoxLayout,
                              QInputDialog, QLabel, QLineEdit, QListWidget,
                              QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -38,9 +38,9 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_REMOVE_DATA,
                   ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
-from .model import (INDEX_COL, ColorMap, DataObject, ImageObject, ImageRef,
-                    ProjectModel, SheetModel, SubplotModel, TraceRef, _new_id,
-                    resolve_sidecar_names)
+from .model import (INDEX_COL, PLOT_TYPES, ColorMap, DataObject, ImageObject,
+                    ImageRef, ProjectModel, SheetModel, SubplotModel, TraceRef,
+                    _new_id, aggregate_series, common_label, resolve_sidecar_names)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
 
@@ -80,7 +80,7 @@ _AXES_STYLE_BROADCAST_FIELDS = tuple(
 # "Apply to all traces" (TraceStyleWidget) copies line/marker style, not colour (which
 # differentiates traces) or scale_factor (which is data-dependent, like axis limits).
 _TRACE_STYLE_BROADCAST_FIELDS = ("plot_type", "line_style", "line_width",
-                                 "marker", "marker_size", "alpha")
+                                 "marker", "marker_size", "alpha", "yerr_mode")
 
 ITEM_TYPE_ROLE = Qt.ItemDataRole.UserRole + 1
 ITEM_ID_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -515,6 +515,47 @@ class CommonColumnsDialog(QDialog):
         return x_col, y_cols
 
 
+class CombineTracesDialog(QDialog):
+    """"Combine into mean +/- error trace..." on 2+ selected traces in the active
+    subplot's trace list -- pick the resulting trace's base plot style (so it's
+    "Scatter + errorbar" or "Line + errorbar", the error overlay is independent of
+    plot type -- see TraceRef.show_errorbar) and whether to remove the originals."""
+
+    def __init__(self, refs: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Combine into mean ± error trace")
+        layout = QVBoxLayout(self)
+        names = ", ".join(r.display_label for r in refs)
+        info = QLabel(
+            f"Combine {len(refs)} traces ({names}) into one trace showing their "
+            "row-wise mean, with the std. deviation or the min/max span available as "
+            "an error-bar overlay (switch between them afterwards from the Trace "
+            "Style tab).")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QHBoxLayout()
+        form.addWidget(QLabel("Base plot style:"))
+        self.style_combo = QComboBox()
+        self.style_combo.addItems(PLOT_TYPES)
+        form.addWidget(self.style_combo, 1)
+        layout.addLayout(form)
+
+        self.remove_check = QCheckBox("Remove the original traces")
+        self.remove_check.setChecked(True)
+        layout.addWidget(self.remove_check)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def selection(self):
+        """Return ``(plot_type, remove_originals)``."""
+        return self.style_combo.currentText(), self.remove_check.isChecked()
+
+
 # =====================================================================
 # Main window
 # =====================================================================
@@ -555,7 +596,7 @@ class SciSuiteWindow(QMainWindow):
 
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(_AUTOSAVE_SECONDS * 1000)
-        self._autosave_timer.timeout.connect(self._autosave_project)
+        self._autosave_timer.timeout.connect(self._periodic_autosave)
         self._autosave_timer.start()
 
     # --------------------------------------------------------- project identity
@@ -714,6 +755,14 @@ class SciSuiteWindow(QMainWindow):
         rm_btn = QPushButton("Remove selected trace(s)")
         rm_btn.clicked.connect(self._remove_selected_subplot_traces)
         tb.addWidget(rm_btn)
+        self.combine_btn = QPushButton("Combine into mean ± error trace...")
+        self.combine_btn.setToolTip(
+            "Select 2 or more traces that share the same x values (e.g. repeat "
+            "measurements) and merge them into one trace showing their mean, with an "
+            "error-bar overlay (std. deviation or min/max span).")
+        self.combine_btn.setEnabled(False)
+        self.combine_btn.clicked.connect(self._combine_selected_traces_dialog)
+        tb.addWidget(self.combine_btn)
         layout.addWidget(CollapsibleSection("Active subplot traces (tick = shown)", traces_body))
 
         self.colormap_panel = ColormapPanel(self)
@@ -1040,6 +1089,87 @@ class SciSuiteWindow(QMainWindow):
             self._sync_subplot_trace_list()
         self._refresh_ipc_snapshot()
 
+    def _combine_selected_traces_dialog(self):
+        """"Combine into mean +/- error trace..." on 2+ selected traces in the active
+        subplot's trace list -- a "joint series" (e.g. several repeat measurements each
+        already added as their own trace). Each is resolved with its own current style
+        (so a per-series Y-transform, e.g. "Relative to nth point...", is already baked
+        in if the user set one on each first), row-wise aggregated into mean/std/min-max,
+        and replaces the selection with one new trace carrying the result plus an
+        errorbar overlay -- see :class:`CombineTracesDialog`."""
+        refs = self._selected_trace_refs()
+        if len(refs) < 2:
+            return
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        resolved = []
+        for ref in refs:
+            data = self.repository.get(ref.data_id)
+            if data is None or ref.y_col not in data.columns:
+                QMessageBox.warning(self, "Can't combine",
+                                    f"'{ref.display_label}' has no data to resolve.")
+                return
+            try:
+                x, y = ref.resolve(data)
+            except Exception as e:
+                QMessageBox.warning(self, "Can't combine", str(e))
+                return
+            resolved.append((x, y))
+        x0 = resolved[0][0]
+        for x, _ in resolved[1:]:
+            if len(x) != len(x0) or not np.allclose(x, x0, equal_nan=True):
+                QMessageBox.warning(
+                    self, "Can't combine",
+                    "The selected traces don't share the same x values -- combining "
+                    "them row-by-row wouldn't be meaningful.")
+                return
+
+        dlg = CombineTracesDialog(refs, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        plot_type, remove_originals = dlg.selection()
+        self._combine_selected_traces(sm, refs, x0, [y for _, y in resolved],
+                                      plot_type, remove_originals)
+
+    def _combine_selected_traces(self, sm, refs, x, ys, plot_type, remove_originals):
+        agg = aggregate_series(ys)
+        label = common_label([r.display_label for r in refs])
+        columns = {"x": x, "mean": agg["mean"], "std": agg["std"],
+                  "err_min": agg["err_min"], "err_max": agg["err_max"]}
+        new_obj = DataObject(f"{label} (n={len(refs)} mean±err)", columns,
+                             ["x", "mean", "std", "err_min", "err_max"], source="combined")
+        self.repository[new_obj.id] = new_obj
+
+        # _selected_trace_refs() only ever returns rows from the active subplot's own
+        # trace list, so that's where every ref in `refs` lives.
+        sub = sm.get_active_subplot()
+        insert_at = min((sub.traces.index(r) for r in refs if r in sub.traces),
+                        default=len(sub.traces))
+        color = refs[0].color
+
+        new_ref = TraceRef(new_obj.id, "x", "mean", label=label)
+        new_ref.plot_type = plot_type
+        new_ref.color = color
+        new_ref.show_errorbar = True
+        new_ref.yerr_col = "std"
+        new_ref.yerr_low_col = "err_min"
+        new_ref.yerr_high_col = "err_max"
+
+        if remove_originals:
+            for sub2 in sm.subplots:
+                sub2.traces = [t for t in sub2.traces if t not in refs]
+            sub.traces.insert(min(insert_at, len(sub.traces)), new_ref)
+        else:
+            sub.traces.append(new_ref)
+
+        self._render_sheet(sm.sheet_id)
+        if sm is self._active_sheet_model():
+            self._sync_subplot_trace_list()
+        self._refresh_data_list()
+        self._refresh_ipc_snapshot()
+        self._refresh_ipc_data()
+
     # -------------------------------------------------------------- sheet/tabs
     def _create_sheet_model(self, name=None) -> SheetModel:
         name = name or f"Sheet {len(self.sheets) + 1}"
@@ -1330,6 +1460,7 @@ class SciSuiteWindow(QMainWindow):
         if refs:
             self.inspector_tabs.setCurrentIndex(1)   # surface the (bulk or single) editor
         self.trace_broadcast_btn.setEnabled(len(refs) == 1)
+        self.combine_btn.setEnabled(len(refs) >= 2)
 
     def _apply_trace_style_to_all_traces(self):
         """Copy the one selected trace's line/marker style to every other trace in
@@ -1742,6 +1873,15 @@ class SciSuiteWindow(QMainWindow):
         if self._write_project(self.project_path):
             self.statusBar().showMessage(
                 f"Saved {self._project_name()}  -  {time.strftime('%H:%M:%S')}", 4000)
+
+    def _periodic_autosave(self):
+        """Timer tick (every ``_AUTOSAVE_SECONDS``): always refresh the crash-recovery
+        session file (``~/.scisuite_session.json``) -- previously that only happened on
+        a clean window close, so a crash or a killed process lost everything since the
+        last close -- and additionally re-save the named project file, if any."""
+        self.save_session()
+        if self.project_path:
+            self._autosave_project()
 
     def _autosave_project(self):
         if not self.project_path:
