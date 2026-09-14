@@ -39,7 +39,7 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_REMOVE_DATA,
                   ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
 from .model import (INDEX_COL, ColorMap, DataObject, ImageObject, ImageRef,
-                    ProjectModel, SheetModel, TraceRef, _new_id,
+                    ProjectModel, SheetModel, SubplotModel, TraceRef, _new_id,
                     resolve_sidecar_names)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
@@ -69,6 +69,18 @@ QTreeView::indicator:indeterminate, QListView::indicator:indeterminate {
     background: #a9c9e8; border: 1px solid #135686;
 }
 """
+
+# "Apply to all subplots" (AxesStyleWidget) copies every SubplotModel field except the
+# ones that are inherently per-subplot *content* rather than style: the title/labels
+# (text) and the axis limits (data-range specific -- different subplots often show very
+# different y ranges, so forcing one subplot's limits onto another would usually be wrong).
+_AXES_STYLE_BROADCAST_FIELDS = tuple(
+    f for f in SubplotModel._FIELDS
+    if f not in ("title", "x_label", "y_label", "x_min", "x_max", "y_min", "y_max"))
+# "Apply to all traces" (TraceStyleWidget) copies line/marker style, not colour (which
+# differentiates traces) or scale_factor (which is data-dependent, like axis limits).
+_TRACE_STYLE_BROADCAST_FIELDS = ("plot_type", "line_style", "line_width",
+                                 "marker", "marker_size", "alpha")
 
 ITEM_TYPE_ROLE = Qt.ItemDataRole.UserRole + 1
 ITEM_ID_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -710,9 +722,22 @@ class SciSuiteWindow(QMainWindow):
                                             expanded=False))
 
         self.inspector_tabs = QTabWidget()
+
         self.axes_widget = AxesStyleWidget()
         self.axes_widget.changed.connect(self._after_axes_edit)
-        self.inspector_tabs.addTab(_in_scroll(self.axes_widget), "Axes / Panel")
+        axes_tab = QWidget()
+        axes_tab_l = QVBoxLayout(axes_tab)
+        axes_tab_l.setContentsMargins(0, 0, 0, 0)
+        axes_tab_l.addWidget(_in_scroll(self.axes_widget), 1)
+        self.axes_broadcast_btn = QPushButton("Apply this style to all subplots")
+        self.axes_broadcast_btn.setToolTip(
+            "Copies this subplot's tick/spine/background/grid/legend/number-format/aspect "
+            "style to every other subplot in the sheet. Title, axis labels, and axis limits "
+            "stay per-subplot.")
+        self.axes_broadcast_btn.clicked.connect(self._apply_axes_style_to_all_subplots)
+        axes_tab_l.addWidget(self.axes_broadcast_btn)
+        self.inspector_tabs.addTab(axes_tab, "Axes / Panel")
+
         self.trace_widget = TraceStyleWidget()
         self.trace_widget.changed.connect(self._after_trace_edit)
         self.bulk_widget = BulkTraceEditWidget()
@@ -723,7 +748,20 @@ class SciSuiteWindow(QMainWindow):
         _sl.addWidget(self.trace_widget)
         _sl.addWidget(self.bulk_widget)
         self.bulk_widget.hide()
-        self.inspector_tabs.addTab(_in_scroll(self._trace_tab_stack), "Trace Style")
+        trace_tab = QWidget()
+        trace_tab_l = QVBoxLayout(trace_tab)
+        trace_tab_l.setContentsMargins(0, 0, 0, 0)
+        trace_tab_l.addWidget(_in_scroll(self._trace_tab_stack), 1)
+        self.trace_broadcast_btn = QPushButton("Apply this trace's line style to all traces")
+        self.trace_broadcast_btn.setToolTip(
+            "Copies plot type, line style, line width, marker, marker size and opacity (not "
+            "colour) from this trace to every other trace in every subplot of the sheet. "
+            "Enabled when exactly one trace is selected.")
+        self.trace_broadcast_btn.clicked.connect(self._apply_trace_style_to_all_traces)
+        self.trace_broadcast_btn.setEnabled(False)
+        trace_tab_l.addWidget(self.trace_broadcast_btn)
+        self.inspector_tabs.addTab(trace_tab, "Trace Style")
+
         self.figure_widget = FigureStyleWidget()
         self.figure_widget.changed.connect(self._after_figure_edit)
         self.inspector_tabs.addTab(_in_scroll(self.figure_widget), "Figure")
@@ -1291,6 +1329,34 @@ class SciSuiteWindow(QMainWindow):
             self.trace_widget.set_trace(refs[0] if refs else None)
         if refs:
             self.inspector_tabs.setCurrentIndex(1)   # surface the (bulk or single) editor
+        self.trace_broadcast_btn.setEnabled(len(refs) == 1)
+
+    def _apply_trace_style_to_all_traces(self):
+        """Copy the one selected trace's line/marker style to every other trace in
+        every subplot of the active sheet (colour is left alone -- see
+        _TRACE_STYLE_BROADCAST_FIELDS)."""
+        refs = self._selected_trace_refs()
+        if len(refs) != 1:
+            return
+        src = refs[0]
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        targets = [t for sub in sm.subplots for t in sub.traces if t is not src]
+        if not targets:
+            return
+        if QMessageBox.question(
+                self, "Apply to all traces",
+                f"Copy this trace's line style to the other {len(targets)} trace(s) in "
+                f"\"{sm.name}\"? Colour is left alone."
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for t in targets:
+            for f in _TRACE_STYLE_BROADCAST_FIELDS:
+                setattr(t, f, getattr(src, f))
+        self.render_current_sheet()
+        self._sync_subplot_trace_list()
+        self._refresh_ipc_snapshot()
 
     def _remove_selected_subplot_traces(self):
         sm = self._active_sheet_model()
@@ -1461,6 +1527,29 @@ class SciSuiteWindow(QMainWindow):
 
     def _after_axes_edit(self):
         self.render_current_sheet()
+
+    def _apply_axes_style_to_all_subplots(self):
+        """Copy the active subplot's cosmetics/grid/legend/number-format/aspect to
+        every other subplot in the sheet (see _AXES_STYLE_BROADCAST_FIELDS -- title,
+        axis labels, and axis limits stay per-subplot)."""
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        src = sm.get_active_subplot()
+        targets = [sub for sub in sm.subplots if sub is not src]
+        if not targets:
+            return
+        if QMessageBox.question(
+                self, "Apply to all subplots",
+                f"Copy this subplot's style to the other {len(targets)} subplot(s) in "
+                f"\"{sm.name}\"? Title, axis labels, and axis limits stay per-subplot."
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for sub in targets:
+            for f in _AXES_STYLE_BROADCAST_FIELDS:
+                setattr(sub, f, getattr(src, f))
+        self.render_current_sheet()
+        self._refresh_ipc_snapshot()
 
     def _after_element_edit(self):
         self.render_current_sheet()

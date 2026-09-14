@@ -280,7 +280,16 @@ so the style/Y-transform controls are visible regardless of which tab was open),
 **`ColormapPanel`**, and the
 Axes / Trace Style / **Figure** inspector tabs (`inspector_tabs`; the Figure tab is
 `FigureStyleWidget` bound to the *active sheet* via `sync_active_subplot_inspector`, the same
-widget class `FigureDialog` wraps for the figure-background double-click editor). Checkbox
+widget class `FigureDialog` wraps for the figure-background double-click editor. Both the
+Axes/Panel and Trace Style tabs carry a **broadcast button** below the widget itself, outside
+its scroll area: "Apply this style to all subplots" (`_apply_axes_style_to_all_subplots`)
+copies every `SubplotModel` field in `_AXES_STYLE_BROADCAST_FIELDS` (everything except
+title/labels — content — and the axis limits — data-range specific) from the active subplot
+to every other subplot in the sheet; "Apply this trace's line style to all traces"
+(`_apply_trace_style_to_all_traces`, enabled only when exactly one trace is selected) copies
+`_TRACE_STYLE_BROADCAST_FIELDS` (plot type, line style/width, marker, marker size, alpha —
+not colour or `scale_factor`) from that trace to every trace in every subplot of the sheet.
+Both confirm once with a count and leave the source unchanged). Checkbox
 indicators in `ColumnTree` and `self.subplot_traces` get an explicit `_CHECKBOX_QSS`
 stylesheet — the app-wide Fusion style (`__main__.main`) doesn't adapt to an OS dark theme on
 its own, so a plain indicator can render almost invisible; the explicit colours make it visible
