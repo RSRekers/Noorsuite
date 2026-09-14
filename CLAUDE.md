@@ -197,7 +197,19 @@ axis combos + add buttons) — `_on_data_selected` picks the page by object type
 "Set tags…", accepts column drops; also `ExtendedSelection` — multi-pick folders/sheets,
 Delete or "Delete N selected" → `_delete_selected_tree_items`, which folds a selected child
 into its selected ancestor folder and confirms once; `_on_activate` won't switch tabs while >1
-is selected). Center: one tab per open sheet, each a `QSplitter(Vertical)` — plot →
+is selected. **Drag a sheet/folder to reparent or reorder it** — `dropEvent` hands anything
+that isn't a `MIME_COLS` column-drop to `_move_dragged_items`/`_reparent_items`, which
+reparents the dragged item(s) itself via `takeChild`/`insertChild` (drop `OnItem` on a folder
+nests inside it; `AboveItem`/`BelowItem` reorders as a sibling; dropping on empty space sends
+it to the root) rather than falling back to `QTreeWidget`'s default same-widget move. That
+default path is only reliable under `DragDropMode.InternalMove`; this tree needs plain
+`DragDrop` instead (so a `ColumnTree` column-drag can also land on it), and under that mode
+Qt's generic MIME round trip can come back with a moved sheet's `ITEM_ID_ROLE` stale --
+`_open_sheet_tab` then opens the wrong (looks "empty") sheet on the next click. `_reparent_items`
+takes plain items + a `QAbstractItemView.DropIndicatorPosition`, not a `QDropEvent`, precisely
+so it's testable without one -- synthesizing real `QDropEvent`/`dragMoveEvent` objects outside
+an actual OS drag session is unreliable (observed native crashes) in this offscreen setup).
+Center: one tab per open sheet, each a `QSplitter(Vertical)` — plot →
 image `slider_bar` → collapsible **Notes** pane (`current_sheet()` still returns the
 `PlotSheet`). Right, top→bottom: **rows/cols spinboxes**
 (`on_grid_changed`), the **subplot-order strip** (`ReorderList`, drag to reorder
@@ -206,14 +218,22 @@ active subplot's `TraceRef` list (`self.subplot_traces`, also a `ReorderList` �
 `ExtendedSelection` + `InternalMove`; checkbox = `enabled`; >1 selected swaps `TraceStyleWidget`
 for `BulkTraceEditWidget`; drag one or several selected rows to reorder `sub.traces` —
 `_on_traces_reordered` reads the post-drop `UserRole` order, validates it's a permutation,
-rebuilds `sub.traces` and `_sync_subplot_trace_list`s, then re-selects the moved trace(s) by
-object identity, since their positions changed. Trace order drives both z-order — later
-entries draw on top — and legend order, so this is how to fix "right traces, wrong order/
-stacking"), the **`ColormapPanel`**, and the
+rebuilds `sub.traces`, then reassigns every trace's `color` from `_color_for_index(sm, i)` (the
+colour cycle is positional, so it now tracks the new order too, same as a freshly-added trace
+would get) before `_sync_subplot_trace_list`, then re-selects the moved trace(s) by object
+identity, since their positions changed. Trace order drives both z-order — later entries draw
+on top — and legend order, so this is how to fix "right traces, wrong order/stacking".
+Selecting any trace(s) here — one or several — also flips `inspector_tabs` to "Trace Style",
+so the style/Y-transform controls are visible regardless of which tab was open), the
+**`ColormapPanel`**, and the
 Axes / Trace Style / **Figure** inspector tabs (`inspector_tabs`; the Figure tab is
 `FigureStyleWidget` bound to the *active sheet* via `sync_active_subplot_inspector`, the same
-widget class `FigureDialog` wraps for the figure-background double-click editor). Fuzzy
-search (`fuzzy.fuzzy_match`) filters the data pool and the tree; the tree haystack per sheet is
+widget class `FigureDialog` wraps for the figure-background double-click editor). Checkbox
+indicators in `ColumnTree` and `self.subplot_traces` get an explicit `_CHECKBOX_QSS`
+stylesheet — the app-wide Fusion style (`__main__.main`) doesn't adapt to an OS dark theme on
+its own, so a plain indicator can render almost invisible; the explicit colours make it visible
+in any theme. Fuzzy search (`fuzzy.fuzzy_match`) filters the data pool and the tree; the tree
+haystack per sheet is
 `_sheet_haystack` (name + tags + notes + referenced data-object / image names + every subplot
 title/x_label/y_label + trace labels).
 

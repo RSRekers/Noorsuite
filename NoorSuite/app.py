@@ -49,6 +49,26 @@ _ICON_NAME = "NOORSUITE_ICON.jpg"
 _AUTOSAVE_SECONDS = 120               # periodic re-save once a project file is set
 _UNTITLED = "Untitled project"
 
+# The Fusion style (set app-wide in __main__.main) doesn't pick up an OS dark theme's
+# palette on its own, so a plain checkbox indicator can end up nearly invisible
+# (light-on-light or the reverse). Give the checkbox columns explicit, theme-independent
+# colours so it's always obvious where to click -- used by ColumnTree and the active
+# subplot's trace list.
+_CHECKBOX_QSS = """
+QTreeView::indicator, QListView::indicator {
+    width: 14px; height: 14px; border-radius: 2px;
+    border: 1px solid #6b6b6b; background: #ffffff;
+}
+QTreeView::indicator:hover, QListView::indicator:hover { border-color: #1f77b4; }
+QTreeView::indicator:checked, QListView::indicator:checked {
+    background: #1f77b4; border: 1px solid #135686;
+    image: none;
+}
+QTreeView::indicator:indeterminate, QListView::indicator:indeterminate {
+    background: #a9c9e8; border: 1px solid #135686;
+}
+"""
+
 ITEM_TYPE_ROLE = Qt.ItemDataRole.UserRole + 1
 ITEM_ID_ROLE = Qt.ItemDataRole.UserRole + 2
 TYPE_FOLDER = "folder"
@@ -95,6 +115,7 @@ class ColumnTree(QTreeWidget):
         # way to add several traces in one go). The X/Y checkboxes -- not this row
         # selection -- are what actually drives the drag/"Add to sheet" payload.
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setStyleSheet(_CHECKBOX_QSS)   # keep the X/Y checkboxes visible in any theme
         self._data_id = None
         self._loading = False
         self.itemChanged.connect(self._on_item_changed)
@@ -232,8 +253,76 @@ class ProjectTree(QTreeWidget):
                 return
             self.columnsDropped.emit(sheet_id, payload)
             event.acceptProposedAction()
+            return
+        self._move_dragged_items(event)
+
+    @staticmethod
+    def _is_descendant(candidate, ancestor) -> bool:
+        p = candidate.parent()
+        while p is not None:
+            if p is ancestor:
+                return True
+            p = p.parent()
+        return False
+
+    def _move_dragged_items(self, event):
+        """Reparent/reorder the dragged folder(s)/sheet(s) ourselves via take + insert.
+
+        Only `InternalMove` gets Qt's fast, identity-preserving same-tree path;
+        plain `DragDrop` (needed here so a column drag from `ColumnTree` can also
+        land on the tree) falls back to a generic MIME round trip for same-widget
+        drops too, which is not reliable for a QTreeWidget's own custom item data
+        (a moved sheet's `ITEM_ID_ROLE` can come back stale, opening the wrong --
+        effectively empty -- sheet on the next click). Doing the move by hand
+        keeps the exact same `QTreeWidgetItem` objects, so every role survives.
+        """
+        dragged = [it for it in self.selectedItems() if it.flags() & Qt.ItemFlag.ItemIsDragEnabled]
+        target = self.itemAt(event.position().toPoint())
+        pos = self.dropIndicatorPosition()
+        if self._reparent_items(dragged, target, pos):
+            event.acceptProposedAction()
         else:
-            super().dropEvent(event)
+            event.ignore()
+
+    def _reparent_items(self, dragged, target, pos) -> bool:
+        """Move `dragged` items to sit at `target`/`pos` (a `DropIndicatorPosition`,
+        or `None`/`OnViewport` for "append at the root"). Pure tree-item surgery --
+        no `QDropEvent` involved, so it's usable directly from `dropEvent` and from
+        tests alike. Returns False (no-op) for an empty or invalid drop."""
+        root = self.invisibleRootItem()
+        # if one dragged item is an ancestor of another, only move the ancestor
+        dragged = [it for it in dragged
+                  if not any(other is not it and self._is_descendant(it, other) for other in dragged)]
+        if not dragged:
+            return False
+        if target is not None and any(target is it or self._is_descendant(target, it)
+                                      for it in dragged):
+            return False             # can't drop a folder onto itself or its own contents
+
+        if target is not None and pos == QAbstractItemView.DropIndicatorPosition.OnItem \
+                and target.data(0, ITEM_TYPE_ROLE) == TYPE_FOLDER:
+            new_parent, insert_at = target, target.childCount()
+        elif target is not None:
+            new_parent = target.parent() or root
+            insert_at = new_parent.indexOfChild(target)
+            if pos == QAbstractItemView.DropIndicatorPosition.BelowItem:
+                insert_at += 1
+        else:
+            new_parent, insert_at = root, root.childCount()
+
+        for it in dragged:
+            old_parent = it.parent() or root
+            idx = old_parent.indexOfChild(it)
+            if old_parent is new_parent and idx < insert_at:
+                insert_at -= 1        # closing the gap left behind shifts the target down
+            old_parent.takeChild(idx)
+            new_parent.insertChild(min(insert_at, new_parent.childCount()), it)
+            insert_at += 1
+            it.setSelected(True)
+
+        if new_parent is not root:
+            new_parent.setExpanded(True)
+        return True
 
 
 class ReorderList(QListWidget):
@@ -526,6 +615,7 @@ class SciSuiteWindow(QMainWindow):
         self.subplot_traces = ReorderList()
         self.subplot_traces.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.subplot_traces.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.subplot_traces.setStyleSheet(_CHECKBOX_QSS)   # keep "enabled" checkboxes visible
         self.subplot_traces.itemChanged.connect(self._on_subplot_trace_toggled)
         self.subplot_traces.itemSelectionChanged.connect(self._on_subplot_trace_selection)
         self.subplot_traces.reordered.connect(self._on_traces_reordered)
@@ -1067,11 +1157,12 @@ class SciSuiteWindow(QMainWindow):
             self.trace_widget.hide()
             self.bulk_widget.show()
             self.bulk_widget.set_traces(refs)
-            self.inspector_tabs.setCurrentIndex(1)   # surface the bulk editor
         else:
             self.bulk_widget.hide()
             self.trace_widget.show()
             self.trace_widget.set_trace(refs[0] if refs else None)
+        if refs:
+            self.inspector_tabs.setCurrentIndex(1)   # surface the (bulk or single) editor
 
     def _remove_selected_subplot_traces(self):
         sm = self._active_sheet_model()
@@ -1102,6 +1193,8 @@ class SciSuiteWindow(QMainWindow):
         moved = {id(old_traces[it.data(Qt.ItemDataRole.UserRole)])
                  for it in self.subplot_traces.selectedItems()}
         sub.traces = [old_traces[i] for i in order]
+        for i, ref in enumerate(sub.traces):
+            ref.color = self._color_for_index(sm, i)   # colour follows the new order
         self._sync_subplot_trace_list(keep_selection=False)
         for i in range(self.subplot_traces.count()):
             if id(sub.traces[i]) in moved:
@@ -1211,12 +1304,17 @@ class SciSuiteWindow(QMainWindow):
         self.colormap_panel.refresh()
         self._refresh_ipc_snapshot()
 
-    def _next_trace_color(self, sm, sub) -> str:
+    def _color_for_index(self, sm, i: int) -> str:
+        """The colour a trace at position `i` (0-indexed) in its subplot would get
+        if it were appended there -- the color cycle is positional, so this is also
+        how colours get reassigned after a drag reorder (see `_on_traces_reordered`)."""
         spec = self.resolve_colormap(sm.active_colormap) if sm.active_colormap else None
         if spec is not None:
-            n = len(sub.traces) + 1
-            return sample(spec, n)[-1]
-        return _cycle_color(len(sub.traces))
+            return sample(spec, i + 1)[-1]
+        return _cycle_color(i)
+
+    def _next_trace_color(self, sm, sub) -> str:
+        return self._color_for_index(sm, len(sub.traces))
 
     # ----------------------------------------------------------- inspector sync
     def sync_active_subplot_inspector(self):
