@@ -17,9 +17,10 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox,
                              QRadioButton, QScrollArea, QSpinBox, QVBoxLayout,
                              QWidget)
 
-from .model import (LEGEND_LOCS, LINE_STYLE_LABELS, LINE_STYLES, MARKER_LABELS,
-                    MARKERS, PLOT_TYPES, Y_TRANSFORM_LABELS, Y_TRANSFORMS,
-                    ColorMap, apply_numeric_expr)
+from .model import (CUSTOM_FACTOR_PREFIX, LEGEND_LOCS, LINE_STYLE_LABELS,
+                    LINE_STYLES, MARKER_LABELS, MARKERS, PLOT_TYPES,
+                    TICK_FORMAT_LABELS, TICK_FORMATS, Y_TRANSFORM_LABELS,
+                    Y_TRANSFORMS, ColorMap, apply_numeric_expr)
 from .widgets import CollapsibleSection
 
 _LINESTYLE_ITEMS = ["-", "--", "-.", ":"]
@@ -151,8 +152,17 @@ class TraceStyleWidget(QWidget):
 
         self.transform_combo = QComboBox()
         self.transform_combo.addItems(Y_TRANSFORM_LABELS)
-        self.transform_combo.currentIndexChanged.connect(self._push)
+        self.transform_combo.currentIndexChanged.connect(self._on_transform_changed)
         form.addRow("Y transform:", self.transform_combo)
+        self.custom_factor_edit = QLineEdit()
+        self.custom_factor_edit.setPlaceholderText("e.g. 2.54")
+        self.custom_factor_edit.editingFinished.connect(self._push)
+        form.addRow("  Custom factor:", self.custom_factor_edit)
+
+    def _on_transform_changed(self, _i):
+        self.custom_factor_edit.setEnabled(
+            self.transform_combo.currentIndex() == Y_TRANSFORMS.index("custom"))
+        self._push()
 
     def set_trace(self, ref):
         self._ref = ref
@@ -176,9 +186,15 @@ class TraceStyleWidget(QWidget):
                 MARKERS.index(ref.marker) if ref.marker in MARKERS else 0)
             self.marker_size_spin.setValue(ref.marker_size)
             self.alpha_spin.setValue(ref.alpha)
-            self.transform_combo.setCurrentIndex(
-                Y_TRANSFORMS.index(ref.scale_factor)
-                if ref.scale_factor in Y_TRANSFORMS else 0)
+            if ref.scale_factor.startswith(CUSTOM_FACTOR_PREFIX):
+                self.transform_combo.setCurrentIndex(Y_TRANSFORMS.index("custom"))
+                self.custom_factor_edit.setText(ref.scale_factor[len(CUSTOM_FACTOR_PREFIX):])
+            else:
+                self.transform_combo.setCurrentIndex(
+                    Y_TRANSFORMS.index(ref.scale_factor)
+                    if ref.scale_factor in Y_TRANSFORMS else 0)
+            self.custom_factor_edit.setEnabled(
+                self.transform_combo.currentIndex() == Y_TRANSFORMS.index("custom"))
         finally:
             self._loading = False
 
@@ -196,7 +212,12 @@ class TraceStyleWidget(QWidget):
         r.marker = MARKERS[self.marker_combo.currentIndex()]
         r.marker_size = self.marker_size_spin.value()
         r.alpha = self.alpha_spin.value()
-        r.scale_factor = Y_TRANSFORMS[self.transform_combo.currentIndex()]
+        token = Y_TRANSFORMS[self.transform_combo.currentIndex()]
+        if token == "custom":
+            factor = _parse_float_or_none(self.custom_factor_edit.text())
+            r.scale_factor = f"{CUSTOM_FACTOR_PREFIX}{factor if factor is not None else 1}"
+        else:
+            r.scale_factor = token
         self.changed.emit()
 
 
@@ -234,6 +255,23 @@ class AxesStyleWidget(QWidget):
         self.grid_check.toggled.connect(self._push)
         form.addRow("", self.grid_check)
         outer.addWidget(CollapsibleSection("Labels & scale", labels_body, expanded=True))
+
+        numfmt_body = QWidget()
+        nform = QFormLayout(numfmt_body)
+        _tighten(nform)
+        self.x_tickfmt_combo = QComboBox(); self.x_tickfmt_combo.addItems(TICK_FORMAT_LABELS)
+        self.x_tickfmt_combo.currentIndexChanged.connect(self._on_tickfmt_changed)
+        nform.addRow("X tick format:", self.x_tickfmt_combo)
+        self.x_tick_digits_spin = QSpinBox(); self.x_tick_digits_spin.setRange(0, 10)
+        self.x_tick_digits_spin.valueChanged.connect(self._push)
+        nform.addRow("  X decimals:", self.x_tick_digits_spin)
+        self.y_tickfmt_combo = QComboBox(); self.y_tickfmt_combo.addItems(TICK_FORMAT_LABELS)
+        self.y_tickfmt_combo.currentIndexChanged.connect(self._on_tickfmt_changed)
+        nform.addRow("Y tick format:", self.y_tickfmt_combo)
+        self.y_tick_digits_spin = QSpinBox(); self.y_tick_digits_spin.setRange(0, 10)
+        self.y_tick_digits_spin.valueChanged.connect(self._push)
+        nform.addRow("  Y decimals:", self.y_tick_digits_spin)
+        outer.addWidget(CollapsibleSection("Number format", numfmt_body, expanded=False))
 
         limits_body = QWidget()
         lform = QFormLayout(limits_body)
@@ -374,6 +412,14 @@ class AxesStyleWidget(QWidget):
             self.grid_width_spin.setValue(sub.grid_width)
             self.grid_color_btn.setColor(sub.grid_color)
             self.grid_alpha_spin.setValue(sub.grid_alpha)
+            self.x_tickfmt_combo.setCurrentIndex(
+                TICK_FORMATS.index(sub.x_tick_format) if sub.x_tick_format in TICK_FORMATS else 0)
+            self.x_tick_digits_spin.setValue(int(sub.x_tick_digits))
+            self.x_tick_digits_spin.setEnabled(sub.x_tick_format == "fixed")
+            self.y_tickfmt_combo.setCurrentIndex(
+                TICK_FORMATS.index(sub.y_tick_format) if sub.y_tick_format in TICK_FORMATS else 0)
+            self.y_tick_digits_spin.setValue(int(sub.y_tick_digits))
+            self.y_tick_digits_spin.setEnabled(sub.y_tick_format == "fixed")
         finally:
             self._loading = False
         self._image_section.setVisible(sub.image is not None)
@@ -381,6 +427,13 @@ class AxesStyleWidget(QWidget):
 
     def _on_aspect_mode(self, _i):
         self.aspect_ratio_spin.setEnabled(self.aspect_combo.currentData() == "custom")
+        self._push()
+
+    def _on_tickfmt_changed(self, _i):
+        self.x_tick_digits_spin.setEnabled(
+            TICK_FORMATS[self.x_tickfmt_combo.currentIndex()] == "fixed")
+        self.y_tick_digits_spin.setEnabled(
+            TICK_FORMATS[self.y_tickfmt_combo.currentIndex()] == "fixed")
         self._push()
 
     def _push(self, *_):
@@ -407,6 +460,10 @@ class AxesStyleWidget(QWidget):
         s.spine_style = self.spine_style_combo.currentText()
         s.aspect = self.aspect_combo.currentData()
         s.aspect_ratio = self.aspect_ratio_spin.value()
+        s.x_tick_format = TICK_FORMATS[self.x_tickfmt_combo.currentIndex()]
+        s.x_tick_digits = self.x_tick_digits_spin.value()
+        s.y_tick_format = TICK_FORMATS[self.y_tickfmt_combo.currentIndex()]
+        s.y_tick_digits = self.y_tick_digits_spin.value()
         s.legend_visible = self.legend_check.isChecked()
         s.legend_loc = self.legend_loc_combo.currentText()
         s.legend_frame = self.legend_frame_check.isChecked()

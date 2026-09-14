@@ -107,6 +107,17 @@ def test_subplotmodel_custom_aspect_ratio_roundtrips():
     assert restored.aspect == "custom" and restored.aspect_ratio == 2.5
 
 
+def test_subplotmodel_tick_format_defaults_and_roundtrips():
+    s = SubplotModel()
+    assert s.x_tick_format == "auto" and s.y_tick_format == "auto"
+    assert s.x_tick_digits == 2 and s.y_tick_digits == 2
+    s.x_tick_format, s.x_tick_digits = "scientific", 3
+    s.y_tick_format, s.y_tick_digits = "fixed", 0
+    restored = SubplotModel.from_dict(s.to_dict())
+    assert restored.x_tick_format == "scientific" and restored.x_tick_digits == 3
+    assert restored.y_tick_format == "fixed" and restored.y_tick_digits == 0
+
+
 def test_imageobject_slice_3d_and_4d():
     a3 = np.arange(5 * 4 * 6).reshape(5, 4, 6)
     obj3 = ImageObject("stack", a3, axis_names=["z", "y", "x"])

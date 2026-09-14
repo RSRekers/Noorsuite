@@ -99,6 +99,13 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   traces (`"index"` for the row index; blank if they disagree) and, only when a single trace
   is shown, its y column name.
 - `x_col == "" or "__index__"` (`model.INDEX_COL`) means "use the row index".
+- `TraceRef.scale_factor` (the "Y transform" combo) is one of `Y_TRANSFORMS` (`1x`, the fixed
+  decades, `Log10`, `Norm`) or an arbitrary constant multiplier as
+  `f"{CUSTOM_FACTOR_PREFIX}<number>"` (`"custom:2.5"`) — `apply_y_transform` checks that prefix
+  first. UI: picking "Custom factor..." in `TraceStyleWidget`'s combo (index
+  `Y_TRANSFORMS.index("custom")`) enables a text field for the number; `set_trace` reverses the
+  mapping (`scale_factor.startswith(CUSTOM_FACTOR_PREFIX)` -> select that combo entry, populate
+  the field with the numeric part) so it round-trips.
 - A **`ColorMap`** is `{name, colors[hex], builtin}`. `SheetModel` owns `colormaps` (custom,
   per-sheet) + `active_colormap` (name; `""` = matplotlib prop-cycle); `ProjectModel.colormaps`
   is the project library. `colormap.available_specs` merges built-ins + library + sheet-custom;
@@ -145,7 +152,22 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
   `spine_width <= 0`), and re-adds every subplot. It repopulates `self.artist_map` (`Artist ->
   TraceRef`) + `self._text_targets` / legend handles so `on_canvas_click` hit-tests
   `event.dblclick` (`_hit_test`) and emits `element_double_clicked` with a `{"kind": ...}`
-  dict; `SciSuiteWindow.open_element_editor` maps that to a dialog.
+  dict; `SciSuiteWindow.open_element_editor` maps that to a dialog. A **right-click** (not a
+  double-click) on a `"trace"` hit instead emits `element_right_clicked(hit, guiEvent)` ->
+  `SciSuiteWindow._on_canvas_right_click`, a small `QMenu` ("Edit style..." / "Delete trace")
+  positioned at `guiEvent.globalPosition()`; `_delete_trace_ref` removes that exact `TraceRef`
+  (by identity) from whichever subplot holds it. `render` also computes `text_scale` once per
+  pass — 1.0 when `SheetModel.fig_width_cm`/`fig_height_cm` are blank (unchanged), else this
+  figure's cm diagonal over the default 8x6in figure's (`_REFERENCE_DIAG_CM`), clamped to
+  [0.3, 3.0] — and multiplies every *fontsize* (title/x-label/y-label/tick-label/legend) by it
+  before handing them to matplotlib, so a much smaller (or larger) physical figure keeps text
+  proportionate instead of `tight_layout()` squeezing the axes box down to fit fixed-point-size
+  text (line widths / spine widths are left alone — text is what actually reserves layout
+  margin). Each subplot's `x_tick_format`/`y_tick_format` (`"auto"` | `"plain"` | `"scientific"`
+  | `"fixed"`, with `*_tick_digits` for `"fixed"`) is applied right after the aspect ratio via
+  `_apply_tick_format` (`ax.ticklabel_format(style=...)` or a `FormatStrFormatter`) — display
+  only, independent of `TraceRef.scale_factor` (which rescales the underlying data) and of the
+  axis's own data aspect.
 
 - **Active-subplot cue is a figure-level rectangle, not spine styling.** A `draw_event`
   handler (`PlotSheet._on_draw`, reentrancy-guarded) places `self._highlight_patch` — a dashed

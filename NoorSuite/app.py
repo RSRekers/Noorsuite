@@ -1059,6 +1059,7 @@ class SciSuiteWindow(QMainWindow):
         ps = PlotSheet(sm)
         ps.active_subplot_changed.connect(self.on_subplot_selection_changed)
         ps.element_double_clicked.connect(self.open_element_editor)
+        ps.element_right_clicked.connect(self._on_canvas_right_click)
         ps.notes_changed.connect(self._on_notes_edited)
         ps.image_changed.connect(self._refresh_ipc_snapshot)
         self.open_tabs[sheet_id] = ps
@@ -1500,6 +1501,43 @@ class SciSuiteWindow(QMainWindow):
                 ImageDialog(sub, self._after_element_edit, self).exec()
         elif kind == "figure":
             FigureDialog(cs.model, self._after_element_edit, self).exec()
+
+    def _on_canvas_right_click(self, hit: dict, gui_event):
+        """Right-click a trace directly on the plot: quick delete (or edit) without
+        going to the "Active subplot traces" list."""
+        if not hit or hit.get("kind") != "trace":
+            return
+        ref = hit.get("ref")
+        if ref is None:
+            return
+        menu = QMenu(self)
+        edit_act = menu.addAction("Edit style...")
+        del_act = menu.addAction("Delete trace")
+        if gui_event is not None:
+            try:
+                pos = gui_event.globalPosition().toPoint()
+            except AttributeError:
+                pos = self.mapToGlobal(self.rect().center())
+        else:
+            pos = self.mapToGlobal(self.rect().center())
+        action = menu.exec(pos)
+        if action == del_act:
+            self._delete_trace_ref(ref)
+        elif action == edit_act:
+            TraceStyleDialog(ref, self._after_element_edit, self).exec()
+
+    def _delete_trace_ref(self, ref):
+        """Remove one TraceRef, wherever it lives in the active sheet's subplots."""
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        for sub in sm.subplots:
+            if ref in sub.traces:
+                sub.traces.remove(ref)
+                break
+        self._sync_subplot_trace_list()
+        self.render_current_sheet()
+        self._refresh_ipc_snapshot()
 
     # ------------------------------------------------------------- render engine
     def render_current_sheet(self):

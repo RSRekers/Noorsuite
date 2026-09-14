@@ -44,3 +44,12 @@ def test_norm_handles_zero_range():
 def test_milli_not_confused_with_kilo():
     # "1e-3" must not match the "1e3" branch
     np.testing.assert_allclose(apply_y_transform(Y, "1e-3"), Y * 1e-3)
+
+
+def test_custom_factor():
+    np.testing.assert_allclose(apply_y_transform(Y, "custom:2.5"), Y * 2.5)
+    np.testing.assert_allclose(apply_y_transform(Y, "custom:-0.5"), Y * -0.5)
+
+
+def test_custom_factor_unparseable_leaves_y_unchanged():
+    np.testing.assert_allclose(apply_y_transform(Y, "custom:not-a-number"), Y)

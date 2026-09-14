@@ -57,9 +57,12 @@ MARKER_LABELS = ["None", "Point (.)", "Circle (o)", "Square (s)", "Diamond (D)",
                  "Triangle left (<)", "Triangle right (>)", "Pentagon (p)",
                  "Hexagon (h)", "Octagon (8)", "Star (*)", "Cross (x)", "Plus (+)",
                  "Tri down (1)", "Tri up (2)", "Tri left (3)", "Tri right (4)"]
-Y_TRANSFORMS = ["1x", "1e3", "1e-3", "1e-6", "1e-9", "Log10", "Norm"]
+Y_TRANSFORMS = ["1x", "1e3", "1e-3", "1e-6", "1e-9", "Log10", "Norm", "custom"]
 Y_TRANSFORM_LABELS = ["1x", "1e3 (kilo)", "1e-3 (milli)", "1e-6 (micro)",
-                      "1e-9 (nano)", "Log10", "Norm (0-1)"]
+                      "1e-9 (nano)", "Log10", "Norm (0-1)", "Custom factor..."]
+TICK_FORMATS = ["auto", "plain", "scientific", "fixed"]
+TICK_FORMAT_LABELS = ["Auto", "Plain (no sci. notation)", "Scientific (1.2e4)",
+                      "Fixed decimals"]
 LEGEND_LOCS = ["best", "upper right", "upper left", "lower left", "lower right",
                "right", "center left", "center right", "lower center",
                "upper center", "center"]
@@ -69,13 +72,23 @@ def _new_id() -> str:
     return str(uuid.uuid4())[:8]
 
 
+CUSTOM_FACTOR_PREFIX = "custom:"   # scale_factor = f"{CUSTOM_FACTOR_PREFIX}{multiplier}"
+
+
 def apply_y_transform(y, factor: str):
     """Return ``y`` transformed according to a scale-factor token.
 
     ``factor`` is one of :data:`Y_TRANSFORMS` (or a longer label that merely
-    *contains* one, e.g. ``"1e3 (kilo)"``).  Unknown tokens return ``y`` unchanged.
+    *contains* one, e.g. ``"1e3 (kilo)"``), or ``f"{CUSTOM_FACTOR_PREFIX}<number>"``
+    for an arbitrary constant multiplier. Unknown/unparseable tokens return ``y``
+    unchanged.
     """
     y = np.asarray(y, dtype=float)
+    if factor.startswith(CUSTOM_FACTOR_PREFIX):
+        try:
+            return y * float(factor[len(CUSTOM_FACTOR_PREFIX):])
+        except ValueError:
+            return y
     if "1e-3" in factor:
         return y * 1e-3
     if "1e-6" in factor:
@@ -378,6 +391,7 @@ class SubplotModel:
     _FIELDS = ("title", "x_label", "y_label", "x_scale", "y_scale", "show_grid",
                "grid_axis", "grid_ticks", "grid_style", "grid_width", "grid_color",
                "grid_alpha", "aspect", "aspect_ratio",
+               "x_tick_format", "y_tick_format", "x_tick_digits", "y_tick_digits",
                "x_min", "x_max", "y_min", "y_max",
                "tick_label_size", "face_color", "face_alpha",
                "spine_color", "spine_width", "spine_style",
@@ -392,6 +406,14 @@ class SubplotModel:
         self.x_scale = "linear"        # linear | log
         self.y_scale = "linear"
         self.show_grid = True
+        # Tick label number representation: "auto" (matplotlib default) | "plain"
+        # (never scientific, e.g. 12000) | "scientific" (always, e.g. 1.2e4) |
+        # "fixed" (a fixed number of decimals, *_tick_digits). Display only -- the
+        # underlying data (and any TraceRef.scale_factor) is untouched.
+        self.x_tick_format = "auto"
+        self.y_tick_format = "auto"
+        self.x_tick_digits = 2
+        self.y_tick_digits = 2
         # Data aspect: "auto" (default) | "equal" (1:1) | "custom" (aspect_ratio, y-per-x
         # data units). Ignored when the subplot has an image -- its own ImageRef.aspect
         # governs there instead.

@@ -14,6 +14,7 @@ from matplotlib.backends.backend_qtagg import (FigureCanvasQTAgg,
 from matplotlib.colors import to_rgb
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
+from matplotlib.ticker import FormatStrFormatter
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QPlainTextEdit,
                              QSlider, QSplitter, QVBoxLayout, QWidget)
@@ -23,6 +24,13 @@ from .widgets import CollapsibleSection
 
 _ACTIVE_ACCENT = "#ff7f0e"
 _HL_PAD_PX = 6.0
+# Diagonal (cm) of the default 8x6in figure -- text sizes (title/label/tick/legend) are
+# stored in points, an absolute unit, so a much smaller physical figure (fig_width_cm /
+# fig_height_cm) would otherwise keep the same fixed-size text and tight_layout() would
+# squeeze the actual axes box down to make room for it. render() scales those fontsizes
+# by (this figure's diagonal / _REFERENCE_DIAG_CM) so the text-to-figure proportion holds
+# regardless of the requested physical size.
+_REFERENCE_DIAG_CM = (8.0 ** 2 + 6.0 ** 2) ** 0.5 * 2.54
 
 
 def rgba(color, alpha):
@@ -73,6 +81,7 @@ class _AspectCanvasHost(QWidget):
 class PlotSheet(QWidget):
     active_subplot_changed = pyqtSignal(int)
     element_double_clicked = pyqtSignal(object)   # dict: {"kind": ..., ...}
+    element_right_clicked = pyqtSignal(object, object)   # (hit dict, QMouseEvent | None)
     notes_changed = pyqtSignal()
     image_changed = pyqtSignal()                  # slider moved / axis switched
 
@@ -345,6 +354,12 @@ class PlotSheet(QWidget):
         self._text_targets = []
         self._image_axes = {}
 
+        if m.fig_width_cm and m.fig_height_cm:
+            diag_cm = (float(m.fig_width_cm) ** 2 + float(m.fig_height_cm) ** 2) ** 0.5
+            text_scale = max(0.3, min(diag_cm / _REFERENCE_DIAG_CM, 3.0))
+        else:
+            text_scale = 1.0
+
         rows, cols = m.rows, m.cols
         for idx in range(rows * cols):
             sub = m.subplots[idx]
@@ -352,7 +367,7 @@ class PlotSheet(QWidget):
             self._axes.append(ax)
 
             ax.set_facecolor(rgba(sub.face_color, sub.face_alpha))
-            ax.tick_params(labelsize=sub.tick_label_size)
+            ax.tick_params(labelsize=sub.tick_label_size * text_scale)
             visible_spine = sub.spine_width > 0
             for spine in ax.spines.values():
                 spine.set_visible(visible_spine)
@@ -381,9 +396,9 @@ class PlotSheet(QWidget):
                 x_label = x_label or auto_x
                 y_label = y_label or auto_y
 
-            title = ax.set_title(sub.title, fontsize=sub.title_fontsize)
-            xlab = ax.set_xlabel(x_label, fontsize=sub.xlabel_fontsize)
-            ylab = ax.set_ylabel(y_label, fontsize=sub.ylabel_fontsize)
+            title = ax.set_title(sub.title, fontsize=sub.title_fontsize * text_scale)
+            xlab = ax.set_xlabel(x_label, fontsize=sub.xlabel_fontsize * text_scale)
+            ylab = ax.set_ylabel(y_label, fontsize=sub.ylabel_fontsize * text_scale)
             self._text_targets += [(title, "title", idx),
                                    (xlab, "xlabel", idx),
                                    (ylab, "ylabel", idx)]
@@ -404,6 +419,9 @@ class PlotSheet(QWidget):
                     ax.set_aspect("auto")
             else:
                 ax.set_aspect("auto")
+
+            self._apply_tick_format(ax, "x", sub.x_tick_format, sub.x_tick_digits)
+            self._apply_tick_format(ax, "y", sub.y_tick_format, sub.y_tick_digits)
 
             ax.grid(False)
             if sub.show_grid:
@@ -438,7 +456,7 @@ class PlotSheet(QWidget):
 
             if n_drawn and sub.legend_visible:
                 legend = ax.legend(loc=sub.legend_loc, frameon=sub.legend_frame,
-                                   fontsize=sub.legend_fontsize,
+                                   fontsize=sub.legend_fontsize * text_scale,
                                    ncol=max(1, int(sub.legend_ncol)),
                                    facecolor="white", framealpha=0.85)
                 if legend is not None:
@@ -475,6 +493,23 @@ class PlotSheet(QWidget):
         x_label = x_names[0] if x_names and len(set(x_names)) == 1 else ""
         y_label = y_names[0] if len(y_names) == 1 else ""
         return x_label, y_label
+
+    @staticmethod
+    def _apply_tick_format(ax, axis_name: str, fmt: str, digits) -> None:
+        """Tick-label number representation for one axis: display only, independent
+        of any data rescaling (TraceRef.scale_factor) or the axis's data aspect."""
+        axis_obj = ax.xaxis if axis_name == "x" else ax.yaxis
+        try:
+            if fmt == "plain":
+                ax.ticklabel_format(style="plain", axis=axis_name, useOffset=False)
+            elif fmt == "scientific":
+                ax.ticklabel_format(style="sci", axis=axis_name, scilimits=(0, 0),
+                                    useOffset=False)
+            elif fmt == "fixed":
+                axis_obj.set_major_formatter(FormatStrFormatter(f"%.{max(0, int(digits))}f"))
+            # "auto" (or anything else) -> leave matplotlib's default formatter
+        except (AttributeError, ValueError):
+            pass   # e.g. ticklabel_format doesn't support a log-scaled axis
 
     def _draw_image(self, ax, ref, subplot_index):
         obj = self._images.get(ref.data_id)
@@ -587,6 +622,8 @@ class PlotSheet(QWidget):
 
         if getattr(event, "dblclick", False):
             self.element_double_clicked.emit(self._hit_test(event))
+        elif getattr(event, "button", None) == 3:      # right-click: e.g. delete a trace
+            self.element_right_clicked.emit(self._hit_test(event), getattr(event, "guiEvent", None))
 
     def _hit_test(self, event) -> dict:
         for art, ref in self.artist_map.items():
