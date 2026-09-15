@@ -67,22 +67,32 @@ class IPCBridge(QObject):
             pass
 
     def _listen_loop(self) -> None:
+        # One thread per connection: `accept()` must return immediately for the next
+        # client, so a single slow/stuck one (a kernel that connected but is slow to
+        # send, or whose socket just stalls) can't hold up every other kernel's calls
+        # behind it -- previously this handled connections one at a time in this same
+        # loop, so any single stuck `read_frame`/`sendall` blocked *all* IPC traffic,
+        # including from other Jupyter kernels, until that one call finally gave up.
         while self.running:
             try:
                 conn, _ = self.server_socket.accept()
             except OSError:
                 break
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn) -> None:
+        try:
+            conn.settimeout(10.0)   # never let one client wedge its own handler thread
+            payload = read_frame(conn)
+            if payload is not None:
+                conn.sendall(frame(self._handle(payload)))
+        except Exception:
+            pass
+        finally:
             try:
-                payload = read_frame(conn)
-                if payload is not None:
-                    conn.sendall(frame(self._handle(payload)))
-            except Exception:
+                conn.close()
+            except OSError:
                 pass
-            finally:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
 
     def _handle(self, payload: dict) -> dict:
         action = payload.get("action")

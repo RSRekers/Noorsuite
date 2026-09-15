@@ -119,14 +119,28 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
 
 ### Cross-cutting mechanisms
 
-- **IPC threading.** `IPCBridge` accepts on a daemon thread. *Mutations* (`append_dataframe`,
-  `append_trace`, `append_image`, `add_to_sheet`, `add_image_to_sheet`, `remove_data`, `clear`)
-  are re-emitted as the `data_received` Qt signal and handled on the GUI thread by
-  `SciSuiteWindow.handle_incoming_ipc`. *Queries* (`list_data`, `list_images`, `list_traces`,
-  `get_data`) are answered from `IPCBridge.snapshot`. Two refresh methods: `_refresh_ipc_snapshot()`
-  (cheap metadata — call after any change) and `_refresh_ipc_data()` (rebuilds
-  `snapshot["data_full"]`, the full column values that back `client.get_data()` — call only on
-  data-object add/update/remove/clear/load).
+- **IPC threading.** `IPCBridge._listen_loop` runs on a daemon thread whose only job is
+  `accept()`; each accepted connection is immediately handed to its **own** daemon
+  thread (`_serve`, with a 10s socket timeout) rather than being read/handled/closed
+  inline in the accept loop. This matters because Jupyter kernels are independent
+  processes each opening their own short-lived connection — with a single shared
+  accept-then-handle loop (the previous design), one slow or stuck connection (a kernel
+  that connects but is slow to send, a client that never closes) blocked `accept()`
+  from ever running again, wedging *every other* kernel's calls behind it until that
+  one call finally gave up or timed out; per-connection threads make kernels
+  independent of each other the way separate processes are supposed to be. *Mutations*
+  (`append_dataframe`, `append_trace`, `append_image`, `add_to_sheet`,
+  `add_image_to_sheet`, `remove_data`, `clear`) are re-emitted as the `data_received`
+  Qt signal (a cross-thread queued emit — fire-and-forget, doesn't block the serving
+  thread) and handled on the GUI thread by `SciSuiteWindow.handle_incoming_ipc`.
+  *Queries* (`list_data`, `list_images`, `list_traces`, `get_data`) are answered
+  directly from `IPCBridge.snapshot` on whichever thread is serving that connection —
+  safe for concurrent reads because the GUI thread only ever replaces `self.snapshot`
+  (or one of its top-level keys) wholesale, never mutates a shared list/dict in place,
+  so a concurrent reader sees one atomic version or another, never a partial one. Two
+  refresh methods: `_refresh_ipc_snapshot()` (cheap metadata — call after any change)
+  and `_refresh_ipc_data()` (rebuilds `snapshot["data_full"]`, the full column values
+  that back `client.get_data()` — call only on data-object add/update/remove/clear/load).
 
 - **Jupyter round-trip is pull-edit-push, never automatic.** There's no live link between a
   notebook DataFrame and the pool's `DataObject` — editing one does nothing to the other until
@@ -352,13 +366,30 @@ Module split under `NoorSuite/` (was one file `scisuite.py`, now a compat shim):
 - **Project file identity & autosave.** `SciSuiteWindow.project_path` is set by *Save As…* /
   *Open* only (not by the session autosave). The toolbar `project_label` + window title show
   `_project_name()` (`Path(project_path).stem` or "Untitled project"). Ctrl+S → `_quick_save`
-  (writes `project_path`, or falls back to Save As). A `QTimer` (`_AUTOSAVE_SECONDS`, 120s)
-  fires `_periodic_autosave`, which **always** calls `save_session()` (crash-recovery file
-  `~/.scisuite_session.json`, via `_project_model()`) regardless of whether a project file
-  is set, then also `_autosave_project()` (re-writes `project_path`) when one is. Previously
-  `save_session()` only ran from `closeEvent` — a crash or killed process between saves lost
-  everything since the last clean close; the timer now covers that gap too. `closeEvent`
-  still does one last `save_session()` (+ `_autosave_project()` if a project file is set).
+  (writes `project_path`, or falls back to Save As, **synchronously** — an explicit,
+  infrequent action where blocking briefly for clear success/failure feedback is fine).
+  A `QTimer` (`_AUTOSAVE_SECONDS`, 120s) fires `_periodic_autosave`, which **always**
+  refreshes the crash-recovery session file (`~/.scisuite_session.json`) regardless of
+  whether a project file is set, and also re-writes `project_path` when one is set —
+  previously `save_session()` only ran from `closeEvent`, so a crash or killed process
+  between saves lost everything since the last clean close; the timer now covers that
+  gap too. Unlike Ctrl+S, **the periodic tick runs each save on a background thread**
+  (`_background_save`): `_project_model()` (which touches the live model — `DataObject`
+  columns, `TraceRef`s, etc.) still runs on the GUI thread to build the `ProjectModel`
+  snapshot, but the actual `ProjectModel.save(path)` call — `to_dict()`'s
+  `numpy.tolist()` conversions, `json.dump`, and the disk write itself — happens in a
+  daemon thread, with the result reported back via the `_autosave_done` signal
+  (queued across threads, the same pattern `IPCBridge.data_received` uses). This
+  matters because the project can live on a synced/network drive (this repo does), where
+  a single autosave can take long enough to freeze the whole window for its duration if
+  done inline on the GUI thread — on a 2-minute timer, that reads as "the app hangs for
+  a bit every so often." `_autosave_threads` (path -> `Thread`) skips starting a new
+  save to a path whose previous one hasn't finished yet, rather than piling them up.
+  `_on_autosave_done` only surfaces a status-bar message for the named project path (not
+  the session file, which always saved silently). `closeEvent` still does one last
+  **synchronous** `save_session()` (+ `_autosave_project()`, its synchronous counterpart,
+  if a project file is set) — deliberately not backgrounded, since a daemon thread still
+  writing when the process actually exits would be killed mid-write.
 
 ### UI layout (`app.py`)
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -745,6 +746,8 @@ class NormalizeTracesDialog(QDialog):
 # Main window
 # =====================================================================
 class SciSuiteWindow(QMainWindow):
+    _autosave_done = pyqtSignal(str, bool, str)   # (path, ok, message) -- cross-thread
+
     def __init__(self, port: int = DEFAULT_PORT):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - Scientific Comparison & Exploration")
@@ -771,6 +774,9 @@ class SciSuiteWindow(QMainWindow):
         self.ipc = IPCBridge(port=port)
         self.ipc.data_received.connect(self.handle_incoming_ipc)
         self.ipc.start()
+
+        self._autosave_threads: dict[str, threading.Thread] = {}
+        self._autosave_done.connect(self._on_autosave_done)
 
         self._init_ui()
         self.load_session()
@@ -2176,10 +2182,39 @@ class SciSuiteWindow(QMainWindow):
         """Timer tick (every ``_AUTOSAVE_SECONDS``): always refresh the crash-recovery
         session file (``~/.scisuite_session.json``) -- previously that only happened on
         a clean window close, so a crash or a killed process lost everything since the
-        last close -- and additionally re-save the named project file, if any."""
-        self.save_session()
+        last close -- and additionally re-save the named project file, if any. Both run
+        on a background thread (`_background_save`): this repo (and probably a user's
+        project file) can live on a synced/network drive, where a save can take long
+        enough to freeze the whole window for its duration if done on the GUI thread --
+        which, on a 2-minute timer, is exactly the kind of "hangs for a bit every so
+        often" a user would notice mid-session."""
+        self._background_save(self.session_file)
         if self.project_path:
-            self._autosave_project()
+            self._background_save(self.project_path)
+
+    def _background_save(self, path: str) -> None:
+        prior = self._autosave_threads.get(path)
+        if prior is not None and prior.is_alive():
+            return   # last autosave to this path (e.g. a slow drive) hasn't finished yet
+        pm = self._project_model()   # snapshot the live model on the GUI thread
+
+        def worker():
+            try:
+                pm.save(path)
+                self._autosave_done.emit(
+                    path, True, f"Autosaved  -  {time.strftime('%H:%M:%S')}")
+            except OSError as exc:
+                self._autosave_done.emit(path, False, f"Autosave failed: {exc}")
+
+        th = threading.Thread(target=worker, daemon=True)
+        self._autosave_threads[path] = th
+        th.start()
+
+    def _on_autosave_done(self, path: str, ok: bool, message: str) -> None:
+        # Only the named project file's outcome is worth a status message -- the
+        # session file autosaves silently every tick, same as before.
+        if path == self.project_path:
+            self.statusBar().showMessage(message, 3000 if ok else 6000)
 
     def _autosave_project(self):
         if not self.project_path:
