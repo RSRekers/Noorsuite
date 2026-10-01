@@ -26,7 +26,7 @@ scisuite = "NoorSuite.__main__:main"
 packages = ["NoorSuite"]
 
 [tool.setuptools.package-data]
-NoorSuite = ["NOORSUITE_ICON.jpg"]
+NoorSuite = ["NOORSUITE_ICON.jpg", "skill/SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

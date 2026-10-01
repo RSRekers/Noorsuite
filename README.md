@@ -25,6 +25,21 @@ pip install -e .
 
 Requires Python >= 3.10, PyQt6, matplotlib, numpy, pandas.
 
+## Claude skill (insert data from any Claude session)
+
+```bash
+pip install "git+https://github.com/RSRekers/Noorsuite.git"
+python -m NoorSuite skill install      # copies the skill to ~/.claude/skills/noorsuite/
+```
+
+Any Claude Code session can then insert/plot/organize data (tags, notes, named sheets,
+folders) -- live if the GUI is running, otherwise into the session file / a `.sciproj` that the
+GUI loads (`from NoorSuite import connect`; or `python -m NoorSuite insert data.csv ...`).
+The skill runs `skill ensure` on each use: at most once a day it compares against GitHub,
+`pip install --upgrade`s the package if there is a newer commit, and refreshes the skill file.
+`python -m NoorSuite skill status | update --force` for manual control. (pip cannot write to
+`~/.claude` at install time, hence the one explicit `skill install` step.)
+
 ## Use
 
 Start the GUI (also started automatically by `SciSuiteClient().launch()`):

@@ -23,14 +23,24 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
-                       ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_REMOVE_DATA,
+                       ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
+                       ACTION_REMOVE_DATA,
                        DEFAULT_PORT, IPCClient)
 
 _DATA_COLUMNS = ["id", "name", "columns", "nrows", "tags", "source"]
 _IMAGE_COLUMNS = ["id", "name", "shape", "dtype", "axis_names", "tags", "source"]
 _TRACE_COLUMNS = ["data_id", "data_name", "y_col", "x_col", "sheet", "subplot",
                   "enabled", "plot_type", "color"]
-_SHEET_COLUMNS = ["id", "name", "rows", "cols", "subplots", "tags", "duplicate_name"]
+_SHEET_COLUMNS = ["id", "name", "rows", "cols", "subplots", "tags", "duplicate_name",
+                  "folder"]
+
+
+def _organize_payload(title, tags, notes, folder, subplot, subplot_title, x_label,
+                      y_label) -> dict:
+    sub = {k: v for k, v in (("title", subplot_title), ("x_label", x_label),
+                             ("y_label", y_label)) if v}
+    return {"name": title or "", "tags": list(tags or []), "notes": notes or "",
+            "folder": folder or "", "subplots": {int(subplot): sub} if sub else {}}
 
 
 class SciSuiteClient:
@@ -61,11 +71,13 @@ class SciSuiteClient:
         return f"<SciSuiteClient port={self.port} {'connected' if self.connected else 'offline'}>"
 
     # ---------------------------------------------------------------------- push
-    def push_dataframe(self, df, *, name=None, tags=None, units=None, mode="new"):
+    def push_dataframe(self, df, *, name=None, tags=None, units=None, mode="new",
+                       notes=None):
         """Register a DataFrame as one data object in the pool (no plotting).
 
         ``mode="update"`` refreshes the columns of an existing object with the same
-        ``name`` in place, so traces already referencing it re-render.
+        ``name`` in place, so traces already referencing it re-render. ``tags`` / ``notes``
+        (what the data is, how it was measured/processed) make it findable in the GUI search.
         """
         df = pd.DataFrame(df)
         columns, order = {}, []
@@ -88,6 +100,7 @@ class SciSuiteClient:
             "units": dict(units or {}),
             "tags": list(tags or []),
             "mode": mode,
+            "notes": notes or "",
         })
 
     def push_series(self, s, name=None, tags=None, units=None, mode="new"):
@@ -210,7 +223,9 @@ class SciSuiteClient:
         self.push_dataframe(df, name=resp["name"], mode="update")
 
     # ---------------------------------------------------------------------- plot
-    def plot(self, data, x, y, *, name=None, sheet=None, subplot=0, new_sheet=False):
+    def plot(self, data, x, y, *, name=None, sheet=None, subplot=0, new_sheet=False,
+             title=None, tags=None, notes=None, folder=None, subplot_title=None,
+             x_label=None, y_label=None):
         """Add columns of a data object as traces to a sheet.
 
         ``data`` is a data-object name (already pushed) or a DataFrame (pushed now
@@ -232,7 +247,27 @@ class SciSuiteClient:
             "y_cols": y_cols,
             "sheet": target,
             "subplot_index": int(subplot),
+            "organize": _organize_payload(title, tags, notes, folder, subplot,
+                                          subplot_title, x_label, y_label),
         })
+
+    def organize_sheet(self, sheet, *, title=None, tags=None, notes=None, folder=None,
+                       subplot=0, subplot_title=None, x_label=None, y_label=None,
+                       replace_notes=False):
+        """Name / tag / annotate / file an existing sheet (by id or name). Tags are merged
+        in, notes appended (``replace_notes=True`` overwrites), ``folder`` moves it into
+        that folder path, creating folders as needed."""
+        org = _organize_payload(title, tags, notes, folder, subplot, subplot_title,
+                                x_label, y_label)
+        org["replace_notes"] = replace_notes
+        return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet",
+                               "target": sheet, **org})
+
+    def annotate_data(self, key, *, tags=None, notes=None, replace_notes=False):
+        """Add tags / notes to an existing data object (by id or name)."""
+        return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "data", "target": key,
+                               "tags": list(tags or []), "notes": notes or "",
+                               "replace_notes": replace_notes})
 
     # ------------------------------------------------------------------- inspect
     def list_data(self) -> pd.DataFrame:
@@ -266,3 +301,37 @@ class SciSuiteClient:
 def launch(port: int = DEFAULT_PORT) -> SciSuiteClient:
     """Create a :class:`SciSuiteClient` and attach/launch in one call."""
     return SciSuiteClient(port).launch()
+
+
+class OfflineClient(SciSuiteClient):
+    """Same API as :class:`SciSuiteClient`, but writes to a project file because no GUI is
+    running (see :mod:`NoorSuite.offline`). Create via :func:`connect`."""
+
+    def __init__(self, project=None, port: int = DEFAULT_PORT):
+        from .offline import OfflineBackend
+        super().__init__(port)
+        self._ipc = OfflineBackend(project)
+        self.project_path = self._ipc.path
+
+    def launch(self) -> "SciSuiteClient":
+        """Start the GUI as a background process (it loads the session file on start)."""
+        return SciSuiteClient(self.port).launch()
+
+    def __repr__(self) -> str:
+        return f"<OfflineClient project={self.project_path!r}>"
+
+
+def connect(project=None, port: int = DEFAULT_PORT) -> SciSuiteClient:
+    """Return a client that inserts data wherever it can: into the running GUI when one is
+    listening on ``port`` (live, no file touched), otherwise straight into a project file --
+    ``project`` (a ``.sciproj``) or, by default, the GUI's session file, which the GUI
+    loads on its next start. Every method behaves the same either way."""
+    live = SciSuiteClient(port)
+    if live.connected:
+        if project:
+            print("[connect] A GUI is running -- inserting into its open project; "
+                  f"{project!r} is ignored (open it in the GUI instead).")
+        return live
+    client = OfflineClient(project, port)
+    print(f"[connect] No GUI on port {port} -- writing to {client.project_path}")
+    return client

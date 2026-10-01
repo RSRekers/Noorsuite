@@ -468,6 +468,22 @@ haystack per sheet is
 `_sheet_haystack` (name + tags + notes + referenced data-object / image names + every subplot
 title/x_label/y_label + trace labels).
 
+## Claude skill & offline insertion
+
+- `NoorSuite/skill/SKILL.md` is the skill (package data; `{{PYTHON}}` is substituted with
+  `sys.executable` on install). `skill.py` (stdlib only) installs it to `~/.claude/skills/noorsuite/`,
+  and `update`/`ensure` compare `git ls-remote` HEAD with pip's `direct_url.json` commit, `pip install
+  --upgrade git+https://github.com/RSRekers/Noorsuite.git` (skipped for editable installs), then re-render
+  the skill. `ensure` is throttled to 1/day via `~/.noorsuite/state.json`. CLI: `python -m NoorSuite
+  skill|insert` (dispatched in `__main__` before PyQt is imported).
+- `connect()` (client.py) returns the live `SciSuiteClient` if a GUI answers on the port, else an
+  `OfflineClient` whose `_ipc` is `offline.OfflineBackend` -- it applies the *same payloads* the GUI
+  receives to a `ProjectModel` file (default `~/.scisuite_session.json`, which the GUI loads at start).
+  When adding an IPC action, implement it in **both** `app.handle_incoming_ipc` and `OfflineBackend`.
+- `ACTION_ORGANIZE` + the `organize` key on `add_to_sheet` carry sheet name/tags/notes/folder/subplot
+  titles+labels (`model.apply_sheet_annotations`, `tree_move_sheet`); `DataObject.notes` is new.
+- Never run insertion tests against the default port while the user's GUI is up -- it is their live session.
+
 ## Conventions / gotchas
 
 - `DataObject.id` / `SheetModel.sheet_id` are 8-char uuid4 slices (`model._new_id`). Data

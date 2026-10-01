@@ -327,9 +327,10 @@ class DataObject:
     """A named set of columns in the data pool (typically one pushed DataFrame)."""
 
     def __init__(self, name, columns=None, column_order=None, units=None,
-                 tags=None, source="", obj_id=None):
+                 tags=None, source="", obj_id=None, notes=""):
         self.id = obj_id or _new_id()
         self.name = name
+        self.notes = notes          # free-text description (what/how/when this data is)
         self.columns: dict[str, np.ndarray] = {}
         self.column_order: list[str] = []
         if columns:
@@ -380,12 +381,14 @@ class DataObject:
             "units": dict(self.units),
             "tags": list(self.tags),
             "source": self.source,
+            "notes": self.notes,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "DataObject":
         return cls(d["name"], d.get("columns", {}), d.get("column_order"),
-                   d.get("units"), d.get("tags"), d.get("source", ""), d.get("id"))
+                   d.get("units"), d.get("tags"), d.get("source", ""), d.get("id"),
+                   d.get("notes", ""))
 
 
 class TraceRef:
@@ -884,3 +887,73 @@ class ProjectModel:
                     img.data = np.load(arr_path, allow_pickle=False)
                     img._dirty = False
         return project
+
+
+# ---------------------------------------------------------------------------
+# Organizing: names / tags / notes / folders (shared by the GUI and offline backend)
+# ---------------------------------------------------------------------------
+def merge_tags(old, new) -> list:
+    """``old`` plus any of ``new`` not already present (case-insensitive), order kept."""
+    out = list(old)
+    seen = {t.lower() for t in out}
+    for t in new or []:
+        t = str(t).strip()
+        if t and t.lower() not in seen:
+            out.append(t)
+            seen.add(t.lower())
+    return out
+
+
+def append_notes(old: str, new: str) -> str:
+    return (old.rstrip() + "\n\n" + new).strip() if old.strip() else new
+
+
+def split_folder_path(path) -> list:
+    """``"Project A/Run 4"`` -> ``["Project A", "Run 4"]`` (``/`` or backslash separated)."""
+    return [p.strip() for p in str(path or "").replace("\\", "/").split("/") if p.strip()]
+
+
+def apply_sheet_annotations(sm, payload: dict) -> None:
+    """Apply an ``organize`` payload's sheet fields: ``name``, ``tags`` (merged in),
+    ``notes`` (appended unless ``replace_notes``), ``subplots`` ({index: {title, x_label,
+    y_label}}) and ``grid`` ([rows, cols])."""
+    if payload.get("name"):
+        sm.name = payload["name"]
+    if payload.get("grid"):
+        sm.set_grid(int(payload["grid"][0]), int(payload["grid"][1]))
+    if payload.get("tags"):
+        sm.tags = merge_tags(sm.tags, payload["tags"])
+    if payload.get("notes"):
+        sm.notes = payload["notes"] if payload.get("replace_notes")             else append_notes(sm.notes, payload["notes"])
+    for idx, fields in (payload.get("subplots") or {}).items():
+        i = int(idx)
+        if 0 <= i < len(sm.subplots):
+            for f in ("title", "x_label", "y_label"):
+                if fields.get(f):
+                    setattr(sm.subplots[i], f, fields[f])
+
+
+def tree_move_sheet(nodes: list, sheet_id: str, folder_path: list) -> list:
+    """Return ``nodes`` (raw project tree) with ``sheet_id`` moved into the folder chain
+    ``folder_path`` (created as needed; ``[]`` = top level)."""
+    def strip(lst):
+        out = []
+        for n in lst:
+            if n.get("type") == "sheet":
+                if n.get("sheet_id") != sheet_id:
+                    out.append(n)
+            else:
+                out.append({**n, "children": strip(n.get("children", []))})
+        return out
+
+    nodes = strip(nodes)
+    level = nodes
+    for part in folder_path:
+        folder = next((n for n in level if n.get("type") != "sheet"
+                       and n.get("name") == part), None)
+        if folder is None:
+            folder = {"type": "folder", "id": _new_id(), "name": part, "children": []}
+            level.append(folder)
+        level = folder["children"]
+    level.append({"type": "sheet", "sheet_id": sheet_id})
+    return nodes

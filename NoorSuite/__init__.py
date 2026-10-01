@@ -9,7 +9,7 @@ Jupyter side (exploratory)::
 
 GUI side: ``python -m NoorSuite --gui 55555``.
 """
-from .client import SciSuiteClient, launch
+from .client import OfflineClient, SciSuiteClient, connect, launch
 from .model import (ColorMap, DataObject, ImageObject, ImageRef, ProjectModel,
                     SheetModel, SubplotModel, TraceRef)
 
@@ -18,6 +18,8 @@ __version__ = "0.6.0"
 __all__ = [
     "SciSuiteClient",
     "launch",
+    "connect",
+    "OfflineClient",
     "DataObject",
     "ImageObject",
     "ImageRef",

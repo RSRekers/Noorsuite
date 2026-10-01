@@ -37,14 +37,15 @@ from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
 from .fuzzy import fuzzy_match
 from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
-                  ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_REMOVE_DATA,
-                  ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
+                  ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
+                  ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
 from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
                     REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
                     SPLIT_LAYOUTS, ColorMap, DataObject, ImageObject, ImageRef,
                     ProjectModel, SheetModel, SubplotModel, TraceRef, _new_id,
-                    aggregate_series, common_label, resolve_sidecar_names,
-                    split_into_repeats)
+                    aggregate_series, append_notes, apply_sheet_annotations,
+                    common_label, merge_tags, resolve_sidecar_names,
+                    split_folder_path, split_into_repeats)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
 
@@ -2343,7 +2344,7 @@ class SciSuiteWindow(QMainWindow):
             item = self.data_list.item(i)
             obj = self.repository.get(item.data(Qt.ItemDataRole.UserRole))
             hay = item.text() + " " + (" ".join(obj.tags) + " " + " ".join(obj.column_order)
-                                       if obj else "")
+                                       + " " + getattr(obj, "notes", "") if obj else "")
             item.setHidden(not fuzzy_match(query, hay))
 
     def _filter_project_tree(self, text):
@@ -2407,10 +2408,20 @@ class SciSuiteWindow(QMainWindow):
         name_counts: dict[str, int] = {}
         for sm in self.sheets.values():
             name_counts[sm.name] = name_counts.get(sm.name, 0) + 1
+        folders: dict = {}
+
+        def _walk(nodes, path):
+            for n in nodes:
+                if n.get("type") == "sheet":
+                    folders[n.get("sheet_id")] = "/".join(path)
+                else:
+                    _walk(n.get("children", []), path + [n.get("name", "")])
+        _walk(self._serialize_tree(), [])
         sheets = [{
             "id": sm.sheet_id, "name": sm.name, "rows": sm.rows, "cols": sm.cols,
             "subplots": len(sm.subplots), "tags": list(sm.tags),
             "duplicate_name": name_counts[sm.name] > 1,
+            "folder": folders.get(sm.sheet_id, ""),
         } for sm in self.sheets.values()]
         self.ipc.snapshot = {"data_objects": data_objects, "images": images,
                              "traces": traces, "sheets": sheets,
@@ -2443,6 +2454,77 @@ class SciSuiteWindow(QMainWindow):
             self._remove_data(payload.get("key"))
         elif action == ACTION_CLEAR:
             self._clear_all()
+        elif action == ACTION_ORGANIZE:
+            self._handle_organize(payload)
+
+    # ---- organize: names / tags / notes / folders (IPC) ----------------------
+    def _sheet_tree_item(self, sheet_id):
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            it = stack.pop()
+            if it.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
+                if it.data(0, ITEM_ID_ROLE) == sheet_id:
+                    return it
+            else:
+                stack.extend(it.child(i) for i in range(it.childCount()))
+        return None
+
+    def _folder_item(self, path):
+        """Folder item for a name chain, creating missing folders; None -> top level."""
+        parent = None
+        for part in path:
+            holder = parent or self.tree.invisibleRootItem()
+            parent = next((holder.child(i) for i in range(holder.childCount())
+                           if holder.child(i).data(0, ITEM_TYPE_ROLE) == TYPE_FOLDER
+                           and holder.child(i).text(0) == part), None)                 or self._add_folder_item(part, parent)
+        return parent
+
+    def _apply_sheet_organize(self, sm, org: dict):
+        apply_sheet_annotations(sm, org)
+        item = self._sheet_tree_item(sm.sheet_id)
+        if item is not None:
+            self.tree.blockSignals(True)
+            item.setText(0, sm.name)
+            item.setToolTip(0, ", ".join(sm.tags))
+            self.tree.blockSignals(False)
+            if org.get("folder"):
+                parent = self._folder_item(split_folder_path(org["folder"]))
+                old = item.parent() or self.tree.invisibleRootItem()
+                dest = parent or self.tree.invisibleRootItem()
+                if old is not dest:
+                    self.tree.blockSignals(True)
+                    dest.addChild(old.takeChild(old.indexOfChild(item)))
+                    self.tree.blockSignals(False)
+                    if parent is not None:
+                        parent.setExpanded(True)
+        ps = self.open_tabs.get(sm.sheet_id)
+        if ps is not None:
+            self.tab_widget.setTabText(self.tab_widget.indexOf(ps), sm.name)
+            if hasattr(ps, "notes_edit") and ps.notes_edit.toPlainText() != sm.notes:
+                ps.notes_edit.setPlainText(sm.notes)
+        self._render_sheet(sm.sheet_id)
+        self.sync_active_subplot_inspector()
+        self._refresh_ipc_snapshot()
+
+    def _handle_organize(self, payload: dict):
+        target = payload.get("target")
+        if payload.get("kind") == "data":
+            obj = self._find_data(target) or self._find_image(target)
+            if obj is None:
+                self.statusBar().showMessage(f"organize: no data object {target!r}", 8000)
+                return
+            obj.tags = merge_tags(obj.tags, payload.get("tags"))
+            if payload.get("notes") and hasattr(obj, "notes"):
+                obj.notes = payload["notes"] if payload.get("replace_notes")                     else append_notes(obj.notes, payload["notes"])
+            self._refresh_data_list()
+            self._refresh_ipc_snapshot()
+            return
+        sm = self.sheets.get(target) or next(
+            (s for s in self.sheets.values() if s.name == target), None)
+        if sm is None:
+            self.statusBar().showMessage(f"organize: no sheet {target!r}", 8000)
+            return
+        self._apply_sheet_organize(sm, payload)
 
     def _ingest_dataobject(self, payload: dict) -> DataObject:
         name = payload.get("name", "data")
@@ -2453,10 +2535,14 @@ class SciSuiteWindow(QMainWindow):
             existing = next((o for o in self.repository.values() if o.name == name), None)
         if existing is not None:
             existing.update_from(columns, payload.get("units"), order)
+            existing.tags = merge_tags(existing.tags, payload.get("tags"))
+            if payload.get("notes"):
+                existing.notes = append_notes(existing.notes, payload["notes"])
             obj = existing
         else:
             obj = DataObject(name, columns, order, payload.get("units"),
-                             payload.get("tags"), payload.get("source", "dataframe"))
+                             payload.get("tags"), payload.get("source", "dataframe"),
+                             notes=payload.get("notes", ""))
             self.repository[obj.id] = obj
         self._refresh_data_list()
         self._refresh_open_sheets()
@@ -2604,6 +2690,8 @@ class SciSuiteWindow(QMainWindow):
                     f"plot(): {len(matches)} sheets are named {target!r} -- used the "
                     f"first (id {sm.sheet_id}); target sheet=<id> to be exact", 8000)
         self._open_sheet_tab(sm.sheet_id)
+        if payload.get("organize"):
+            self._apply_sheet_organize(sm, payload["organize"])
         requested = int(payload.get("subplot_index", 0))
         sub_idx = min(requested, len(sm.subplots) - 1)
         if requested != sub_idx:
