@@ -450,3 +450,44 @@ def test_resolve_sidecar_names_disambiguates_only_on_collision():
     assert names[b.id] == f"scan_{b.id}.npy"        # b and c collide -> both get the id
     assert names[c.id] == f"scan_{c.id}.npy"
     assert ImageObject("", np.zeros((2, 2))).sidecar_name() == "image.npy"
+
+
+def test_sort_x_orders_xy_and_error_together():
+    import numpy as np
+    from NoorSuite.model import DataObject, TraceRef
+    d = DataObject("d", {"x": [3.0, 1.0, 2.0], "y": [30.0, 10.0, 20.0],
+                         "e": [0.3, 0.1, 0.2], "lo": [3, 1, 2], "hi": [6, 2, 4]})
+    t = TraceRef(d.id, "x", "y")
+    t.yerr_col = "e"
+    t.yerr_low_col, t.yerr_high_col = "lo", "hi"
+    x, y = t.resolve(d)
+    assert list(x) == [3.0, 1.0, 2.0]                       # unsorted by default
+    t.sort_x = True
+    x, y = t.resolve(d)
+    assert list(x) == [1.0, 2.0, 3.0] and list(y) == [10.0, 20.0, 30.0]
+    assert list(t.resolve_yerr(d)) == [0.1, 0.2, 0.3]
+    t.yerr_mode = "minmax"
+    assert t.resolve_yerr(d).tolist() == [[1, 2, 3], [2, 4, 6]]
+    assert TraceRef.from_dict(t.to_dict()).sort_x is True
+
+
+def test_copy_subplot_style_options_and_duplicate_sheet():
+    from NoorSuite.model import (SheetModel, copy_subplot_style, duplicate_sheet_model,
+                                 TraceRef)
+    sm = SheetModel("S", 1, 2)
+    a, b = sm.subplots
+    a.title, a.x_label, a.x_min, a.x_max, a.spine_width, a.show_grid = "A", "xa", 1.0, 2.0, 2.5, False
+    b.title = "B"
+    copy_subplot_style(a, b)
+    assert (b.spine_width, b.show_grid, b.title, b.x_min) == (2.5, False, "B", None)
+    copy_subplot_style(a, b, include_labels=True)
+    assert (b.title, b.x_label, b.x_min) == ("A", "xa", None)
+    copy_subplot_style(a, b, include_limits=True)
+    assert (b.x_min, b.x_max) == (1.0, 2.0)
+
+    a.traces.append(TraceRef("did", "x", "y"))
+    dup = duplicate_sheet_model(sm)
+    assert dup.sheet_id != sm.sheet_id and dup.name == "S (copy)"
+    assert dup.subplots[0].traces[0].data_id == "did"
+    dup.subplots[0].traces[0].color = "#000001"
+    assert sm.subplots[0].traces[0].color != "#000001"       # independent copy

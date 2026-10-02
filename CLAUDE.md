@@ -468,6 +468,24 @@ haystack per sheet is
 `_sheet_haystack` (name + tags + notes + referenced data-object / image names + every subplot
 title/x_label/y_label + trace labels).
 
+## Display / export / zoom (sheet.py)
+
+- `_AspectCanvasHost` is a `QScrollArea`: base canvas size comes from the host's *full* size (not
+  the viewport -- scrollbars would nudge it) letterboxed to `fig_width_cm:fig_height_cm`, times a
+  `zoom` (Ctrl+wheel / Ctrl+0 via an event filter on the canvas). `PlotSheet._sync_zoom_dpi` keeps
+  the figure's size in *inches* constant by setting `fig.dpi = 100*zoom*devicePixelRatio`, so text
+  and lines zoom with the plot; it re-runs from `_on_canvas_resize`, which matplotlib's own resize
+  handling precedes (mpl derives inches = px / fig.dpi). Never set `fig.dpi` elsewhere.
+- Exports go through `PlotSheet.savefig_export`: hides the dashed active-subplot cue (it is
+  on-screen UI and used to land in clipboard/SVG output), and either saves WYSIWYG (current figure
+  size, **no** `bbox_inches="tight"`) or at the sheet's cm size with `tight_layout()` re-run for it.
+  Clipboard = WYSIWYG; SVG = cm size when set, else WYSIWYG.
+- `TraceRef.sort_x` sorts x/y (and error arrays, `_yerr_sorted`) at *resolve* time only -- data
+  objects are never reordered. `plot(..., plot_type=, style=, sort=)` rides in the `trace_style`
+  key of `add_to_sheet` (GUI `_add_traces` + `OfflineBackend` both `apply_style` it).
+- `model.copy_subplot_style` (style / +labels / +limits) backs the "all subplots" and "selected
+  subplots" buttons; `model.duplicate_sheet_model` + `app._duplicate_tree_item` back tree Duplicate.
+
 ## Claude skill & offline insertion
 
 - `NoorSuite/skill/SKILL.md` is the skill (package data; `{{PYTHON}}` is substituted with

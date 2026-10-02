@@ -15,9 +15,9 @@ from matplotlib.colors import to_rgb
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from matplotlib.ticker import FormatStrFormatter
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QPlainTextEdit,
-                             QSlider, QSplitter, QVBoxLayout, QWidget)
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal
+from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
+                             QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget)
 
 from .model import INDEX_COL, ImageRef, SheetModel
 from .widgets import CollapsibleSection
@@ -41,17 +41,61 @@ def rgba(color, alpha):
     return (r, g, b, float(alpha))
 
 
-class _AspectCanvasHost(QWidget):
+class _AspectCanvasHost(QScrollArea):
     """Hosts the figure canvas; fills its space normally, or -- when given a
     width:height ratio -- keeps the canvas letterboxed at that fixed shape
     (centered) regardless of the panel's own size. Independent of the axes'
-    own data aspect: this fixes the *figure's* shape, not any data units."""
+    own data aspect: this fixes the *figure's* shape, not any data units.
+
+    Ctrl + mouse wheel over the canvas zooms the whole figure (``zoom`` > 1 grows
+    the canvas past the viewport, which then scrolls); Ctrl+0 resets. The owning
+    :class:`PlotSheet` keeps the figure's *size in inches* fixed while zoomed by scaling
+    its dpi, so text and lines zoom with the plot (see ``PlotSheet._sync_zoom_dpi``)."""
+
+    zoom_changed = pyqtSignal(float)
+    ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.3, 6.0, 1.15
 
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
+        # set before anything below: Qt calls eventFilter/resizeEvent during setup
         self._canvas = canvas
-        canvas.setParent(self)
         self._ratio = None       # None -> fill; else width / height to maintain
+        self._zoom = 1.0
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setWidgetResizable(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._inner = QWidget()
+        self.setWidget(self._inner)
+        canvas.setParent(self._inner)
+        canvas.installEventFilter(self)
+
+    @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    def set_zoom(self, zoom: float):
+        zoom = min(max(float(zoom), self.ZOOM_MIN), self.ZOOM_MAX)
+        if abs(zoom - self._zoom) < 1e-9:
+            return
+        self._zoom = zoom
+        self.zoom_changed.emit(zoom)   # the sheet re-scales fig dpi *before* we resize
+        self._relayout()
+
+    def eventFilter(self, obj, event):
+        if obj is self._canvas:
+            if event.type() == QEvent.Type.Wheel and \
+                    event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                steps = event.angleDelta().y() / 120.0
+                if steps:
+                    self.set_zoom(self._zoom * self.ZOOM_STEP ** steps)
+                event.accept()
+                return True
+            if event.type() == QEvent.Type.KeyPress and \
+                    event.modifiers() & Qt.KeyboardModifier.ControlModifier and \
+                    event.key() == Qt.Key.Key_0:
+                self.set_zoom(1.0)
+                return True
+        return super().eventFilter(obj, event)
 
     def set_ratio(self, ratio: "float | None"):
         ratio = float(ratio) if ratio else None
@@ -65,17 +109,23 @@ class _AspectCanvasHost(QWidget):
         self._relayout()
 
     def _relayout(self):
+        # Base the canvas size on the host's full size, not the viewport: scrollbars that
+        # appear when zoomed in shrink the viewport and would nudge the figure's size.
         w, h = self.width(), self.height()
-        if w <= 0 or h <= 0:
+        if w <= 0 or h <= 0 or not hasattr(self, "_inner"):
             return
+        vp = self.viewport()
         if not self._ratio:
-            self._canvas.setGeometry(0, 0, w, h)
-            return
-        if w / h > self._ratio:
-            new_h, new_w = h, max(1, round(h * self._ratio))
+            base_w, base_h = w, h
+        elif w / h > self._ratio:
+            base_h, base_w = h, max(1, round(h * self._ratio))
         else:
-            new_w, new_h = w, max(1, round(w / self._ratio))
-        self._canvas.setGeometry((w - new_w) // 2, (h - new_h) // 2, new_w, new_h)
+            base_w, base_h = w, max(1, round(w / self._ratio))
+        cw = max(1, round(base_w * self._zoom))
+        ch = max(1, round(base_h * self._zoom))
+        iw, ih = max(vp.width(), cw), max(vp.height(), ch)
+        self._inner.resize(iw, ih)
+        self._canvas.setGeometry((iw - cw) // 2, (ih - ch) // 2, cw, ch)
 
 
 class PlotSheet(QWidget):
@@ -106,6 +156,8 @@ class PlotSheet(QWidget):
         self._in_highlight = False    # reentrancy guard for the draw_event handler
 
         self.canvas_host = _AspectCanvasHost(self.canvas)
+        self.canvas_host.zoom_changed.connect(lambda _z: self._sync_zoom_dpi())
+        self._exporting = False       # suppress the active-subplot cue while exporting
 
         plot_page = QWidget()
         plot_layout = QVBoxLayout(plot_page)
@@ -596,16 +648,71 @@ class PlotSheet(QWidget):
         labels/ticks sized for that size can end up clipped (invisible) at the new one
         -- toggling something that forces a full render() (e.g. border width) was the
         only thing that "fixed" it, because render() itself ends with tight_layout()."""
+        self._sync_zoom_dpi(draw=False)
         try:
             self.fig.tight_layout()
         except Exception:
             pass
         self.canvas.draw_idle()
 
+    def _sync_zoom_dpi(self, draw=True):
+        """Keep the figure's size in *inches* constant while the canvas is zoomed: the
+        canvas grows by ``zoom`` in pixels, so the figure dpi grows by ``zoom`` too and
+        everything (text, lines) scales with it instead of just adding empty space."""
+        dpr = float(getattr(self.canvas, "device_pixel_ratio", 1.0) or 1.0)
+        target = 100.0 * self.canvas_host.zoom * dpr
+        if abs(self.fig.dpi - target) < 1e-6:
+            return
+        self.fig.dpi = target
+        w_px, h_px = self.canvas.width() * dpr, self.canvas.height() * dpr
+        if w_px > 0 and h_px > 0:
+            self.fig.set_size_inches(w_px / target, h_px / target, forward=False)
+        if draw:
+            try:
+                self.fig.tight_layout()
+            except Exception:
+                pass
+            self.canvas.draw_idle()
+
+    def savefig_export(self, dest, fmt: str, size_in=None, dpi=300):
+        """``savefig`` for an export / clipboard copy.
+
+        * the dashed active-subplot cue is hidden first (it is on-screen UI, not plot);
+        * ``size_in=None`` -> WYSIWYG: the figure's current size and layout, no
+          ``bbox_inches="tight"`` re-crop, so proportions match the display exactly;
+        * ``size_in=(w, h)`` inches -> that exact size, with the layout recomputed for it.
+        The figure is restored afterwards."""
+        self._exporting = True
+        patch = self._highlight_patch
+        old_size = self.fig.get_size_inches().copy()
+        try:
+            if patch is not None:
+                patch.set_visible(False)
+            if size_in:
+                self.fig.set_size_inches(*size_in, forward=False)
+                try:
+                    self.fig.tight_layout()
+                except Exception:
+                    pass
+            self.fig.savefig(dest, format=fmt, dpi=dpi,
+                             facecolor=self.fig.get_facecolor(),
+                             edgecolor=self.fig.patch.get_edgecolor())
+        finally:
+            if patch is not None:
+                patch.set_visible(True)
+            if size_in:
+                self.fig.set_size_inches(*old_size, forward=False)
+                try:
+                    self.fig.tight_layout()
+                except Exception:
+                    pass
+            self._exporting = False
+            self.canvas.draw_idle()
+
     # ----------------------------------------------------- active-subplot cue
     def _on_draw(self, event):
         """Reposition the highlight rectangle after every draw (needs a renderer)."""
-        if self._in_highlight:
+        if self._in_highlight or self._exporting:
             return
         renderer = getattr(event, "renderer", None)
         self._in_highlight = True

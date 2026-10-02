@@ -42,6 +42,8 @@ suite.push_dataframe(df, name="IV_sweep", mode="update")   # refresh in place (t
 suite.push_image(arr, name="z_stack", axis_names=["z", "y", "x"])
 suite.plot("IV_sweep", x="t", y=["I", "V"], new_sheet=True)   # x=None -> row index
 suite.plot("IV_sweep", x="t", y="I", sheet="Overview", subplot=1)
+suite.plot("IV_sweep", x="V", y="I", new_sheet=True, plot_type="Scatter",   # trace look:
+           style={"color": "#d62728", "marker_size": 5}, sort=True)         # plot_type, style, sort
 suite.show_image(arr, name="z_stack", axes=(1, 2), new_sheet=True)
 suite.list_data(); suite.list_sheets(); suite.list_traces(); suite.list_images()
 df = suite.get_data("IV_sweep")                  # pull, then edit and push back:
@@ -81,6 +83,15 @@ suite.organize_sheet("IV curve, sample A3 @ 4 K", tags=["draft"], notes="Checked
 suite.annotate_data("IV sweep - A3, 4K", tags=["verified"])
 ```
 
+**Trace look** (`plot(...)`, applied to every trace the call adds): `plot_type` is one of
+`"Line"` (default), `"Scatter"`, `"Line+Scatter"`, `"Step"`, `"Bar"` - use `"Scatter"` for
+measured points without an implied curve, `"Line+Scatter"` for a few points on a trend, `"Bar"`
+for counts/histograms. `style={...}` takes `color`, `line_style`, `line_width`, `marker`,
+`marker_size`, `alpha`, `edge_color`. **`sort=True` draws the points in ascending-x order** - set it
+when x is disordered (check `df[x].is_monotonic_increasing`) and the quantity is a single-valued
+function of x, otherwise the line zig-zags. Do NOT sort loops, hysteresis, IV sweeps that go
+up-and-down, or parametric/trajectory data: there the point order *is* the curve.
+
 Rules that matter:
 - Only **numeric** columns are kept (non-numeric are dropped); a *named numeric index* becomes a column.
 - Data objects are matched by **name**; pushing an existing name with `mode="new"` makes a duplicate - use `mode="update"` to refresh.
@@ -100,7 +111,7 @@ Rules that matter:
 Reads `.csv/.tsv/.txt/.xlsx/.json/.parquet` (DataFrame) and `.npy` (image). `--plot x:y1,y2`
 (use `:y` or `index:y` for the row index), `--sheet NAME|ID`, `--new-sheet`, `--subplot N`,
 `--title/--sheet-tags/--sheet-notes/--folder/--subplot-title/--x-label/--y-label` (sheet
-organization), `--notes` (data), `--update`, `--project FILE`, `--port N`.
+organization), `--notes` (data), `--plot-type Scatter`, `--sort`, `--update`, `--project FILE`, `--port N`.
 
 ## 4. After inserting
 

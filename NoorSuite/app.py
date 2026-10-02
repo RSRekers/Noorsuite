@@ -44,7 +44,7 @@ from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
                     SPLIT_LAYOUTS, ColorMap, DataObject, ImageObject, ImageRef,
                     ProjectModel, SheetModel, SubplotModel, TraceRef, _new_id,
                     aggregate_series, append_notes, apply_sheet_annotations,
-                    common_label, merge_tags, resolve_sidecar_names,
+                    common_label, copy_subplot_style, duplicate_sheet_model, merge_tags, resolve_sidecar_names,
                     split_folder_path, split_into_repeats)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
@@ -75,13 +75,6 @@ QTreeView::indicator:indeterminate, QListView::indicator:indeterminate {
 }
 """
 
-# "Apply to all subplots" (AxesStyleWidget) copies every SubplotModel field except the
-# ones that are inherently per-subplot *content* rather than style: the title/labels
-# (text) and the axis limits (data-range specific -- different subplots often show very
-# different y ranges, so forcing one subplot's limits onto another would usually be wrong).
-_AXES_STYLE_BROADCAST_FIELDS = tuple(
-    f for f in SubplotModel._FIELDS
-    if f not in ("title", "x_label", "y_label", "x_min", "x_max", "y_min", "y_max"))
 # "Apply to all traces" (TraceStyleWidget) copies line/marker style, not colour (which
 # differentiates traces) or scale_factor (which is data-dependent, like axis limits).
 _TRACE_STYLE_BROADCAST_FIELDS = ("plot_type", "line_style", "line_width",
@@ -990,6 +983,13 @@ class SciSuiteWindow(QMainWindow):
             "stay per-subplot.")
         self.axes_broadcast_btn.clicked.connect(self._apply_axes_style_to_all_subplots)
         axes_tab_l.addWidget(self.axes_broadcast_btn)
+        self.axes_selected_btn = QPushButton("Apply this style to selected subplots...")
+        self.axes_selected_btn.setToolTip(
+            "Copies this subplot's style to the subplots you selected in the subplot-order "
+            "strip (Ctrl/Shift-click) -- optionally including title, axis labels and axis "
+            "limits.")
+        self.axes_selected_btn.clicked.connect(self._apply_axes_style_to_selected_subplots)
+        axes_tab_l.addWidget(self.axes_selected_btn)
         self.inspector_tabs.addTab(axes_tab, "Axes / Panel")
 
         self.trace_widget = TraceStyleWidget()
@@ -1252,6 +1252,7 @@ class SciSuiteWindow(QMainWindow):
                 continue
             ref = TraceRef(data.id, sel.get("x_col", INDEX_COL), y_col)
             ref.color = self._next_trace_color(sm, sub)
+            ref.apply_style(sel.get("style") or {})      # explicit options win
             sub.traces.append(ref)
         self._render_sheet(sheet_id)
         if sm is self._active_sheet_model():
@@ -1614,9 +1615,13 @@ class SciSuiteWindow(QMainWindow):
         selected = self.tree.selectedItems()
         if item is not None and item in selected and len(selected) > 1:
             menu = QMenu()
+            dup_act = menu.addAction(f"Duplicate {len(selected)} selected")
             del_act = menu.addAction(f"Delete {len(selected)} selected")
-            if menu.exec(self.tree.viewport().mapToGlobal(pos)) == del_act:
+            chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+            if chosen == del_act:
                 self._delete_selected_tree_items()
+            elif chosen == dup_act:
+                self._duplicate_selected_tree_items()
             return
         is_sheet = item is not None and item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET
         menu = QMenu()
@@ -1624,6 +1629,7 @@ class SciSuiteWindow(QMainWindow):
         new_sheet_act = menu.addAction("New Sheet")
         tags_act = menu.addAction("Set tags...") if is_sheet else None
         rename_act = menu.addAction("Rename") if item is not None else None
+        dup_act = menu.addAction("Duplicate") if item is not None else None
         del_act = menu.addAction("Delete") if item is not None else None
         action = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if action is None:
@@ -1640,8 +1646,53 @@ class SciSuiteWindow(QMainWindow):
             self._set_sheet_tags(item)
         elif action == rename_act and item is not None:
             self.tree.editItem(item, 0)
+        elif action == dup_act and item is not None:
+            new = self._duplicate_tree_item(item)
+            if new.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
+                self._open_sheet_tab(new.data(0, ITEM_ID_ROLE))
         elif action == del_act and item is not None:
             self._delete_tree_item(item)
+
+    def _duplicate_tree_item(self, item, dest=None) -> QTreeWidgetItem:
+        """Deep-copy a sheet (new id, same data references) or a folder (recursively).
+        At top level (``dest=None``) the copy is named "<name> (copy)" and placed right
+        after the original; inside a duplicated folder (``dest`` = the new folder item)
+        children keep their names and are appended in order."""
+        top = dest is None
+        parent = item.parent() if top else dest
+        if item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
+            sm = self.sheets[item.data(0, ITEM_ID_ROLE)]
+            new_sm = duplicate_sheet_model(sm, None if top else sm.name)
+            self.sheets[new_sm.sheet_id] = new_sm
+            new = self._add_sheet_tree_item(new_sm, parent)
+        else:
+            new = self._add_folder_item(item.text(0) + (" (copy)" if top else ""), parent)
+            for i in range(item.childCount()):
+                self._duplicate_tree_item(item.child(i), dest=new)
+            new.setExpanded(True)
+        if top:
+            holder = parent or self.tree.invisibleRootItem()
+            self.tree.blockSignals(True)
+            holder.insertChild(holder.indexOfChild(item) + 1,
+                               holder.takeChild(holder.indexOfChild(new)))
+            self.tree.blockSignals(False)
+            self._refresh_ipc_snapshot()
+        return new
+
+    def _duplicate_selected_tree_items(self):
+        items = self.tree.selectedItems()
+        chosen = [it for it in items if not self._has_selected_ancestor(it, items)]
+        for it in chosen:
+            self._duplicate_tree_item(it)
+
+    @staticmethod
+    def _has_selected_ancestor(item, selected) -> bool:
+        p = item.parent()
+        while p is not None:
+            if p in selected:
+                return True
+            p = p.parent()
+        return False
 
     def _set_sheet_tags(self, item):
         sm = self.sheets.get(item.data(0, ITEM_ID_ROLE))
@@ -1982,9 +2033,45 @@ class SciSuiteWindow(QMainWindow):
         ) != QMessageBox.StandardButton.Yes:
             return
         for sub in targets:
-            for f in _AXES_STYLE_BROADCAST_FIELDS:
-                setattr(sub, f, getattr(src, f))
+            copy_subplot_style(src, sub)
         self.render_current_sheet()
+        self._refresh_ipc_snapshot()
+
+    def _apply_axes_style_to_selected_subplots(self):
+        """Copy the active subplot's style onto the subplots selected in the arrangement
+        strip (Ctrl/Shift-click), optionally including title/axis labels and axis limits."""
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        src = sm.get_active_subplot()
+        targets = [sub for sub in self.selected_subplots() if sub is not src]
+        if not targets:
+            QMessageBox.information(
+                self, "Apply to selected subplots",
+                "Select the target subplots in the subplot-order strip first "
+                "(Ctrl/Shift-click) -- the active subplot is the style source.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Apply style to selected subplots")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            f"Copy the active subplot's style to {len(targets)} selected subplot(s) "
+            f"in \"{sm.name}\"."))
+        labels_cb = QCheckBox("Also copy title and axis labels")
+        limits_cb = QCheckBox("Also copy axis limits")
+        lay.addWidget(labels_cb)
+        lay.addWidget(limits_cb)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        for sub in targets:
+            copy_subplot_style(src, sub, labels_cb.isChecked(), limits_cb.isChecked())
+        self.render_current_sheet()
+        self.sync_active_subplot_inspector()
         self._refresh_ipc_snapshot()
 
     def _after_element_edit(self):
@@ -2278,30 +2365,23 @@ class SciSuiteWindow(QMainWindow):
             return sm.fig_width_cm / 2.54, sm.fig_height_cm / 2.54
         return None
 
-    def _savefig_at_export_size(self, cs, dest, fmt: str):
-        """savefig(dest, format=fmt) at the sheet's configured export size (or the
-        current on-screen size, trimmed, if none is set); restores the figure after."""
-        size = self._export_figsize_in(cs.model)
-        old = cs.fig.get_size_inches().copy() if size else None
-        if size:
-            cs.fig.set_size_inches(*size)
-        try:
-            cs.fig.savefig(dest, format=fmt, dpi=300, bbox_inches=None if size else "tight",
-                           facecolor=cs.fig.get_facecolor(),
-                           edgecolor=cs.fig.patch.get_edgecolor())
-        finally:
-            if size:
-                cs.fig.set_size_inches(*old)
-                cs.canvas.draw_idle()
+    def _savefig_at_export_size(self, cs, dest, fmt: str, wysiwyg=False):
+        """savefig(dest, format=fmt) via ``PlotSheet.savefig_export``: the sheet's configured
+        cm size when set, else the on-screen figure. ``wysiwyg=True`` always uses the
+        on-screen figure size/layout (the clipboard copy), ignoring the cm size."""
+        size = None if wysiwyg else self._export_figsize_in(cs.model)
+        cs.savefig_export(dest, fmt, size_in=size)
 
     def copy_plot_to_clipboard(self):
         cs = self.current_sheet()
         if cs is None:
             return
         buf = BytesIO()
-        self._savefig_at_export_size(cs, buf, "png")
+        self._savefig_at_export_size(cs, buf, "png", wysiwyg=True)
         QApplication.clipboard().setImage(QImage.fromData(buf.getvalue()))
-        QMessageBox.information(self, "Clipboard", "Active sheet copied to clipboard (300 DPI).")
+        QMessageBox.information(
+            self, "Clipboard",
+            "Active sheet copied to clipboard (300 DPI, same proportions as on screen).")
 
     def export_svg(self):
         cs = self.current_sheet()
@@ -2700,7 +2780,8 @@ class SciSuiteWindow(QMainWindow):
                 f"({len(sm.subplots)} subplot(s)) -- used subplot {sub_idx} instead", 8000)
         sel = {"data_id": obj.id,
                "x_col": payload.get("x_col", INDEX_COL) or INDEX_COL,
-               "y_cols": list(payload.get("y_cols", []))}
+               "y_cols": list(payload.get("y_cols", [])),
+               "style": payload.get("trace_style") or {}}
         self._add_traces(sel, sm.sheet_id, sub_idx)
 
     def _remove_data(self, key):

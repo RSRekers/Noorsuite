@@ -52,3 +52,21 @@ def test_offline_errors_and_images(tmp_path):
     assert suite.get_image("stack").shape == (2, 3, 4)
     suite.remove_data("stack")
     assert suite.list_images().empty
+
+
+def test_plot_type_style_and_sort_options(tmp_path):
+    import pytest
+    suite = _suite(tmp_path)
+    suite.push_dataframe(pd.DataFrame({"x": [3.0, 1.0, 2.0], "y": [9.0, 1.0, 4.0]}), name="d")
+    suite.plot("d", "x", "y", new_sheet=True, plot_type="Scatter", sort=True,
+               style={"color": "#ff0000", "marker_size": 9})
+    pm = ProjectModel.load(tmp_path / "p.sciproj")
+    ref = pm.sheets[0].subplots[0].traces[0]
+    assert (ref.plot_type, ref.sort_x, ref.color, ref.marker_size) == \
+        ("Scatter", True, "#ff0000", 9)
+    x, y = ref.resolve(pm.data_objects[0])
+    assert list(x) == [1.0, 2.0, 3.0] and list(y) == [1.0, 4.0, 9.0]
+    with pytest.raises(ValueError):
+        suite.plot("d", "x", "y", plot_type="Bubble")
+    with pytest.raises(ValueError):
+        suite.plot("d", "x", "y", style={"colour": "red"})

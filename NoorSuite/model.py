@@ -396,7 +396,7 @@ class TraceRef:
 
     _STYLE_FIELDS = ("plot_type", "color", "edge_color", "line_style", "line_width",
                      "marker", "marker_size", "alpha", "scale_factor",
-                     "show_errorbar", "yerr_mode")
+                     "show_errorbar", "yerr_mode", "sort_x")
 
     def __init__(self, data_id, x_col, y_col, label="", enabled=True):
         self.data_id = data_id
@@ -427,6 +427,11 @@ class TraceRef:
         self.yerr_high_col = ""     # offset above the mean (max - mean)
         self.yerr_mode = "std"      # "std" | "minmax" -- see model.ERROR_MODES
 
+        # Draw the points ordered by x (stable; NaN last) instead of in data order, so a
+        # trace whose x is disordered doesn't zig-zag. Display only -- the data object is
+        # untouched. Leave off for loops/hysteresis/parametric curves, where order IS the shape.
+        self.sort_x = False
+
     @property
     def has_error_data(self) -> bool:
         """Whether this trace has error column(s) to show at all (regardless of
@@ -449,8 +454,20 @@ class TraceRef:
     def resolve(self, data_object: DataObject):
         """Return ``(x_array, y_array)`` with the y-transform applied."""
         x = np.asarray(data_object.get(self.x_col), dtype=float)
-        y = apply_y_transform(data_object.get(self.y_col), self.scale_factor)
-        return x, np.asarray(y, dtype=float)
+        y = np.asarray(apply_y_transform(data_object.get(self.y_col), self.scale_factor),
+                       dtype=float)
+        if self.sort_x:
+            order = np.argsort(x, kind="stable")
+            x, y = x[order], y[order]
+        return x, y
+
+    def _yerr_sorted(self, data_object: DataObject, err):
+        """Reorder an error array the same way :meth:`resolve` orders x/y."""
+        if err is None or not self.sort_x:
+            return err
+        order = np.argsort(np.asarray(data_object.get(self.x_col), dtype=float),
+                           kind="stable")
+        return err[..., order]
 
     def resolve_yerr(self, data_object: DataObject):
         """Return the y-error data (independent of :attr:`show_errorbar` -- that flag
@@ -468,9 +485,11 @@ class TraceRef:
         if self.yerr_mode == "minmax" and self.yerr_low_col and self.yerr_high_col:
             lo = np.asarray(data_object.get(self.yerr_low_col), dtype=float) * scale
             hi = np.asarray(data_object.get(self.yerr_high_col), dtype=float) * scale
-            return np.vstack([lo, hi])
+            return self._yerr_sorted(data_object, np.vstack([lo, hi]))
         if self.yerr_col:
-            return np.asarray(data_object.get(self.yerr_col), dtype=float) * scale
+            return self._yerr_sorted(
+                data_object,
+                np.asarray(data_object.get(self.yerr_col), dtype=float) * scale)
         return None
 
     def to_dict(self) -> dict:
@@ -957,3 +976,37 @@ def tree_move_sheet(nodes: list, sheet_id: str, folder_path: list) -> list:
         level = folder["children"]
     level.append({"type": "sheet", "sheet_id": sheet_id})
     return nodes
+
+
+# ---------------------------------------------------------------------------
+# Copying subplot style / duplicating sheets (shared by the GUI and tests)
+# ---------------------------------------------------------------------------
+SUBPLOT_LABEL_FIELDS = ("title", "x_label", "y_label")
+SUBPLOT_LIMIT_FIELDS = ("x_min", "x_max", "y_min", "y_max")
+# Everything on a SubplotModel that is pure styling (cosmetics, grid, legend, number
+# format, aspect, scales) -- not content (title/labels) or data range (limits).
+SUBPLOT_STYLE_FIELDS = tuple(
+    f for f in SubplotModel._FIELDS
+    if f not in SUBPLOT_LABEL_FIELDS + SUBPLOT_LIMIT_FIELDS)
+
+
+def copy_subplot_style(src, dst, include_labels=False, include_limits=False) -> None:
+    """Copy ``src``'s style onto ``dst``; optionally also the title/axis labels and/or
+    the axis limits. Traces and images are never copied."""
+    fields = list(SUBPLOT_STYLE_FIELDS)
+    if include_labels:
+        fields += SUBPLOT_LABEL_FIELDS
+    if include_limits:
+        fields += SUBPLOT_LIMIT_FIELDS
+    for f in fields:
+        setattr(dst, f, getattr(src, f))
+
+
+def duplicate_sheet_model(sm, name=None):
+    """A deep copy of ``sm`` with a fresh ``sheet_id`` (traces keep pointing at the same
+    data objects); named ``"<name> (copy)"`` unless ``name`` is given."""
+    import copy
+    d = copy.deepcopy(sm.to_dict())
+    d["sheet_id"] = _new_id()
+    d["name"] = name or f"{sm.name} (copy)"
+    return SheetModel.from_dict(d)

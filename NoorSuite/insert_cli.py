@@ -36,6 +36,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--subplot-title")
     ap.add_argument("--x-label")
     ap.add_argument("--y-label")
+    ap.add_argument("--plot-type", help="Line | Scatter | Line+Scatter | Step | Bar")
+    ap.add_argument("--sort", action="store_true", help="draw points in ascending-x order")
     ap.add_argument("--update", action="store_true", help="refresh an existing object in place")
     ap.add_argument("--plot", metavar="X:Y1,Y2", help="also plot these columns (X may be 'index')")
     ap.add_argument("--plot-image", action="store_true", help="show an inserted .npy image")
@@ -75,7 +77,7 @@ def main(argv: list[str]) -> int:
                               tags=[t for t in a.sheet_tags.split(",") if t],
                               notes=a.sheet_notes, folder=a.folder,
                               subplot_title=a.subplot_title, x_label=a.x_label,
-                              y_label=a.y_label)
+                              y_label=a.y_label, plot_type=a.plot_type, sort=a.sort)
             if resp and resp.get("status") == "error":
                 print("plot failed:", resp["message"])
                 return 1

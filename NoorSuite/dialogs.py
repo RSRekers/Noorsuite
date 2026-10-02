@@ -162,6 +162,13 @@ class TraceStyleWidget(QWidget):
         self.errbar_mode_combo.currentIndexChanged.connect(self._push)
         form.addRow("  Error source:", self.errbar_mode_combo)
 
+        self.sort_check = QCheckBox("Sort points by x")
+        self.sort_check.setToolTip(
+            "Draw the points in ascending-x order instead of data order (fixes a messy "
+            "zig-zag when x is disordered). Leave off for loops / hysteresis curves.")
+        self.sort_check.toggled.connect(self._push)
+        form.addRow("", self.sort_check)
+
         self.transform_combo = QComboBox()
         self.transform_combo.addItems(Y_TRANSFORM_LABELS)
         self.transform_combo.currentIndexChanged.connect(self._on_transform_changed)
@@ -223,6 +230,7 @@ class TraceStyleWidget(QWidget):
             self.marker_size_spin.setValue(ref.marker_size)
             self.alpha_spin.setValue(ref.alpha)
 
+            self.sort_check.setChecked(ref.sort_x)
             self.errbar_check.setChecked(ref.show_errorbar and ref.has_error_data)
             self.errbar_check.setEnabled(ref.has_error_data)
             self.errbar_check.setToolTip(
@@ -269,6 +277,7 @@ class TraceStyleWidget(QWidget):
         r.marker = MARKERS[self.marker_combo.currentIndex()]
         r.marker_size = self.marker_size_spin.value()
         r.alpha = self.alpha_spin.value()
+        r.sort_x = self.sort_check.isChecked()
         r.show_errorbar = self.errbar_check.isChecked() and self.errbar_check.isEnabled()
         r.yerr_mode = ERROR_MODES[self.errbar_mode_combo.currentIndex()]
         token = Y_TRANSFORMS[self.transform_combo.currentIndex()]

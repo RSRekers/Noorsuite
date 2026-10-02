@@ -19,6 +19,7 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 
+from .model import PLOT_TYPES
 from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
@@ -33,6 +34,25 @@ _TRACE_COLUMNS = ["data_id", "data_name", "y_col", "x_col", "sheet", "subplot",
                   "enabled", "plot_type", "color"]
 _SHEET_COLUMNS = ["id", "name", "rows", "cols", "subplots", "tags", "duplicate_name",
                   "folder"]
+
+
+_TRACE_OPTIONS = ("color", "edge_color", "line_style", "line_width", "marker",
+                  "marker_size", "alpha")
+
+
+def _trace_style(plot_type, style, sort) -> dict:
+    """Validated TraceRef style overrides for ``plot()`` (empty dict -> defaults)."""
+    out = dict(style or {})
+    bad = [k for k in out if k not in _TRACE_OPTIONS]
+    if bad:
+        raise ValueError(f"unknown style option(s) {bad}; use {list(_TRACE_OPTIONS)}")
+    if plot_type is not None:
+        if plot_type not in PLOT_TYPES:
+            raise ValueError(f"plot_type {plot_type!r} not in {PLOT_TYPES}")
+        out["plot_type"] = plot_type
+    if sort:
+        out["sort_x"] = True
+    return out
 
 
 def _organize_payload(title, tags, notes, folder, subplot, subplot_title, x_label,
@@ -225,13 +245,23 @@ class SciSuiteClient:
     # ---------------------------------------------------------------------- plot
     def plot(self, data, x, y, *, name=None, sheet=None, subplot=0, new_sheet=False,
              title=None, tags=None, notes=None, folder=None, subplot_title=None,
-             x_label=None, y_label=None):
+             x_label=None, y_label=None, plot_type=None, style=None, sort=False):
         """Add columns of a data object as traces to a sheet.
 
         ``data`` is a data-object name (already pushed) or a DataFrame (pushed now
         under ``name``). ``x`` is a column name or ``None`` (row index). ``y`` is a
         column name or a list. ``sheet`` targets by name / id, defaults to the active
         sheet; ``new_sheet=True`` forces a fresh sheet.
+
+        Organizing the destination sheet in the same call: ``title`` (sheet name),
+        ``tags``, ``notes``, ``folder`` (``"Project/Run 4"``, created if missing),
+        ``subplot_title`` / ``x_label`` / ``y_label`` for the target subplot.
+
+        Trace look, applied to every trace this call adds: ``plot_type`` (one of
+        ``model.PLOT_TYPES``: "Line", "Scatter", "Line+Scatter", "Step", "Bar"), ``style``
+        (dict of ``color``, ``line_style``, ``line_width``, ``marker``, ``marker_size``,
+        ``alpha``, ``edge_color``), and ``sort=True`` to draw the points in ascending-x
+        order (fixes a zig-zag when x is disordered; leave off for loops / hysteresis).
         """
         if isinstance(data, str):
             data_name = data
@@ -249,6 +279,7 @@ class SciSuiteClient:
             "subplot_index": int(subplot),
             "organize": _organize_payload(title, tags, notes, folder, subplot,
                                           subplot_title, x_label, y_label),
+            "trace_style": _trace_style(plot_type, style, sort),
         })
 
     def organize_sheet(self, sheet, *, title=None, tags=None, notes=None, folder=None,

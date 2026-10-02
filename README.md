@@ -76,6 +76,18 @@ suite.show_image(nd_array, name="z_stack", axes=(1, 2), new_sheet=True)  # ND im
 
 See [`noorgraph.ipynb`](noorgraph.ipynb) for a full walk-through.
 
+## GUI shortcuts worth knowing
+
+- **Ctrl + mouse wheel** over a plot zooms the whole figure (text and lines scale with it);
+  **Ctrl+0** resets. Zoom is display-only -- exports and clipboard copies are unaffected.
+- Right-click a sheet or folder in the project tree -> **Duplicate** (a folder is copied with
+  all its sheets; the copies reference the same data objects).
+- Axes tab -> **Apply this style to selected subplots...** copies the active subplot's style to the
+  subplots Ctrl/Shift-selected in the subplot strip, optionally including title/labels and limits.
+- Trace style -> **Sort points by x** (or `plot(..., sort=True)`) for a disordered x column.
+- "Copy to clipboard" is WYSIWYG: same proportions as on screen at 300 DPI (the cm size from the
+  Figure tab is used by "Export as SVG").
+
 ## Tests
 
 ```bash

@@ -196,6 +196,7 @@ class OfflineBackend:
             if y_col in obj.columns:
                 ref = TraceRef(obj.id, x_col, y_col)
                 ref.color = self._trace_color(sm, sub)
+                ref.apply_style(p.get("trace_style") or {})   # explicit options win
                 sub.traces.append(ref)
         if missing:
             return {"status": "error", "message": f"columns not found in {obj.name!r}: {missing}"}
