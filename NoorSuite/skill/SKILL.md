@@ -92,6 +92,37 @@ when x is disordered (check `df[x].is_monotonic_increasing`) and the quantity is
 function of x, otherwise the line zig-zags. Do NOT sort loops, hysteresis, IV sweeps that go
 up-and-down, or parametric/trajectory data: there the point order *is* the curve.
 
+### Heatmaps (2-D grids with real axis values)
+
+A *heatmap* is an image whose cells sit at real x / y coordinates (a measured map, a
+parameter sweep, a correlation matrix). Rows = y, columns = x.
+
+```python
+suite.heatmap(df_grid,                    # DataFrame: index = y values, columns = x values
+              name="Conductivity map - A3, 4K", new_sheet=True,
+              title="Conductivity vs T and f", folder="Sample A3/Maps",
+              x_label="Frequency (Hz)", y_label="Temperature (K)",
+              cmap="RdBu", reverse_cmap=True, vmin=-10, vmax=40,
+              boundaries=[-10, 0, 10, 20, 30, 40],   # discrete colour bands (or bins=5)
+              isolines=True, iso_above=10, iso_labels=True,   # lines only at levels >= 10
+              xticks=2, yticks="data")                # every 2nd x value / every y value
+suite.push_heatmap(z2d, x=freqs, y=temps, name="...", x_name="f (Hz)", y_name="T (K)")
+suite.push_heatmap_xyz(long_df, "f", "T", "sigma", name="...")   # long format -> grid (mean per cell)
+suite.show_image("...", style={"cmap": "magma", "iso_show": True})   # restyle / place an existing one
+```
+
+- **Colours**: `cmap` is any matplotlib name; `reverse_cmap`; `vmin`/`vmax`. **Discrete**: `bins=N`
+  equal bands, or `boundaries=[...]` for your own band edges (one colour per band, colourbar shows bands).
+  Use discrete colours for classes/thresholds (pass/fail, ranges); continuous for measured fields.
+- **Isolines**: `isolines=True` (automatic), an int (about that many) or a list of levels. `iso_above` /
+  `iso_below` keep only levels in that range ("only show lines over X"). With discrete colours and no
+  explicit levels the lines follow the band edges. `iso_labels=True` prints the value on the lines.
+- **Ticks**: `xticks`/`yticks` = `"data"` (a tick at every coordinate - good for few categories), an int
+  N (every Nth coordinate - for dense grids), or a list of positions. Categorical axes (string labels,
+  e.g. a correlation matrix from a DataFrame with string index) automatically tick at every label.
+- Always set `x_label`/`y_label` with units and name the heatmap by what it shows. y points up for
+  numeric coordinates; set the y limits reversed in the GUI to flip.
+
 Rules that matter:
 - Only **numeric** columns are kept (non-numeric are dropped); a *named numeric index* becomes a column.
 - Data objects are matched by **name**; pushing an existing name with `mode="new"` makes a duplicate - use `mode="update"` to refresh.

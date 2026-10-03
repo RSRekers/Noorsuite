@@ -21,7 +21,7 @@ import os
 import numpy as np
 
 from .model import (INDEX_COL, DataObject, ImageObject, ImageRef, ProjectModel,
-                    SheetModel, TraceRef, append_notes, apply_sheet_annotations,
+                    SheetModel, TraceRef, append_notes, apply_sheet_annotations, make_image_ref,
                     merge_tags, split_folder_path, tree_move_sheet)
 from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
@@ -174,12 +174,13 @@ class OfflineBackend:
     def _append_image(self, p):
         arr = np.frombuffer(p["bytes"], dtype=p["dtype"]).reshape(p["shape"]).copy()
         existing = self._find_image(p["name"]) if p.get("mode") == "update" else None
+        coords = p.get("axis_coords") or {}
         if existing is not None:
-            existing.update_from(arr, p.get("axis_names"))
+            existing.update_from(arr, p.get("axis_names"), coords)
             return
         self.project.images.append(ImageObject(
             p["name"], arr, p.get("axis_names"), p.get("axis_units"), p.get("tags"),
-            p.get("source", "array")))
+            p.get("source", "array"), axis_coords=coords))
 
     def _add_to_sheet(self, p):
         key = p.get("data_name") or p.get("data_id")
@@ -206,10 +207,11 @@ class OfflineBackend:
         if obj is None:
             return {"status": "error", "message": f"no image named {p.get('name')!r}"}
         sm = self._resolve_sheet(p.get("sheet", "__active__"))
+        if p.get("organize"):
+            self._apply_organize(sm, p["organize"])
         sub = sm.subplots[min(int(p.get("subplot_index", 0)), len(sm.subplots) - 1)]
-        r, c = p.get("display_axes") or [max(0, obj.ndim - 2), max(0, obj.ndim - 1)]
-        index = {a: obj.shape[a] // 2 for a in range(obj.ndim) if a not in (r, c)}
-        sub.image = ImageRef(obj.id, [int(r), int(c)], index)
+        axes = p.get("display_axes") or [max(0, obj.ndim - 2), max(0, obj.ndim - 1)]
+        sub.image = make_image_ref(obj, axes, p.get("image_style"))
 
     def _apply_organize(self, sm: SheetModel, org: dict) -> None:
         apply_sheet_annotations(sm, org)
@@ -268,7 +270,7 @@ class OfflineBackend:
         return {"status": "success", "images": [{
             "id": im.id, "name": im.name, "shape": list(im.shape),
             "dtype": str(im.data.dtype), "axis_names": list(im.axis_names),
-            "tags": list(im.tags), "source": im.source,
+            "tags": list(im.tags), "source": im.source, "heatmap": im.is_heatmap,
         } for im in self.project.images]}
 
     def _list_traces(self, p):

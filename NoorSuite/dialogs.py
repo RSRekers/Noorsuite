@@ -21,7 +21,8 @@ from .model import (CUSTOM_FACTOR_PREFIX, ERROR_MODE_LABELS, ERROR_MODES,
                     LEGEND_LOCS, LINE_STYLE_LABELS, LINE_STYLES, MARKER_LABELS,
                     MARKERS, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
                     REL_MODES, REL_VALUE_PREFIX, TICK_FORMAT_LABELS, TICK_FORMATS,
-                    Y_TRANSFORM_LABELS, Y_TRANSFORMS, ColorMap, apply_numeric_expr)
+                    TICK_MODE_LABELS, TICK_MODES, Y_TRANSFORM_LABELS, Y_TRANSFORMS,
+                    ColorMap, apply_numeric_expr)
 from .widgets import CollapsibleSection
 
 _LINESTYLE_ITEMS = ["-", "--", "-.", ":"]
@@ -557,7 +558,9 @@ class AxesStyleWidget(QWidget):
 
 
 _IMAGE_CMAPS = ["viridis", "plasma", "inferno", "magma", "cividis", "gray",
-                "coolwarm", "turbo", "RdBu", "Spectral"]
+                "coolwarm", "turbo", "RdBu", "RdBu_r", "Spectral", "Spectral_r", "seismic",
+                "jet", "hot", "YlGnBu", "YlOrRd", "Blues", "Greens", "Reds", "Greys",
+                "PuOr", "PiYG", "terrain", "twilight", "tab10", "tab20", "Set2"]
 _INTERP = ["nearest", "antialiased", "bilinear", "bicubic", "none"]
 
 
@@ -598,6 +601,84 @@ class ImageStyleWidget(QWidget):
         self.colorbar_check.toggled.connect(self._push)
         form.addRow("", self.colorbar_check)
 
+        # --- heatmap: colour shaping -------------------------------------------------
+        self.coords_check = QCheckBox("Use axis coordinates (heatmap)")
+        self.coords_check.setToolTip(
+            "Place cells at the object's real axis coordinates (set when it was pushed as a "
+            "heatmap) instead of the pixel index. Ignored for plain images.")
+        self.coords_check.toggled.connect(self._push)
+        form.addRow("", self.coords_check)
+        self.reverse_check = QCheckBox("Reverse colourmap")
+        self.reverse_check.toggled.connect(self._push)
+        form.addRow("", self.reverse_check)
+        self.bins_spin = QSpinBox()
+        self.bins_spin.setRange(0, 64)
+        self.bins_spin.setSpecialValueText("continuous")
+        self.bins_spin.setToolTip("0 = continuous colours; N = N discrete colour bands "
+                                  "between vmin and vmax.")
+        self.bins_spin.valueChanged.connect(self._push)
+        form.addRow("Colour bands:", self.bins_spin)
+        self.bounds_edit = QLineEdit()
+        self.bounds_edit.setPlaceholderText("e.g. 0, 10, 50, 100  (overrides bands)")
+        self.bounds_edit.editingFinished.connect(self._push)
+        form.addRow("Band edges:", self.bounds_edit)
+
+        # --- isolines -----------------------------------------------------------------
+        iso_body = QWidget()
+        iso = QFormLayout(iso_body)
+        _tighten(iso)
+        self.iso_check = QCheckBox("Show isolines")
+        self.iso_check.toggled.connect(self._push)
+        iso.addRow("", self.iso_check)
+        self.iso_levels_edit = QLineEdit()
+        self.iso_levels_edit.setPlaceholderText("auto  (or band edges when discrete)")
+        self.iso_levels_edit.editingFinished.connect(self._push)
+        iso.addRow("Levels:", self.iso_levels_edit)
+        self.iso_count_spin = QSpinBox()
+        self.iso_count_spin.setRange(1, 100)
+        self.iso_count_spin.setToolTip("About this many automatic levels (when no levels given).")
+        self.iso_count_spin.valueChanged.connect(self._push)
+        iso.addRow("Auto count:", self.iso_count_spin)
+        self.iso_above_edit = QLineEdit(); self.iso_above_edit.setPlaceholderText("none")
+        self.iso_above_edit.editingFinished.connect(self._push)
+        self.iso_below_edit = QLineEdit(); self.iso_below_edit.setPlaceholderText("none")
+        self.iso_below_edit.editingFinished.connect(self._push)
+        iso.addRow("Only from / to:", _pair(self.iso_above_edit, self.iso_below_edit))
+        self.iso_color_btn = ColorButton(color="#000000", label="Isoline colour")
+        self.iso_color_btn.colorChanged.connect(self._push)
+        iso.addRow("Colour:", self.iso_color_btn)
+        self.iso_width_spin = _spin(0.1, 8.0, 0.1)
+        self.iso_width_spin.valueChanged.connect(self._push)
+        iso.addRow("Width:", self.iso_width_spin)
+        self.iso_style_combo = QComboBox(); self.iso_style_combo.addItems(LINE_STYLE_LABELS)
+        self.iso_style_combo.currentIndexChanged.connect(self._push)
+        iso.addRow("Style:", self.iso_style_combo)
+        self.iso_labels_check = QCheckBox("Label the lines")
+        self.iso_labels_check.toggled.connect(self._push)
+        iso.addRow("", self.iso_labels_check)
+        self.iso_fmt_edit = QLineEdit(); self.iso_fmt_edit.setPlaceholderText("%g")
+        self.iso_fmt_edit.editingFinished.connect(self._push)
+        iso.addRow("Label format:", self.iso_fmt_edit)
+        form.addRow(CollapsibleSection("Isolines", iso_body, expanded=False))
+
+        # --- heatmap axis ticks -------------------------------------------------------
+        tick_body = QWidget()
+        tk = QFormLayout(tick_body)
+        _tighten(tk)
+        self._tick_widgets = {}
+        for axis in ("x", "y"):
+            mode = QComboBox(); mode.addItems(TICK_MODE_LABELS)
+            mode.currentIndexChanged.connect(self._push)
+            vals = QLineEdit(); vals.setPlaceholderText("custom: 0, 5, 10")
+            vals.editingFinished.connect(self._push)
+            every = QSpinBox(); every.setRange(1, 1000)
+            every.setPrefix("every ")
+            every.valueChanged.connect(self._push)
+            tk.addRow(f"{axis.upper()} ticks:", _pair(mode, every))
+            tk.addRow("", vals)
+            self._tick_widgets[axis] = (mode, vals, every)
+        form.addRow(CollapsibleSection("Axis ticks", tick_body, expanded=False))
+
     def set_subplot(self, sub):
         ref = sub.image if sub is not None else None
         self._ref = ref
@@ -614,6 +695,26 @@ class ImageStyleWidget(QWidget):
             self.aspect_combo.setCurrentText(ref.aspect)
             self.alpha_spin.setValue(ref.alpha)
             self.colorbar_check.setChecked(ref.colorbar)
+            self.coords_check.setChecked(ref.use_coords)
+            self.reverse_check.setChecked(ref.cmap_reverse)
+            self.bins_spin.setValue(int(ref.cmap_bins))
+            self.bounds_edit.setText(ref.cmap_boundaries)
+            self.iso_check.setChecked(ref.iso_show)
+            self.iso_levels_edit.setText(ref.iso_levels)
+            self.iso_count_spin.setValue(int(ref.iso_count))
+            self.iso_above_edit.setText(_fmt(ref.iso_above))
+            self.iso_below_edit.setText(_fmt(ref.iso_below))
+            self.iso_color_btn.setColor(ref.iso_color)
+            self.iso_width_spin.setValue(ref.iso_width)
+            self.iso_style_combo.setCurrentIndex(
+                LINE_STYLES.index(ref.iso_style) if ref.iso_style in LINE_STYLES else 0)
+            self.iso_labels_check.setChecked(ref.iso_labels)
+            self.iso_fmt_edit.setText(ref.iso_label_fmt)
+            for axis, (mode, vals, every) in self._tick_widgets.items():
+                m = getattr(ref, f"{axis}_tick_mode")
+                mode.setCurrentIndex(TICK_MODES.index(m) if m in TICK_MODES else 0)
+                vals.setText(getattr(ref, f"{axis}_tick_values"))
+                every.setValue(int(getattr(ref, f"{axis}_tick_every")))
         finally:
             self._loading = False
 
@@ -629,6 +730,24 @@ class ImageStyleWidget(QWidget):
         r.aspect = self.aspect_combo.currentText()
         r.alpha = self.alpha_spin.value()
         r.colorbar = self.colorbar_check.isChecked()
+        r.use_coords = self.coords_check.isChecked()
+        r.cmap_reverse = self.reverse_check.isChecked()
+        r.cmap_bins = self.bins_spin.value()
+        r.cmap_boundaries = self.bounds_edit.text().strip()
+        r.iso_show = self.iso_check.isChecked()
+        r.iso_levels = self.iso_levels_edit.text().strip()
+        r.iso_count = self.iso_count_spin.value()
+        r.iso_above = _parse_float_or_none(self.iso_above_edit.text())
+        r.iso_below = _parse_float_or_none(self.iso_below_edit.text())
+        r.iso_color = self.iso_color_btn.color()
+        r.iso_width = self.iso_width_spin.value()
+        r.iso_style = LINE_STYLES[self.iso_style_combo.currentIndex()]
+        r.iso_labels = self.iso_labels_check.isChecked()
+        r.iso_label_fmt = self.iso_fmt_edit.text().strip() or "%g"
+        for axis, (mode, vals, every) in self._tick_widgets.items():
+            setattr(r, f"{axis}_tick_mode", TICK_MODES[mode.currentIndex()])
+            setattr(r, f"{axis}_tick_values", vals.text().strip())
+            setattr(r, f"{axis}_tick_every", every.value())
         self.changed.emit()
 
 

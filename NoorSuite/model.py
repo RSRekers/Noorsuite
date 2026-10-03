@@ -515,10 +515,16 @@ class ImageObject:
     """A named ND array in the data pool, shown as an image (a 2-D slice at a time)."""
 
     def __init__(self, name, data, axis_names=None, axis_units=None, tags=None,
-                 source="", obj_id=None):
+                 source="", obj_id=None, axis_coords=None):
         self.id = obj_id or _new_id()
         self.name = name
         self.data = np.asarray(data)
+        # Real coordinates per axis (axis index -> list of numbers, or of strings for a
+        # categorical axis), e.g. the x / y values of a heatmap. Axes without an entry
+        # fall back to the plain pixel index.
+        self.axis_coords: dict[int, list] = {}
+        for a, vals in (axis_coords or {}).items():
+            self.set_axis_coords(int(a), vals)
         self.axis_names = list(axis_names) if axis_names else \
             [f"axis_{i}" for i in range(self.data.ndim)]
         self.axis_units = dict(axis_units or {})
@@ -533,6 +539,33 @@ class ImageObject:
     @property
     def shape(self):
         return tuple(self.data.shape)
+
+    @property
+    def is_heatmap(self) -> bool:
+        """Has real coordinates on at least one axis (otherwise it is a plain image)."""
+        return bool(self.axis_coords)
+
+    def set_axis_coords(self, axis: int, values) -> None:
+        vals = list(values)
+        if len(vals) != self.data.shape[axis]:
+            raise ValueError(f"axis {axis} has {self.data.shape[axis]} entries but "
+                             f"{len(vals)} coordinate values were given")
+        try:
+            vals = [float(v) for v in vals]
+        except (TypeError, ValueError):
+            vals = [str(v) for v in vals]          # categorical labels
+        self.axis_coords[axis] = vals
+
+    def axis_positions(self, axis: int):
+        """``(positions, labels)`` for ``axis``: float positions of each cell centre and,
+        for a categorical axis, the string labels (positions are then ``0..n-1``);
+        ``None`` if the axis has no coordinates."""
+        vals = self.axis_coords.get(axis)
+        if vals is None or len(vals) != self.data.shape[axis]:
+            return None
+        if vals and isinstance(vals[0], str):
+            return np.arange(len(vals), dtype=float), list(vals)
+        return np.asarray(vals, dtype=float), None
 
     def head_meta(self) -> str:
         axes = ", ".join(f"{n}={s}" for n, s in zip(self.axis_names, self.shape))
@@ -557,12 +590,17 @@ class ImageObject:
         sub = self.data[tuple(sel)]                       # now 2-D, axes (min(r,c), max(r,c))
         return sub if r < c else np.swapaxes(sub, 0, 1)
 
-    def update_from(self, data, axis_names=None) -> None:
+    def update_from(self, data, axis_names=None, axis_coords=None) -> None:
         self.data = np.asarray(data)
         if axis_names:
             self.axis_names = list(axis_names)
         elif len(self.axis_names) != self.data.ndim:
             self.axis_names = [f"axis_{i}" for i in range(self.data.ndim)]
+        # stale coordinates (axis length changed) are dropped; new ones replace old
+        self.axis_coords = {a: v for a, v in self.axis_coords.items()
+                            if a < self.data.ndim and len(v) == self.data.shape[a]}
+        for a, vals in (axis_coords or {}).items():
+            self.set_axis_coords(int(a), vals)
         self._dirty = True
 
     def to_dict(self) -> dict:
@@ -576,6 +614,7 @@ class ImageObject:
             "axis_units": dict(self.axis_units),
             "tags": list(self.tags),
             "source": self.source,
+            "axis_coords": {str(a): list(v) for a, v in self.axis_coords.items()},
             "array_file": "",
         }
 
@@ -584,7 +623,8 @@ class ImageObject:
         shape = tuple(d.get("shape", ()))
         stub = np.zeros(shape, dtype=d.get("dtype", "float64"))
         obj = cls(d["name"], stub, d.get("axis_names"), d.get("axis_units"),
-                  d.get("tags"), d.get("source", ""), d.get("id"))
+                  d.get("tags"), d.get("source", ""), d.get("id"),
+                  {int(a): v for a, v in (d.get("axis_coords") or {}).items()})
         obj._dirty = False
         return obj
 
@@ -593,7 +633,16 @@ class ImageRef:
     """A pointer from a subplot to an :class:`ImageObject` + its display state."""
 
     _FIELDS = ("data_id", "display_axes", "index", "slice_axis", "cmap", "vmin", "vmax",
-               "interpolation", "origin", "aspect", "alpha", "colorbar")
+               "interpolation", "origin", "aspect", "alpha", "colorbar",
+               # heatmap options: colormap shaping, isolines, axis ticks
+               "use_coords", "cmap_reverse", "cmap_bins", "cmap_boundaries",
+               "iso_show", "iso_levels", "iso_count", "iso_above", "iso_below",
+               "iso_color", "iso_width", "iso_style", "iso_labels", "iso_label_fmt",
+               "x_tick_mode", "x_tick_values", "x_tick_every",
+               "y_tick_mode", "y_tick_values", "y_tick_every")
+    # fields a caller may set when placing an image/heatmap (everything but the pointers)
+    STYLE_FIELDS = tuple(f for f in _FIELDS
+                         if f not in ("data_id", "display_axes", "index", "slice_axis"))
 
     def __init__(self, data_id, display_axes=(0, 1), index=None):
         self.data_id = data_id
@@ -608,6 +657,35 @@ class ImageRef:
         self.aspect = "equal"         # auto | equal
         self.alpha = 1.0
         self.colorbar = False
+
+        # --- heatmap options -------------------------------------------------------
+        self.use_coords = True         # draw at the object's axis coordinates, if it has any
+        self.cmap_reverse = False
+        self.cmap_bins = 0             # 0 -> continuous; N >= 2 -> N discrete colour bands
+        self.cmap_boundaries = ""      # explicit band edges "0, 10, 50, 100" (overrides bins)
+        self.iso_show = False          # contour lines over the image
+        self.iso_levels = ""           # explicit levels "10, 20, 50"; blank -> auto / band edges
+        self.iso_count = 8             # about this many automatic levels
+        self.iso_above = None          # only draw isolines at levels >= this value
+        self.iso_below = None          # ... and <= this value
+        self.iso_color = "#000000"
+        self.iso_width = 0.8
+        self.iso_style = "-"
+        self.iso_labels = False
+        self.iso_label_fmt = "%g"
+        # ticks: "auto" (matplotlib) | "data" (one per cell centre, every Nth) | "custom"
+        self.x_tick_mode = "auto"
+        self.x_tick_values = ""        # custom: "0, 5, 10"
+        self.x_tick_every = 1
+        self.y_tick_mode = "auto"
+        self.y_tick_values = ""
+        self.y_tick_every = 1
+
+    def apply_style(self, d: dict) -> None:
+        """Set any of :attr:`STYLE_FIELDS` from ``d`` (``None`` values are skipped)."""
+        for f in self.STYLE_FIELDS:
+            if f in d and d[f] is not None:
+                setattr(self, f, d[f])
 
     def to_dict(self) -> dict:
         d = {f: getattr(self, f) for f in self._FIELDS}
@@ -1010,3 +1088,110 @@ def duplicate_sheet_model(sm, name=None):
     d["sheet_id"] = _new_id()
     d["name"] = name or f"{sm.name} (copy)"
     return SheetModel.from_dict(d)
+
+
+# ---------------------------------------------------------------------------
+# Heatmaps: grids, colour bands, isoline levels, tick positions (Qt/matplotlib-free)
+# ---------------------------------------------------------------------------
+TICK_MODES = ["auto", "data", "custom"]
+TICK_MODE_LABELS = ["Automatic", "At every data coordinate", "Custom values"]
+
+
+def parse_float_list(text) -> list:
+    """``"1, 2.5; 3"`` -> ``[1.0, 2.5, 3.0]`` (comma / semicolon / whitespace separated);
+    unparseable items are skipped."""
+    out = []
+    for tok in str(text or "").replace(";", ",").replace("\n", ",").replace(" ", ",").split(","):
+        if tok.strip():
+            try:
+                out.append(float(tok))
+            except ValueError:
+                pass
+    return out
+
+
+def heatmap_from_xyz(x, y, z):
+    """Pivot scattered/long-format ``(x, y, z)`` samples onto the grid of their unique
+    values: returns ``(grid, xs, ys)`` with ``grid[i, j]`` = mean ``z`` at ``(xs[j], ys[i])``
+    (NaN where there is no sample), so it plugs straight into an image/heatmap object
+    (axis 0 = y rows, axis 1 = x columns)."""
+    x, y, z = (np.asarray(a, dtype=float) for a in (x, y, z))
+    xs, xi = np.unique(x, return_inverse=True)
+    ys, yi = np.unique(y, return_inverse=True)
+    total = np.zeros((len(ys), len(xs)))
+    count = np.zeros((len(ys), len(xs)))
+    ok = np.isfinite(z)
+    np.add.at(total, (yi[ok], xi[ok]), z[ok])
+    np.add.at(count, (yi[ok], xi[ok]), 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        grid = np.where(count > 0, total / count, np.nan)
+    return grid, xs, ys
+
+
+def heatmap_band_edges(ref, vmin, vmax):
+    """Edges of the discrete colour bands, or ``None`` for a continuous colormap:
+    ``ref.cmap_boundaries`` if it lists 2+ distinct values, else ``cmap_bins`` equal bands
+    between ``vmin`` and ``vmax``."""
+    edges = sorted(set(parse_float_list(ref.cmap_boundaries)))
+    if len(edges) >= 2:
+        return np.asarray(edges, dtype=float)
+    if int(ref.cmap_bins) >= 2 and vmax > vmin:
+        return np.linspace(vmin, vmax, int(ref.cmap_bins) + 1)
+    return None
+
+
+def nice_levels(vmin, vmax, n) -> list:
+    """About ``n`` round-valued levels strictly inside ``[vmin, vmax]`` (1/2/2.5/5 x 10^k steps)."""
+    if not (np.isfinite(vmin) and np.isfinite(vmax)) or vmax <= vmin or n < 1:
+        return []
+    raw = (vmax - vmin) / (n + 1)
+    mag = 10 ** np.floor(np.log10(raw))
+    step = next(m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw * 0.75)
+    first = np.ceil(vmin / step) * step
+    levels = np.arange(first, vmax + step * 1e-9, step)
+    return [float(round(v, 12)) for v in levels if vmin < v < vmax]
+
+
+def heatmap_iso_levels(ref, vmin, vmax, band_edges=None) -> list:
+    """Levels at which to draw isolines: ``ref.iso_levels`` if given, else the interior colour
+    -band edges of a discrete colormap, else about ``iso_count`` round values -- then
+    restricted to ``iso_above <= level <= iso_below`` (either bound optional)."""
+    levels = sorted(set(parse_float_list(ref.iso_levels)))
+    if not levels:
+        if band_edges is not None:
+            levels = [float(v) for v in band_edges[1:-1]]
+        else:
+            levels = nice_levels(vmin, vmax, int(ref.iso_count))
+    if ref.iso_above is not None:
+        levels = [v for v in levels if v >= ref.iso_above]
+    if ref.iso_below is not None:
+        levels = [v for v in levels if v <= ref.iso_below]
+    return levels
+
+
+def resolve_ticks(mode, values_text, every, positions, labels=None):
+    """Tick ``(positions, labels)`` for one heatmap axis, or ``None`` for automatic.
+    ``positions`` are the cell centres (data coordinates), ``labels`` optional category names."""
+    if mode == "custom":
+        vals = parse_float_list(values_text)
+        return (vals, [f"{v:.4g}" for v in vals]) if vals else None
+    if mode == "data":
+        step = max(1, int(every or 1))
+        idx = range(0, len(positions), step)
+        pos = [float(positions[i]) for i in idx]
+        lab = [labels[i] if labels else f"{positions[i]:.4g}" for i in idx]
+        return pos, lab
+    return None
+
+
+def make_image_ref(obj, display_axes, style=None) -> "ImageRef":
+    """The :class:`ImageRef` for placing ``obj`` with ``display_axes`` (slice positions
+    start mid-stack). A heatmap (coordinates on a displayed axis) defaults to a free aspect,
+    since its cells are in data units, not square pixels; ``style`` overrides anything."""
+    r, c = int(display_axes[0]), int(display_axes[1])
+    index = {a: obj.shape[a] // 2 for a in range(obj.ndim) if a not in (r, c)}
+    ref = ImageRef(obj.id, [r, c], index)
+    if r in obj.axis_coords or c in obj.axis_coords:
+        ref.aspect = "auto"
+    ref.apply_style(style or {})
+    return ref

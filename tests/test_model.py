@@ -491,3 +491,63 @@ def test_copy_subplot_style_options_and_duplicate_sheet():
     assert dup.subplots[0].traces[0].data_id == "did"
     dup.subplots[0].traces[0].color = "#000001"
     assert sm.subplots[0].traces[0].color != "#000001"       # independent copy
+
+
+def test_heatmap_helpers():
+    import numpy as np
+    from NoorSuite.model import (ImageRef, heatmap_band_edges, heatmap_from_xyz,
+                                 heatmap_iso_levels, nice_levels, parse_float_list,
+                                 resolve_ticks)
+    assert parse_float_list("1, 2.5; 3 x 4") == [1.0, 2.5, 3.0, 4.0]
+    grid, xs, ys = heatmap_from_xyz([1, 2, 1, 2, 2], [5, 5, 6, 6, 6], [1, 2, 3, 4, 6])
+    assert xs.tolist() == [1, 2] and ys.tolist() == [5, 6]
+    assert grid.tolist() == [[1, 2], [3, 5]]                      # duplicate cell averaged
+    assert np.isnan(heatmap_from_xyz([1, 2], [1, 2], [1, 2])[0][0, 1])
+
+    ref = ImageRef("id")
+    assert heatmap_band_edges(ref, 0, 10) is None                 # continuous by default
+    ref.cmap_bins = 5
+    assert heatmap_band_edges(ref, 0, 10).tolist() == [0, 2, 4, 6, 8, 10]
+    ref.cmap_boundaries = "50, 0, 10, 10"                         # explicit edges win, sorted
+    assert heatmap_band_edges(ref, 0, 100).tolist() == [0, 10, 50]
+
+    ref = ImageRef("id")
+    levels = nice_levels(0, 100, 8)
+    assert 5 <= len(levels) <= 12 and all(0 < v < 100 for v in levels)
+    assert heatmap_iso_levels(ref, 0, 100) == levels
+    ref.iso_above = 50
+    assert all(v >= 50 for v in heatmap_iso_levels(ref, 0, 100))
+    ref.iso_below = 70
+    assert all(50 <= v <= 70 for v in heatmap_iso_levels(ref, 0, 100))
+    ref.iso_levels = "10, 60, 90"                                  # explicit, then filtered
+    assert heatmap_iso_levels(ref, 0, 100) == [60.0]
+    ref = ImageRef("id")
+    edges = np.array([0, 10, 50, 100.0])                           # discrete: follow band edges
+    assert heatmap_iso_levels(ref, 0, 100, edges) == [10.0, 50.0]
+
+    assert resolve_ticks("auto", "", 1, [1, 2, 3]) is None
+    assert resolve_ticks("data", "", 2, [1.0, 2.0, 3.0, 4.0, 5.0]) == \
+        ([1.0, 3.0, 5.0], ["1", "3", "5"])
+    assert resolve_ticks("data", "", 1, [0.0, 1.0], ["a", "b"]) == ([0.0, 1.0], ["a", "b"])
+    assert resolve_ticks("custom", "0, 2.5", 1, [1]) == ([0.0, 2.5], ["0", "2.5"])
+
+
+def test_image_object_coords_roundtrip_and_make_ref():
+    import numpy as np
+    from NoorSuite.model import ImageObject, make_image_ref
+    o = ImageObject("h", np.zeros((2, 3)), ["y", "x"], axis_coords={0: [0.5, 1.5], 1: ["a", "b", "c"]})
+    assert o.is_heatmap
+    pos, lab = o.axis_positions(1)
+    assert pos.tolist() == [0, 1, 2] and lab == ["a", "b", "c"]
+    assert o.axis_positions(0)[1] is None
+    back = ImageObject.from_dict(o.to_dict())
+    assert back.axis_coords == {0: [0.5, 1.5], 1: ["a", "b", "c"]}
+    import pytest
+    with pytest.raises(ValueError):
+        o.set_axis_coords(0, [1, 2, 3])
+    ref = make_image_ref(o, (0, 1), {"cmap": "magma", "iso_show": True, "bogus": 1})
+    assert (ref.aspect, ref.cmap, ref.iso_show) == ("auto", "magma", True)
+    plain = ImageObject("p", np.zeros((2, 3)))
+    assert make_image_ref(plain, (0, 1)).aspect == "equal"
+    o.update_from(np.zeros((2, 4)))                                  # x length changed -> stale
+    assert 1 not in o.axis_coords and 0 in o.axis_coords

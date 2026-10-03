@@ -113,3 +113,72 @@ def test_ctrl_wheel_zooms_and_ctrl_0_resets(win):
     assert ps.canvas_host.zoom == pytest.approx(1.15)
     ps.canvas_host.set_zoom(1.0)
     assert ps.canvas_host.zoom == 1.0
+
+
+def _heatmap_sheet(win, **style):
+    import numpy as np
+    z = np.add.outer(np.linspace(0, 10, 6), np.linspace(0, 40, 5))      # 6 rows (y) x 5 cols (x)
+    win.handle_incoming_ipc({
+        "action": "append_image", "name": "hm", "bytes": z.tobytes(), "shape": list(z.shape),
+        "dtype": str(z.dtype), "axis_names": ["T", "f"],
+        "axis_coords": {0: [100, 200, 300, 400, 500, 600], 1: [1, 2, 4, 8, 16]}})
+    win.handle_incoming_ipc({"action": "add_image_to_sheet", "name": "hm", "sheet": "__new__",
+                             "subplot_index": 0, "display_axes": [0, 1], "image_style": style})
+    sm = next(reversed(win.sheets.values()))
+    ps = win._open_sheet_tab(sm.sheet_id)
+    win.show()
+    QApplication.processEvents()
+    return sm, ps
+
+
+def test_heatmap_renders_at_coordinates_with_bands_isolines_and_ticks(win):
+    from matplotlib.collections import QuadMesh
+    from matplotlib.colors import BoundaryNorm
+    sm, ps = _heatmap_sheet(win, cmap_bins=5, iso_show=True, iso_above=20, colorbar=True,
+                            x_tick_mode="data", x_tick_every=2,
+                            y_tick_mode="custom", y_tick_values="100, 300")
+    ax = ps.fig.axes[0]
+    mesh = next(c for c in ax.collections if isinstance(c, QuadMesh))
+    assert isinstance(mesh.norm, BoundaryNorm) and len(mesh.norm.boundaries) == 6
+    x0, x1 = ax.get_xlim()
+    assert x0 < 1 and x1 > 16                                   # real x coordinates, not 0..5
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["1", "4", "16"]
+    assert list(ax.get_yticks()) == [100.0, 300.0]
+    assert len(ps.fig.axes) == 2                                # + colourbar axes
+    iso_levels = [lv for c in ax.collections if hasattr(c, "levels") for lv in c.levels]
+    assert iso_levels and min(iso_levels) >= 20                 # nothing below the threshold
+    assert sm.subplots[0].image.aspect == "auto"                # heatmap default
+
+
+def test_plain_image_still_renders_in_index_space(win):
+    import numpy as np
+    z = np.arange(12.0).reshape(3, 4)
+    win.handle_incoming_ipc({"action": "append_image", "name": "im", "bytes": z.tobytes(),
+                             "shape": [3, 4], "dtype": "float64"})
+    win.handle_incoming_ipc({"action": "add_image_to_sheet", "name": "im", "sheet": "__new__",
+                             "subplot_index": 0, "display_axes": [0, 1]})
+    sm = next(reversed(win.sheets.values()))
+    ps = win._open_sheet_tab(sm.sheet_id)
+    win.show()
+    QApplication.processEvents()
+    ax = ps.fig.axes[0]
+    assert ax.get_xlim() == (0.0, 4.0) and len(ax.images) == 1
+
+
+def test_image_style_widget_roundtrips_heatmap_controls(win):
+    sm, ps = _heatmap_sheet(win, iso_show=True, cmap_bins=4, x_tick_mode="data")
+    sub = sm.subplots[0]
+    w = win.axes_widget.image_widget
+    win.sync_active_subplot_inspector()
+    assert w.bins_spin.value() == 4 and w.iso_check.isChecked()
+    w.iso_above_edit.setText("12.5")
+    w.bounds_edit.setText("0, 20, 60")
+    w.reverse_check.setChecked(True)
+    w._tick_widgets["y"][0].setCurrentIndex(2)
+    w._tick_widgets["y"][1].setText("100, 500")
+    w._push()
+    r = sub.image
+    assert (r.iso_above, r.cmap_boundaries, r.cmap_reverse) == (12.5, "0, 20, 60", True)
+    assert (r.y_tick_mode, r.y_tick_values, r.x_tick_mode) == ("custom", "100, 500", "data")
+    from NoorSuite.model import ImageRef
+    assert ImageRef.from_dict(r.to_dict()).iso_above == 12.5

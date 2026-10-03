@@ -8,6 +8,7 @@ signal.
 """
 from __future__ import annotations
 
+import matplotlib as mpl
 import numpy as np
 from matplotlib.backends.backend_qtagg import (FigureCanvasQTAgg,
                                                NavigationToolbar2QT)
@@ -19,7 +20,8 @@ from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                              QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget)
 
-from .model import INDEX_COL, ImageRef, SheetModel
+from .model import (INDEX_COL, ImageRef, SheetModel, heatmap_band_edges,
+                    heatmap_iso_levels, resolve_ticks)
 from .widgets import CollapsibleSection
 
 _ACTIVE_ACCENT = "#ff7f0e"
@@ -152,6 +154,7 @@ class PlotSheet(QWidget):
         self._axes = []               # Axes in subplot order
         self._text_targets = []       # (Text, kind, subplot_index)
         self._image_axes = {}         # Axes -> subplot_index (has an image)
+        self._image_geom = {}         # Axes -> (xpos, xlabels, ypos, ylabels) for tick control
         self._highlight_patch = None  # figure-level Rectangle around the active subplot
         self._in_highlight = False    # reentrancy guard for the draw_event handler
 
@@ -406,6 +409,7 @@ class PlotSheet(QWidget):
         self._axes = []
         self._text_targets = []
         self._image_axes = {}
+        self._image_geom = {}
 
         rows, cols = m.rows, m.cols
         if m.fig_width_cm and m.fig_height_cm:
@@ -518,6 +522,8 @@ class PlotSheet(QWidget):
                 ax.set_xlim(left=sub.x_min, right=sub.x_max)
             if sub.y_min is not None or sub.y_max is not None:
                 ax.set_ylim(bottom=sub.y_min, top=sub.y_max)
+            if sub.image is not None:
+                self._apply_image_ticks(ax, sub.image)
 
             if n_drawn and sub.legend_visible:
                 legend = ax.legend(loc=sub.legend_loc, frameon=sub.legend_frame,
@@ -576,26 +582,109 @@ class PlotSheet(QWidget):
         except (AttributeError, ValueError):
             pass   # e.g. ticklabel_format doesn't support a log-scaled axis
 
+    @staticmethod
+    def _image_cmap_norm(ref, sl):
+        """Colormap + norm for an image/heatmap: optional reversal, and either a continuous
+        ``Normalize(vmin, vmax)`` or -- with colour bands set -- a ``BoundaryNorm`` over
+        a colormap resampled to one colour per band."""
+        try:
+            base = mpl.colormaps[ref.cmap]
+        except (KeyError, ValueError):
+            base = mpl.colormaps["viridis"]
+        if ref.cmap_reverse:
+            base = base.reversed()
+        finite = sl[np.isfinite(sl)] if np.issubdtype(sl.dtype, np.number) else np.array([])
+        vmin = ref.vmin if ref.vmin is not None else (float(finite.min()) if finite.size else 0.0)
+        vmax = ref.vmax if ref.vmax is not None else (float(finite.max()) if finite.size else 1.0)
+        edges = heatmap_band_edges(ref, vmin, vmax)
+        if edges is not None:
+            n = len(edges) - 1
+            return base.resampled(n), mpl.colors.BoundaryNorm(edges, n, clip=True), edges, vmin, vmax
+        return base, mpl.colors.Normalize(vmin=vmin, vmax=vmax), None, vmin, vmax
+
     def _draw_image(self, ax, ref, subplot_index):
         obj = self._images.get(ref.data_id)
         if obj is None or obj.ndim < 2:
             return
         try:
-            sl = obj.slice(ref.display_axes, ref.index)
+            sl = np.asarray(obj.slice(ref.display_axes, ref.index), dtype=float)
         except Exception:
             return
         nrows, ncols = sl.shape
-        im = ax.imshow(sl, cmap=ref.cmap, vmin=ref.vmin, vmax=ref.vmax,
-                       interpolation=ref.interpolation, origin=ref.origin,
-                       aspect=ref.aspect, alpha=ref.alpha,
-                       extent=[0, ncols, 0, nrows], zorder=0)
+        r, c = int(ref.display_axes[0]), int(ref.display_axes[1])
+        ypos = obj.axis_positions(r) if ref.use_coords else None
+        xpos = obj.axis_positions(c) if ref.use_coords else None
+        cmap, norm, edges, vmin, vmax = self._image_cmap_norm(ref, sl)
+
+        if xpos is None and ypos is None:
+            # plain image: pixel grid, extent 0..n in index units
+            im = ax.imshow(sl, cmap=cmap, norm=norm, interpolation=ref.interpolation,
+                           origin=ref.origin, aspect=ref.aspect, alpha=ref.alpha,
+                           extent=[0, ncols, 0, nrows], zorder=0)
+            xc = np.arange(ncols) + 0.5
+            yc = (nrows - 0.5 - np.arange(nrows)) if ref.origin == "upper" \
+                else np.arange(nrows) + 0.5
+            xlab = ylab = None
+            tick_x, tick_y = (xc, [str(i) for i in range(ncols)]), \
+                (yc, [str(i) for i in range(nrows)])
+        else:
+            # heatmap: cells sit at their real coordinates (index centres where an axis has none)
+            xc, xlab = xpos if xpos is not None else (np.arange(ncols) + 0.5, None)
+            yc, ylab = ypos if ypos is not None else (np.arange(nrows) + 0.5, None)
+            smooth = ref.interpolation in ("bilinear", "bicubic", "antialiased") \
+                and np.isfinite(sl).all()
+            im = ax.pcolormesh(xc, yc, np.ma.masked_invalid(sl), cmap=cmap, norm=norm,
+                               shading="gouraud" if smooth else "nearest",
+                               alpha=ref.alpha, zorder=0)
+            ax.set_aspect("equal" if ref.aspect == "equal" else "auto", adjustable="box")
+            tick_x, tick_y = (xc, xlab), (yc, ylab)
         self.artist_map[im] = ref
         self._image_axes[ax] = subplot_index
+        self._image_geom[ax] = (tick_x, tick_y)
+
+        if ref.iso_show:
+            self._draw_isolines(ax, ref, xc, yc, sl, edges, vmin, vmax)
         if ref.colorbar:
             try:
                 self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
             except Exception:
                 pass
+
+    def _draw_isolines(self, ax, ref, xc, yc, sl, edges, vmin, vmax):
+        finite = sl[np.isfinite(sl)]
+        if finite.size < 4 or min(sl.shape) < 2:
+            return
+        levels = heatmap_iso_levels(ref, vmin if ref.vmin is not None else float(finite.min()),
+                                    vmax if ref.vmax is not None else float(finite.max()), edges)
+        if not levels:
+            return
+        try:
+            cs = ax.contour(xc, yc, np.ma.masked_invalid(sl), levels=levels,
+                            colors=ref.iso_color, linewidths=ref.iso_width,
+                            linestyles=ref.iso_style, zorder=1)
+            if ref.iso_labels and cs.levels.size:
+                ax.clabel(cs, fmt=ref.iso_label_fmt or "%g", fontsize=7)
+        except Exception:
+            pass
+
+    def _apply_image_ticks(self, ax, ref, text_scale=1.0):
+        """Heatmap axis ticks: at the data coordinates (every Nth) or at custom values."""
+        geom = self._image_geom.get(ax)
+        if ref is None or geom is None:
+            return
+        for axis, (pos, labels), mode, values, every in (
+                ("x", geom[0], ref.x_tick_mode, ref.x_tick_values, ref.x_tick_every),
+                ("y", geom[1], ref.y_tick_mode, ref.y_tick_values, ref.y_tick_every)):
+            res = resolve_ticks(mode, values, every, pos, labels)
+            if res is None:
+                continue
+            ticks, names = res
+            if axis == "x":
+                ax.set_xticks(ticks)
+                ax.set_xticklabels(names)
+            else:
+                ax.set_yticks(ticks)
+                ax.set_yticklabels(names)
 
     def _draw_trace(self, ax, tref, x, y):
         marker = None if tref.marker == "None" else tref.marker

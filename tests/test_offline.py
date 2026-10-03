@@ -70,3 +70,34 @@ def test_plot_type_style_and_sort_options(tmp_path):
         suite.plot("d", "x", "y", plot_type="Bubble")
     with pytest.raises(ValueError):
         suite.plot("d", "x", "y", style={"colour": "red"})
+
+
+def test_heatmap_offline_roundtrip_and_options(tmp_path):
+    import pytest
+    suite = _suite(tmp_path)
+    df = pd.DataFrame([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], index=[10.0, 20.0],
+                      columns=[0.1, 0.2, 0.3])
+    suite.heatmap(df, name="T map", new_sheet=True, title="T vs f", cmap="RdBu", reverse_cmap=True,
+                  bins=4, isolines=[2.0, 5.0], iso_above=3, xticks=2, yticks=[10, 20],
+                  x_label="f", folder="Maps")
+    pm = ProjectModel.load(tmp_path / "p.sciproj")
+    im = pm.images[0]
+    assert im.axis_coords == {0: [10.0, 20.0], 1: [0.1, 0.2, 0.3]} and im.is_heatmap
+    ref = pm.sheets[0].subplots[0].image
+    assert (ref.aspect, ref.cmap, ref.cmap_reverse, ref.cmap_bins) == ("auto", "RdBu", True, 4)
+    assert (ref.iso_show, ref.iso_levels, ref.iso_above) == (True, "2, 5", 3.0)
+    assert (ref.x_tick_mode, ref.x_tick_every, ref.y_tick_mode, ref.y_tick_values) == \
+        ("data", 2, "custom", "10, 20")
+    assert pm.sheets[0].name == "T vs f" and pm.sheets[0].subplots[0].x_label == "f"
+    assert bool(suite.list_images().iloc[0]["heatmap"])
+
+    long = pd.DataFrame({"a": [1, 2, 1, 2], "b": [3, 3, 4, 4], "v": [1.0, 2.0, 3.0, 4.0]})
+    suite.push_heatmap_xyz(long, "a", "b", "v", name="pivot")
+    assert suite.get_image("pivot").tolist() == [[1.0, 2.0], [3.0, 4.0]]
+    cat = pd.DataFrame([[1.0, 0.5], [0.5, 1.0]], index=["u", "v"], columns=["u", "v"])
+    suite.push_heatmap(cat, name="corr")
+    assert ProjectModel.load(tmp_path / "p.sciproj").images[2].axis_coords[1] == ["u", "v"]
+    with pytest.raises(ValueError):
+        suite.push_heatmap(np.zeros((2, 2)), x=[1, 2, 3], name="bad")
+    with pytest.raises(ValueError):
+        suite.show_image("corr", style={"colour": "red"})

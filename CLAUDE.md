@@ -486,6 +486,27 @@ title/x_label/y_label + trace labels).
 - `model.copy_subplot_style` (style / +labels / +limits) backs the "all subplots" and "selected
   subplots" buttons; `model.duplicate_sheet_model` + `app._duplicate_tree_item` back tree Duplicate.
 
+## Heatmaps (image objects with coordinates)
+
+- A heatmap is **not a new object type**: it is an `ImageObject` with `axis_coords` (axis -> list of
+  floats, or of strings for a categorical axis; `axis_positions(axis)` -> `(float positions, labels|None)`;
+  serialized inline in `to_dict`, the array still goes to the sidecar `.npy`). `is_heatmap` = has any
+  coords. Axis 0 = rows = y, axis 1 = columns = x.
+- `ImageRef` gained heatmap fields (`use_coords`, `cmap_reverse`/`cmap_bins`/`cmap_boundaries`,
+  `iso_*`, `{x,y}_tick_mode/_values/_every`); `ImageRef.STYLE_FIELDS` = everything settable via an
+  `image_style` payload / `apply_style`. `model.make_image_ref(obj, axes, style)` builds a ref (heatmaps
+  default to `aspect="auto"`) -- used by both `app._add_image_to_subplot` and `OfflineBackend`.
+- Pure helpers in `model.py` (tested Qt-free): `heatmap_band_edges`, `heatmap_iso_levels` (explicit ->
+  band edges -> `nice_levels`, then `iso_above`/`iso_below`), `resolve_ticks`, `heatmap_from_xyz`,
+  `parse_float_list`.
+- `PlotSheet._draw_image`: no coords -> `imshow` as before (index extent); coords -> `pcolormesh`
+  (`shading="nearest"`, or `gouraud` for bilinear/bicubic interpolation) at the cell centres, `origin` is
+  ignored (flip via reversed axis limits). Discrete colours = `BoundaryNorm` + `cmap.resampled(n)`.
+  `_draw_isolines` contours at `heatmap_iso_levels`; `_apply_image_ticks` runs after the axis limits are
+  set (it needs the final axes) using `_image_geom` recorded by `_draw_image`.
+- API: `client.push_heatmap` / `push_heatmap_xyz` / `heatmap` (friendly args -> `_heatmap_style` -> the
+  `image_style` key of `add_image_to_sheet`, plus `organize`). GUI controls: `ImageStyleWidget`.
+
 ## Claude skill & offline insertion
 
 - `NoorSuite/skill/SKILL.md` is the skill (package data; `{{PYTHON}}` is substituted with

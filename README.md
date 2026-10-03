@@ -76,6 +76,23 @@ suite.show_image(nd_array, name="z_stack", axes=(1, 2), new_sheet=True)  # ND im
 
 See [`noorgraph.ipynb`](noorgraph.ipynb) for a full walk-through.
 
+## Heatmaps
+
+A heatmap is a 2-D grid whose cells sit at real x / y values (a pivot table, a parameter sweep, a
+correlation matrix). It lives in the data pool next to images and is placed on a sheet like one.
+
+```python
+suite.heatmap(df_grid, name="T vs f", new_sheet=True,        # index = y values, columns = x values
+              cmap="RdBu", reverse_cmap=True,
+              boundaries=[-10, 0, 10, 20, 30, 40],           # discrete colour bands (or bins=5)
+              isolines=True, iso_above=10, iso_labels=True,  # contour lines only at levels >= 10
+              xticks=2, yticks="data")                       # every 2nd x value / every y value
+suite.push_heatmap_xyz(long_df, "f", "T", "sigma", name="sigma map")   # long format -> grid
+```
+
+In the GUI the same settings are in the **Image** section of the Axes tab (colour bands and edges,
+reverse, *Isolines*, *Axis ticks*, "Use axis coordinates"). Categorical (string) axes work too.
+
 ## GUI shortcuts worth knowing
 
 - **Ctrl + mouse wheel** over a plot zooms the whole figure (text and lines scale with it);

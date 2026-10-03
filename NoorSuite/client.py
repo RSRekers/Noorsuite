@@ -19,7 +19,7 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 
-from .model import PLOT_TYPES
+from .model import PLOT_TYPES, ImageRef, heatmap_from_xyz
 from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
@@ -29,7 +29,8 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        DEFAULT_PORT, IPCClient)
 
 _DATA_COLUMNS = ["id", "name", "columns", "nrows", "tags", "source"]
-_IMAGE_COLUMNS = ["id", "name", "shape", "dtype", "axis_names", "tags", "source"]
+_IMAGE_COLUMNS = ["id", "name", "shape", "dtype", "axis_names", "tags", "source",
+                  "heatmap"]
 _TRACE_COLUMNS = ["data_id", "data_name", "y_col", "x_col", "sheet", "subplot",
                   "enabled", "plot_type", "color"]
 _SHEET_COLUMNS = ["id", "name", "rows", "cols", "subplots", "tags", "duplicate_name",
@@ -53,6 +54,37 @@ def _trace_style(plot_type, style, sort) -> dict:
     if sort:
         out["sort_x"] = True
     return out
+
+
+def _heatmap_style(cmap, reverse_cmap, vmin, vmax, bins, boundaries, colorbar, interpolation,
+                   isolines, iso_above, iso_below, iso_color, iso_width, iso_labels,
+                   iso_label_fmt, xticks, yticks) -> dict:
+    """Friendly ``heatmap()`` arguments -> ``ImageRef`` style fields (only what was given)."""
+    st = {"colorbar": bool(colorbar), "cmap": cmap, "cmap_reverse": reverse_cmap,
+          "vmin": vmin, "vmax": vmax, "interpolation": interpolation,
+          "iso_above": iso_above, "iso_below": iso_below, "iso_color": iso_color,
+          "iso_width": iso_width, "iso_labels": iso_labels, "iso_label_fmt": iso_label_fmt}
+    if bins is not None:
+        st["cmap_bins"] = int(bins)
+    if boundaries is not None:
+        st["cmap_boundaries"] = ", ".join(f"{float(b):g}" for b in boundaries)
+    if isolines is not None and isolines is not False:
+        st["iso_show"] = True
+        if isinstance(isolines, (int, float)) and not isinstance(isolines, bool):
+            st["iso_count"] = int(isolines)
+        elif not isinstance(isolines, bool):
+            st["iso_levels"] = ", ".join(f"{float(v):g}" for v in isolines)
+    for prefix, ticks in (("x", xticks), ("y", yticks)):
+        if ticks is None:
+            continue
+        if ticks == "data":
+            st[f"{prefix}_tick_mode"] = "data"
+        elif isinstance(ticks, (int, float)) and not isinstance(ticks, bool):
+            st[f"{prefix}_tick_mode"], st[f"{prefix}_tick_every"] = "data", max(1, int(ticks))
+        else:
+            st[f"{prefix}_tick_mode"] = "custom"
+            st[f"{prefix}_tick_values"] = ", ".join(f"{float(v):g}" for v in ticks)
+    return {k: v for k, v in st.items() if v is not None}
 
 
 def _organize_payload(title, tags, notes, folder, subplot, subplot_title, x_label,
@@ -151,8 +183,12 @@ class SciSuiteClient:
 
     # --------------------------------------------------------------------- images
     def push_image(self, arr, *, name, axis_names=None, axis_units=None, tags=None,
-                   mode="new"):
-        """Register an ND array as an image object in the pool (no display)."""
+                   mode="new", axis_coords=None):
+        """Register an ND array as an image object in the pool (no display).
+
+        ``axis_coords`` ({axis: values}) gives an axis real coordinates (numbers, or
+        strings for a categorical axis) instead of the pixel index -- that is what turns
+        an image into a heatmap; see :meth:`push_heatmap`."""
         arr = np.ascontiguousarray(arr)
         return self._ipc.send({
             "action": ACTION_APPEND_IMAGE,
@@ -162,16 +198,94 @@ class SciSuiteClient:
             "dtype": str(arr.dtype),
             "axis_names": list(axis_names) if axis_names else None,
             "axis_units": dict(axis_units or {}),
+            "axis_coords": {int(a): list(v) for a, v in (axis_coords or {}).items()},
             "tags": list(tags or []),
             "mode": mode,
         })
 
+    # ------------------------------------------------------------------- heatmaps
+    def push_heatmap(self, z, x=None, y=None, *, name, x_name=None, y_name=None,
+                     tags=None, mode="new"):
+        """Register a 2-D grid as a *heatmap*: an image whose cells sit at real
+        coordinates. ``z`` is a 2-D array (rows = y, columns = x) or a DataFrame (index =
+        y values, columns = x values, e.g. a ``pivot``); ``x`` / ``y`` give the coordinate
+        of every column / row (numbers, or strings for a categorical axis) and default to
+        the DataFrame's labels, else the pixel index."""
+        if isinstance(z, pd.DataFrame):
+            x = list(z.columns) if x is None else x
+            y = list(z.index) if y is None else y
+            x_name = x_name or (str(z.columns.name) if z.columns.name else None)
+            y_name = y_name or (str(z.index.name) if z.index.name else None)
+        arr = np.asarray(z, dtype=float)
+        if arr.ndim != 2:
+            raise ValueError(f"a heatmap needs a 2-D grid, got shape {arr.shape}")
+        coords = {}
+        for axis, vals in ((0, y), (1, x)):
+            if vals is not None:
+                vals = list(np.asarray(vals).tolist()) if not isinstance(vals, list) else vals
+                if len(vals) != arr.shape[axis]:
+                    raise ValueError(f"{'y' if axis == 0 else 'x'} has {len(vals)} values "
+                                     f"but the grid has {arr.shape[axis]} "
+                                     f"{'rows' if axis == 0 else 'columns'}")
+                coords[axis] = vals
+        return self.push_image(arr, name=name, axis_names=[y_name or "y", x_name or "x"],
+                               tags=tags, mode=mode, axis_coords=coords)
+
+    def push_heatmap_xyz(self, df, x, y, z, *, name, tags=None, mode="new"):
+        """Register long-format samples (one row per ``x, y, z`` triple) as a heatmap:
+        the grid of unique x / y values, mean ``z`` per cell, NaN where there is none."""
+        grid, xs, ys = heatmap_from_xyz(df[x], df[y], df[z])
+        return self.push_heatmap(grid, xs.tolist(), ys.tolist(), name=name, x_name=str(x),
+                                 y_name=str(y), tags=tags, mode=mode)
+
+    def heatmap(self, data, *, x=None, y=None, name=None, x_name=None, y_name=None,
+                cmap=None, reverse_cmap=None, vmin=None, vmax=None, bins=None,
+                boundaries=None, colorbar=True, interpolation=None,
+                isolines=None, iso_above=None, iso_below=None, iso_color=None,
+                iso_width=None, iso_labels=None, iso_label_fmt=None,
+                xticks=None, yticks=None, sheet=None, subplot=0, new_sheet=False,
+                title=None, tags=None, notes=None, folder=None, subplot_title=None,
+                x_label=None, y_label=None):
+        """Push (if given a grid) and show a heatmap on a sheet subplot.
+
+        ``data``: name of a pushed heatmap, or a 2-D array / DataFrame (see
+        :meth:`push_heatmap` for ``x``, ``y``, ``name``). Colours: ``cmap`` (matplotlib
+        name), ``reverse_cmap``, ``vmin`` / ``vmax``; **discrete colours** with ``bins=N``
+        equal bands or explicit ``boundaries=[0, 10, 50, 100]`` (one colour per band).
+        **Isolines**: ``isolines=True`` (automatic), an int (about that many) or a list of
+        levels; only levels ``>= iso_above`` / ``<= iso_below`` are drawn; with discrete
+        colours and no explicit levels, the lines follow the band edges. ``iso_color``,
+        ``iso_width``, ``iso_labels`` (value labels on the lines). **Ticks**: ``xticks`` /
+        ``yticks`` = ``"data"`` (one per coordinate), an int N (every Nth coordinate) or a
+        list of positions. Sheet organization args as in :meth:`plot`."""
+        if isinstance(data, str):
+            hm_name = data
+        else:
+            hm_name = name or "heatmap"
+            self.push_heatmap(data, x, y, name=hm_name, x_name=x_name, y_name=y_name)
+        style = _heatmap_style(cmap, reverse_cmap, vmin, vmax, bins, boundaries, colorbar,
+                               interpolation, isolines, iso_above, iso_below, iso_color,
+                               iso_width, iso_labels, iso_label_fmt, xticks, yticks)
+        return self.show_image(hm_name, sheet=sheet, subplot=subplot, new_sheet=new_sheet,
+                               axes=(0, 1), style=style, title=title, tags=tags, notes=notes,
+                               folder=folder, subplot_title=subplot_title, x_label=x_label,
+                               y_label=y_label)
+
     def show_image(self, data, *, name=None, axis_names=None, sheet=None, subplot=0,
-                   axes=(-2, -1), new_sheet=False):
+                   axes=(-2, -1), new_sheet=False, style=None, title=None, tags=None,
+                   notes=None, folder=None, subplot_title=None, x_label=None,
+                   y_label=None):
         """Register (if given an array) and place an image on a sheet subplot.
 
         ``axes`` are the two axes to display as (rows, cols); negatives allowed.
+        ``style`` is a dict of ``model.ImageRef.STYLE_FIELDS`` (colormap, vmin/vmax,
+        isolines, ticks, ...); the sheet-organizing args are as in :meth:`plot`.
         """
+        if style:
+            bad = [k for k in style if k not in ImageRef.STYLE_FIELDS]
+            if bad:
+                raise ValueError(f"unknown image style option(s) {bad}; "
+                                 f"use {list(ImageRef.STYLE_FIELDS)}")
         if isinstance(data, str):
             img_name = data
         else:
@@ -186,6 +300,9 @@ class SciSuiteClient:
             "sheet": target,
             "subplot_index": int(subplot),
             "display_axes": [int(axes[0]), int(axes[1])],
+            "image_style": dict(style or {}),
+            "organize": _organize_payload(title, tags, notes, folder, subplot,
+                                          subplot_title, x_label, y_label),
         })
 
     def list_images(self) -> pd.DataFrame:

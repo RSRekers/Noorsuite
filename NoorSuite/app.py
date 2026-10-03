@@ -44,7 +44,7 @@ from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
                     SPLIT_LAYOUTS, ColorMap, DataObject, ImageObject, ImageRef,
                     ProjectModel, SheetModel, SubplotModel, TraceRef, _new_id,
                     aggregate_series, append_notes, apply_sheet_annotations,
-                    common_label, copy_subplot_style, duplicate_sheet_model, merge_tags, resolve_sidecar_names,
+                    common_label, copy_subplot_style, duplicate_sheet_model, make_image_ref, merge_tags, resolve_sidecar_names,
                     split_folder_path, split_into_repeats)
 from .sheet import PlotSheet
 from .widgets import CollapsibleSection
@@ -1072,8 +1072,10 @@ class SciSuiteWindow(QMainWindow):
                 item.setToolTip(", ".join(obj.tags))
             self.data_list.addItem(item)
         for obj in self.images.values():
-            item = QListWidgetItem(self._image_icon,
-                                   f"{obj.name}  [{'x'.join(str(s) for s in obj.shape)}]")
+            item = QListWidgetItem(
+                self._image_icon,
+                f"{obj.name}  [{'x'.join(str(s) for s in obj.shape)}]"
+                + ("  heatmap" if obj.is_heatmap else ""))
             item.setData(Qt.ItemDataRole.UserRole, obj.id)
             item.setToolTip(obj.head_meta())
             self.data_list.addItem(item)
@@ -2471,7 +2473,7 @@ class SciSuiteWindow(QMainWindow):
         images = [{
             "id": im.id, "name": im.name, "shape": list(im.shape),
             "dtype": str(im.data.dtype), "axis_names": list(im.axis_names),
-            "tags": list(im.tags), "source": im.source,
+            "tags": list(im.tags), "source": im.source, "heatmap": im.is_heatmap,
         } for im in self.images.values()]
         traces = []
         for sm in self.sheets.values():
@@ -2636,15 +2638,17 @@ class SciSuiteWindow(QMainWindow):
         arr = np.frombuffer(payload["bytes"], dtype=payload["dtype"]).reshape(
             payload["shape"])
         axis_names = payload.get("axis_names")
+        coords = payload.get("axis_coords") or {}
         existing = None
         if payload.get("mode") == "update":
             existing = self._find_image(name)
         if existing is not None:
-            existing.update_from(arr, axis_names)
+            existing.update_from(arr, axis_names, coords)
             obj = existing
         else:
             obj = ImageObject(name, arr, axis_names, payload.get("axis_units"),
-                              payload.get("tags"), payload.get("source", "array"))
+                              payload.get("tags"), payload.get("source", "array"),
+                              axis_coords=coords)
             self.images[obj.id] = obj
         self._refresh_data_list()
         self._refresh_open_sheets()
@@ -2652,16 +2656,15 @@ class SciSuiteWindow(QMainWindow):
         self._refresh_ipc_snapshot()
         return obj
 
-    def _add_image_to_subplot(self, image_id, sheet_id, subplot_index, display_axes):
+    def _add_image_to_subplot(self, image_id, sheet_id, subplot_index, display_axes,
+                              style=None):
         obj = self.images.get(image_id)
         sm = self.sheets.get(sheet_id)
         if obj is None or sm is None:
             return
         si = min(int(subplot_index), len(sm.subplots) - 1)
         sub = sm.subplots[si]
-        r, c = int(display_axes[0]), int(display_axes[1])
-        index = {a: obj.shape[a] // 2 for a in range(obj.ndim) if a not in (r, c)}
-        sub.image = ImageRef(obj.id, [r, c], index)
+        sub.image = make_image_ref(obj, display_axes, style)
         sm.active_index = si
         self._render_sheet(sheet_id)
         self.sync_active_subplot_inspector()
@@ -2691,9 +2694,12 @@ class SciSuiteWindow(QMainWindow):
             if sm is None:
                 sm = self._create_sheet_model(target if isinstance(target, str) else None)
         self._open_sheet_tab(sm.sheet_id)
+        if payload.get("organize"):
+            self._apply_sheet_organize(sm, payload["organize"])
         sub_idx = min(int(payload.get("subplot_index", 0)), len(sm.subplots) - 1)
         axes = payload.get("display_axes") or [max(0, obj.ndim - 2), max(0, obj.ndim - 1)]
-        self._add_image_to_subplot(obj.id, sm.sheet_id, sub_idx, axes)
+        self._add_image_to_subplot(obj.id, sm.sheet_id, sub_idx, axes,
+                                   payload.get("image_style"))
 
     def _sync_image_sidecars(self):
         """Make the project's ``<stem>/`` folder hold exactly one ``.npy`` per current
