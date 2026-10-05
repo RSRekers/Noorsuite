@@ -507,6 +507,16 @@ title/x_label/y_label + trace labels).
 - API: `client.push_heatmap` / `push_heatmap_xyz` / `heatmap` (friendly args -> `_heatmap_style` -> the
   `image_style` key of `add_image_to_sheet`, plus `organize`). GUI controls: `ImageStyleWidget`.
 
+## Custom tick labels
+
+- `SubplotModel.x_tick_labels` / `y_tick_labels` hold a text mapping `"value=text; value=text"`
+  (`model.parse_tick_labels` / `format_tick_labels` / `apply_tick_labels`, Qt-free). They count as
+  *label* fields (`SUBPLOT_LABEL_FIELDS`: copied by "include labels", excluded from style broadcast,
+  settable through the `organize` payload's `subplots`). `PlotSheet._apply_axis_ticks` runs after the
+  limits are final: the heatmap tick mode first (categorical axes default to one tick per label),
+  then the mapping -- a key that is an existing category label renames it; otherwise numeric keys
+  define the ticks. Client args accept a dict, a list (positions 0..n-1) or the raw string.
+
 ## Claude skill & offline insertion
 
 - `NoorSuite/skill/SKILL.md` is the skill (package data; `{{PYTHON}}` is substituted with

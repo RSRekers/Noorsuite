@@ -101,3 +101,16 @@ def test_heatmap_offline_roundtrip_and_options(tmp_path):
         suite.push_heatmap(np.zeros((2, 2)), x=[1, 2, 3], name="bad")
     with pytest.raises(ValueError):
         suite.show_image("corr", style={"colour": "red"})
+
+
+def test_tick_label_options_reach_the_subplot(tmp_path):
+    suite = _suite(tmp_path)
+    suite.push_dataframe(pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]}), name="d")
+    suite.plot("d", "x", "y", new_sheet=True, x_tick_labels=["RT", "4 K", "1.5 K"],
+               y_tick_labels={1: "low", 3: "high"})
+    cat = pd.DataFrame([[1.0, 0.5], [0.5, 1.0]], index=["a", "b"], columns=["a", "b"])
+    suite.heatmap(cat, name="corr", new_sheet=True, x_tick_labels={"a": "Alpha"})
+    pm = ProjectModel.load(tmp_path / "p.sciproj")
+    sub = pm.sheets[0].subplots[0]
+    assert (sub.x_tick_labels, sub.y_tick_labels) == ("0=RT; 1=4 K; 2=1.5 K", "1=low; 3=high")
+    assert pm.sheets[1].subplots[0].x_tick_labels == "a=Alpha"

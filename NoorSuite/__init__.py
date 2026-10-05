@@ -13,7 +13,7 @@ from .client import OfflineClient, SciSuiteClient, connect, launch
 from .model import (ColorMap, DataObject, ImageObject, ImageRef, ProjectModel,
                     SheetModel, SubplotModel, TraceRef)
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "SciSuiteClient",

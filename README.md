@@ -93,6 +93,14 @@ suite.push_heatmap_xyz(long_df, "f", "T", "sigma", name="sigma map")   # long fo
 In the GUI the same settings are in the **Image** section of the Axes tab (colour bands and edges,
 reverse, *Isolines*, *Axis ticks*, "Use axis coordinates"). Categorical (string) axes work too.
 
+## Custom tick labels
+
+Any subplot (line plot or heatmap) can show its own tick text: `x_tick_labels={0: "RT", 1: "77 K",
+2: "4 K"}` (ticks at those values) or a plain list `["RT", "77 K", "4 K"]` (positions 0, 1, 2 ...)
+in `plot` / `heatmap` / `show_image` / `organize_sheet`. On a categorical heatmap axis a string key renames
+that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick labels*, written as
+`0=RT; 1=77 K; 2=4 K`.
+
 ## GUI shortcuts worth knowing
 
 - **Ctrl + mouse wheel** over a plot zooms the whole figure (text and lines scale with it);

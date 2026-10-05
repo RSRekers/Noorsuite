@@ -20,8 +20,8 @@ from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                              QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget)
 
-from .model import (INDEX_COL, ImageRef, SheetModel, heatmap_band_edges,
-                    heatmap_iso_levels, resolve_ticks)
+from .model import (INDEX_COL, ImageRef, SheetModel, apply_tick_labels,
+                    heatmap_band_edges, heatmap_iso_levels, resolve_ticks)
 from .widgets import CollapsibleSection
 
 _ACTIVE_ACCENT = "#ff7f0e"
@@ -522,8 +522,7 @@ class PlotSheet(QWidget):
                 ax.set_xlim(left=sub.x_min, right=sub.x_max)
             if sub.y_min is not None or sub.y_max is not None:
                 ax.set_ylim(bottom=sub.y_min, top=sub.y_max)
-            if sub.image is not None:
-                self._apply_image_ticks(ax, sub.image)
+            self._apply_axis_ticks(ax, sub)
 
             if n_drawn and sub.legend_visible:
                 legend = ax.legend(loc=sub.legend_loc, frameon=sub.legend_frame,
@@ -667,15 +666,23 @@ class PlotSheet(QWidget):
         except Exception:
             pass
 
-    def _apply_image_ticks(self, ax, ref, text_scale=1.0):
-        """Heatmap axis ticks: at the data coordinates (every Nth) or at custom values."""
-        geom = self._image_geom.get(ax)
-        if ref is None or geom is None:
-            return
-        for axis, (pos, labels), mode, values, every in (
-                ("x", geom[0], ref.x_tick_mode, ref.x_tick_values, ref.x_tick_every),
-                ("y", geom[1], ref.y_tick_mode, ref.y_tick_values, ref.y_tick_every)):
-            res = resolve_ticks(mode, values, every, pos, labels)
+    def _apply_axis_ticks(self, ax, sub):
+        """Tick positions / labels, after the axis limits are final: a heatmap's own tick mode
+        (every data coordinate, every Nth, custom values; categorical axes default to one tick
+        per label), then the subplot's custom value->text mapping on top (any subplot)."""
+        ref, geom = sub.image, self._image_geom.get(ax)
+        for axis, i in (("x", 0), ("y", 1)):
+            res = None
+            if ref is not None and geom is not None:
+                pos, labels = geom[i]
+                mode = getattr(ref, f"{axis}_tick_mode")
+                if mode == "auto" and labels:
+                    mode = "data"
+                res = resolve_ticks(mode, getattr(ref, f"{axis}_tick_values"),
+                                    getattr(ref, f"{axis}_tick_every"), pos, labels)
+            mapped = apply_tick_labels(getattr(sub, f"{axis}_tick_labels"),
+                                       res[0] if res else None, res[1] if res else None)
+            res = mapped or res
             if res is None:
                 continue
             ticks, names = res

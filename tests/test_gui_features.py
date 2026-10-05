@@ -182,3 +182,29 @@ def test_image_style_widget_roundtrips_heatmap_controls(win):
     assert (r.y_tick_mode, r.y_tick_values, r.x_tick_mode) == ("custom", "100, 500", "data")
     from NoorSuite.model import ImageRef
     assert ImageRef.from_dict(r.to_dict()).iso_above == 12.5
+
+
+def test_custom_tick_labels_on_plot_and_categorical_heatmap(win):
+    import numpy as np
+    sm = _plot(win, organize={"subplots": {0: {"x_tick_labels": "1=one; 3=three",
+                                                "y_tick_labels": "ignored-no-equals"}}})
+    ps = win._open_sheet_tab(sm.sheet_id)
+    win.show()
+    QApplication.processEvents()
+    ax = ps.fig.axes[0]
+    assert list(ax.get_xticks()) == [1.0, 3.0]
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["one", "three"]
+
+    z = np.eye(3)
+    win.handle_incoming_ipc({"action": "append_image", "name": "cat", "bytes": z.tobytes(),
+                             "shape": [3, 3], "dtype": "float64", "axis_names": ["r", "c"],
+                             "axis_coords": {0: ["u", "v", "w"], 1: ["u", "v", "w"]}})
+    win.handle_incoming_ipc({"action": "add_image_to_sheet", "name": "cat", "sheet": "__new__",
+                             "subplot_index": 0, "display_axes": [0, 1],
+                             "organize": {"subplots": {0: {"x_tick_labels": "v=Vee"}}}})
+    sm2 = next(reversed(win.sheets.values()))
+    ps2 = win._open_sheet_tab(sm2.sheet_id)
+    ps2.render(win.repository, win.images)
+    ax2 = ps2.fig.axes[0]
+    assert [t.get_text() for t in ax2.get_xticklabels()] == ["u", "Vee", "w"]   # renamed
+    assert [t.get_text() for t in ax2.get_yticklabels()] == ["u", "v", "w"]     # auto -> every label

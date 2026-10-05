@@ -19,7 +19,7 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 
-from .model import PLOT_TYPES, ImageRef, heatmap_from_xyz
+from .model import PLOT_TYPES, ImageRef, format_tick_labels, heatmap_from_xyz
 from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
@@ -88,9 +88,11 @@ def _heatmap_style(cmap, reverse_cmap, vmin, vmax, bins, boundaries, colorbar, i
 
 
 def _organize_payload(title, tags, notes, folder, subplot, subplot_title, x_label,
-                      y_label) -> dict:
+                      y_label, x_tick_labels=None, y_tick_labels=None) -> dict:
     sub = {k: v for k, v in (("title", subplot_title), ("x_label", x_label),
-                             ("y_label", y_label)) if v}
+                             ("y_label", y_label),
+                             ("x_tick_labels", format_tick_labels(x_tick_labels)),
+                             ("y_tick_labels", format_tick_labels(y_tick_labels))) if v}
     return {"name": title or "", "tags": list(tags or []), "notes": notes or "",
             "folder": folder or "", "subplots": {int(subplot): sub} if sub else {}}
 
@@ -245,7 +247,7 @@ class SciSuiteClient:
                 iso_width=None, iso_labels=None, iso_label_fmt=None,
                 xticks=None, yticks=None, sheet=None, subplot=0, new_sheet=False,
                 title=None, tags=None, notes=None, folder=None, subplot_title=None,
-                x_label=None, y_label=None):
+                x_label=None, y_label=None, x_tick_labels=None, y_tick_labels=None):
         """Push (if given a grid) and show a heatmap on a sheet subplot.
 
         ``data``: name of a pushed heatmap, or a 2-D array / DataFrame (see
@@ -257,7 +259,9 @@ class SciSuiteClient:
         colours and no explicit levels, the lines follow the band edges. ``iso_color``,
         ``iso_width``, ``iso_labels`` (value labels on the lines). **Ticks**: ``xticks`` /
         ``yticks`` = ``"data"`` (one per coordinate), an int N (every Nth coordinate) or a
-        list of positions. Sheet organization args as in :meth:`plot`."""
+        list of positions. **Tick text**: ``x_tick_labels`` / ``y_tick_labels`` = ``{value:
+        "text"}`` (ticks at those coordinates) or, on a categorical axis, ``{"category":
+        "display name"}`` to rename categories. Sheet organization args as in :meth:`plot`."""
         if isinstance(data, str):
             hm_name = data
         else:
@@ -269,12 +273,13 @@ class SciSuiteClient:
         return self.show_image(hm_name, sheet=sheet, subplot=subplot, new_sheet=new_sheet,
                                axes=(0, 1), style=style, title=title, tags=tags, notes=notes,
                                folder=folder, subplot_title=subplot_title, x_label=x_label,
-                               y_label=y_label)
+                               y_label=y_label, x_tick_labels=x_tick_labels,
+                               y_tick_labels=y_tick_labels)
 
     def show_image(self, data, *, name=None, axis_names=None, sheet=None, subplot=0,
                    axes=(-2, -1), new_sheet=False, style=None, title=None, tags=None,
                    notes=None, folder=None, subplot_title=None, x_label=None,
-                   y_label=None):
+                   y_label=None, x_tick_labels=None, y_tick_labels=None):
         """Register (if given an array) and place an image on a sheet subplot.
 
         ``axes`` are the two axes to display as (rows, cols); negatives allowed.
@@ -302,7 +307,8 @@ class SciSuiteClient:
             "display_axes": [int(axes[0]), int(axes[1])],
             "image_style": dict(style or {}),
             "organize": _organize_payload(title, tags, notes, folder, subplot,
-                                          subplot_title, x_label, y_label),
+                                          subplot_title, x_label, y_label,
+                                          x_tick_labels, y_tick_labels),
         })
 
     def list_images(self) -> pd.DataFrame:
@@ -362,7 +368,8 @@ class SciSuiteClient:
     # ---------------------------------------------------------------------- plot
     def plot(self, data, x, y, *, name=None, sheet=None, subplot=0, new_sheet=False,
              title=None, tags=None, notes=None, folder=None, subplot_title=None,
-             x_label=None, y_label=None, plot_type=None, style=None, sort=False):
+             x_label=None, y_label=None, plot_type=None, style=None, sort=False,
+             x_tick_labels=None, y_tick_labels=None):
         """Add columns of a data object as traces to a sheet.
 
         ``data`` is a data-object name (already pushed) or a DataFrame (pushed now
@@ -379,6 +386,10 @@ class SciSuiteClient:
         (dict of ``color``, ``line_style``, ``line_width``, ``marker``, ``marker_size``,
         ``alpha``, ``edge_color``), and ``sort=True`` to draw the points in ascending-x
         order (fixes a zig-zag when x is disordered; leave off for loops / hysteresis).
+
+        ``x_tick_labels`` / ``y_tick_labels``: custom tick text, as ``{value: "text"}`` (ticks
+        at those values) or a list of strings (placed at 0, 1, 2, ...), e.g.
+        ``x_tick_labels={0: "RT", 1: "4 K", 2: "1.5 K"}``.
         """
         if isinstance(data, str):
             data_name = data
@@ -395,18 +406,19 @@ class SciSuiteClient:
             "sheet": target,
             "subplot_index": int(subplot),
             "organize": _organize_payload(title, tags, notes, folder, subplot,
-                                          subplot_title, x_label, y_label),
+                                          subplot_title, x_label, y_label,
+                                          x_tick_labels, y_tick_labels),
             "trace_style": _trace_style(plot_type, style, sort),
         })
 
     def organize_sheet(self, sheet, *, title=None, tags=None, notes=None, folder=None,
                        subplot=0, subplot_title=None, x_label=None, y_label=None,
-                       replace_notes=False):
+                       replace_notes=False, x_tick_labels=None, y_tick_labels=None):
         """Name / tag / annotate / file an existing sheet (by id or name). Tags are merged
         in, notes appended (``replace_notes=True`` overwrites), ``folder`` moves it into
         that folder path, creating folders as needed."""
         org = _organize_payload(title, tags, notes, folder, subplot, subplot_title,
-                                x_label, y_label)
+                                x_label, y_label, x_tick_labels, y_tick_labels)
         org["replace_notes"] = replace_notes
         return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet",
                                "target": sheet, **org})

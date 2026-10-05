@@ -34,6 +34,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--sheet-notes", default="")
     ap.add_argument("--folder", help='folder path for the sheet, e.g. "Sample A3/Transport"')
     ap.add_argument("--subplot-title")
+    ap.add_argument("--x-tick-labels", help='custom tick text, e.g. "0=Low; 1=Mid; 2=High"')
+    ap.add_argument("--y-tick-labels")
     ap.add_argument("--x-label")
     ap.add_argument("--y-label")
     ap.add_argument("--plot-type", help="Line | Scatter | Line+Scatter | Step | Bar")
@@ -77,7 +79,8 @@ def main(argv: list[str]) -> int:
                               tags=[t for t in a.sheet_tags.split(",") if t],
                               notes=a.sheet_notes, folder=a.folder,
                               subplot_title=a.subplot_title, x_label=a.x_label,
-                              y_label=a.y_label, plot_type=a.plot_type, sort=a.sort)
+                              y_label=a.y_label, plot_type=a.plot_type, sort=a.sort,
+                              x_tick_labels=a.x_tick_labels, y_tick_labels=a.y_tick_labels)
             if resp and resp.get("status") == "error":
                 print("plot failed:", resp["message"])
                 return 1

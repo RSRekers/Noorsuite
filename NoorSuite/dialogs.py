@@ -324,6 +324,17 @@ class AxesStyleWidget(QWidget):
         form.addRow("X label:", self.xlabel_edit)
         self.ylabel_edit = QLineEdit(); self.ylabel_edit.textEdited.connect(self._push)
         form.addRow("Y label:", self.ylabel_edit)
+        _hint = "value=text; value=text   e.g.  0=Low; 1=Mid; 2=High"
+        self.xticklabels_edit = QLineEdit(); self.xticklabels_edit.setPlaceholderText(_hint)
+        self.xticklabels_edit.setToolTip(
+            "Custom tick labels: ticks at the given values with the given text. On a "
+            "categorical heatmap axis, use a category name as the key to rename it.")
+        self.xticklabels_edit.textEdited.connect(self._push)
+        form.addRow("X tick labels:", self.xticklabels_edit)
+        self.yticklabels_edit = QLineEdit(); self.yticklabels_edit.setPlaceholderText(_hint)
+        self.yticklabels_edit.setToolTip(self.xticklabels_edit.toolTip())
+        self.yticklabels_edit.textEdited.connect(self._push)
+        form.addRow("Y tick labels:", self.yticklabels_edit)
         self.xscale_combo = QComboBox(); self.xscale_combo.addItems(["linear", "log"])
         self.xscale_combo.currentTextChanged.connect(self._push)
         form.addRow("X scale:", self.xscale_combo)
@@ -460,6 +471,8 @@ class AxesStyleWidget(QWidget):
             self.setEnabled(True)
             self.title_edit.setText(sub.title)
             self.xlabel_edit.setText(sub.x_label)
+            self.xticklabels_edit.setText(sub.x_tick_labels)
+            self.yticklabels_edit.setText(sub.y_tick_labels)
             self.ylabel_edit.setText(sub.y_label)
             self.xscale_combo.setCurrentText(sub.x_scale)
             self.yscale_combo.setCurrentText(sub.y_scale)
@@ -521,6 +534,8 @@ class AxesStyleWidget(QWidget):
         s = self._sub
         s.title = self.title_edit.text()
         s.x_label = self.xlabel_edit.text()
+        s.x_tick_labels = self.xticklabels_edit.text()
+        s.y_tick_labels = self.yticklabels_edit.text()
         s.y_label = self.ylabel_edit.text()
         s.x_scale = self.xscale_combo.currentText()
         s.y_scale = self.yscale_combo.currentText()

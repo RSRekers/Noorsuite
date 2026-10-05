@@ -710,6 +710,7 @@ class SubplotModel:
                "grid_axis", "grid_ticks", "grid_style", "grid_width", "grid_color",
                "grid_alpha", "aspect", "aspect_ratio",
                "x_tick_format", "y_tick_format", "x_tick_digits", "y_tick_digits",
+               "x_tick_labels", "y_tick_labels",
                "x_min", "x_max", "y_min", "y_max",
                "tick_label_size", "face_color", "face_alpha",
                "spine_color", "spine_width", "spine_style",
@@ -732,6 +733,11 @@ class SubplotModel:
         self.y_tick_format = "auto"
         self.x_tick_digits = 2
         self.y_tick_digits = 2
+        # Custom tick labels as a value->text mapping: "0=Low; 1=Mid; 2=High" puts ticks at
+        # 0, 1, 2 labelled Low/Mid/High (see parse_tick_labels). On a categorical heatmap
+        # axis a non-numeric key renames that category instead ("ctrl=Control").
+        self.x_tick_labels = ""
+        self.y_tick_labels = ""
         # Data aspect: "auto" (default) | "equal" (1:1) | "custom" (aspect_ratio, y-per-x
         # data units). Ignored when the subplot has an image -- its own ImageRef.aspect
         # governs there instead.
@@ -1025,7 +1031,7 @@ def apply_sheet_annotations(sm, payload: dict) -> None:
     for idx, fields in (payload.get("subplots") or {}).items():
         i = int(idx)
         if 0 <= i < len(sm.subplots):
-            for f in ("title", "x_label", "y_label"):
+            for f in ("title", "x_label", "y_label", "x_tick_labels", "y_tick_labels"):
                 if fields.get(f):
                     setattr(sm.subplots[i], f, fields[f])
 
@@ -1059,7 +1065,7 @@ def tree_move_sheet(nodes: list, sheet_id: str, folder_path: list) -> list:
 # ---------------------------------------------------------------------------
 # Copying subplot style / duplicating sheets (shared by the GUI and tests)
 # ---------------------------------------------------------------------------
-SUBPLOT_LABEL_FIELDS = ("title", "x_label", "y_label")
+SUBPLOT_LABEL_FIELDS = ("title", "x_label", "y_label", "x_tick_labels", "y_tick_labels")
 SUBPLOT_LIMIT_FIELDS = ("x_min", "x_max", "y_min", "y_max")
 # Everything on a SubplotModel that is pure styling (cosmetics, grid, legend, number
 # format, aspect, scales) -- not content (title/labels) or data range (limits).
@@ -1195,3 +1201,58 @@ def make_image_ref(obj, display_axes, style=None) -> "ImageRef":
         ref.aspect = "auto"
     ref.apply_style(style or {})
     return ref
+
+
+# ---------------------------------------------------------------------------
+# Custom tick labels: a value -> string mapping per axis
+# ---------------------------------------------------------------------------
+def parse_tick_labels(text) -> list:
+    """``"0=Low; 1=Mid; 2=High"`` -> ``[("0", "Low"), ("1", "Mid"), ("2", "High")]``.
+    Entries are separated by ``;`` or newlines, key and label by the first ``=``; entries
+    without ``=`` are skipped. (Labels cannot contain ``;``.)"""
+    out = []
+    for item in str(text or "").replace("\n", ";").split(";"):
+        key, sep, label = item.partition("=")
+        if sep and key.strip():
+            out.append((key.strip(), label.strip()))
+    return out
+
+
+def format_tick_labels(spec) -> str:
+    """Normalize a user-facing spec to the stored text: a mapping ``{value: text}`` (keys
+    numbers, or category names to rename), or a sequence of strings placed at positions
+    ``0..n-1``; a string is passed through."""
+    if not spec:
+        return ""
+    if isinstance(spec, str):
+        return spec
+    items = spec.items() if isinstance(spec, dict) else enumerate(spec)
+    return "; ".join(f"{k:g}={v}" if isinstance(k, (int, float)) and not isinstance(k, bool)
+                     else f"{k}={v}" for k, v in items)
+
+
+def apply_tick_labels(text, base_ticks=None, base_names=None):
+    """Resolve an axis's tick-label mapping to ``(ticks, names)``, or ``None`` for no change.
+
+    * A key equal to one of ``base_names`` (a categorical axis' labels) **renames** that
+      tick; the other ticks keep their position and name.
+    * Otherwise numeric keys define the ticks themselves: one tick per key, at that data
+      coordinate, labelled with its text (replacing any base ticks).
+    """
+    pairs = parse_tick_labels(text)
+    if not pairs:
+        return None
+    names = list(base_names) if base_names is not None else []
+    renames = {k: v for k, v in pairs if k in names}
+    if renames and base_ticks is not None:
+        return list(base_ticks), [renames.get(n, n) for n in names]
+    numeric = []
+    for k, label in pairs:
+        try:
+            numeric.append((float(k), label))
+        except ValueError:
+            pass
+    if not numeric:
+        return None
+    numeric.sort(key=lambda p: p[0])
+    return [p[0] for p in numeric], [p[1] for p in numeric]

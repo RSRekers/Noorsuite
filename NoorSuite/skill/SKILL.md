@@ -123,6 +123,29 @@ suite.show_image("...", style={"cmap": "magma", "iso_show": True})   # restyle /
 - Always set `x_label`/`y_label` with units and name the heatmap by what it shows. y points up for
   numeric coordinates; set the y limits reversed in the GUI to flip.
 
+### Custom tick labels (any plot or heatmap)
+
+`x_tick_labels` / `y_tick_labels` replace the numeric tick text with your own strings - on
+`plot(...)`, `heatmap(...)`, `show_image(...)` and `organize_sheet(...)`:
+
+```python
+# value -> text: ticks appear at those x values
+suite.plot("runs", x="cond", y="R", new_sheet=True,
+           x_tick_labels={0: "RT", 1: "77 K", 2: "4 K", 3: "1.5 K"})
+suite.plot("runs", x="cond", y="R", x_tick_labels=["RT", "77 K", "4 K", "1.5 K"])  # list -> 0, 1, 2, 3
+# categorical heatmap axes (string labels): key = existing category -> display name
+suite.heatmap(corr_df, name="Correlation matrix", cmap="RdBu", vmin=-1, vmax=1,
+              x_tick_labels={"sig_S_cm": "sigma", "f_eff": "f_eff (Hz)"},
+              y_tick_labels={"sig_S_cm": "sigma", "f_eff": "f_eff (Hz)"})
+suite.organize_sheet("Correlation matrix", x_tick_labels={...})   # change them later
+```
+
+Use it when an axis is a *condition/category index* (0, 1, 2 meaning temperatures, samples,
+batches): encode the condition as a number column, plot against it, and map the numbers to readable
+text. Keys are data coordinates; the entries are stored as `"0=RT; 1=77 K"` (so labels can't contain
+`;`). A string-labelled heatmap axis shows one tick per label by itself; the mapping only renames.
+In the GUI: Axes tab -> "X / Y tick labels" (same `value=text; value=text` syntax).
+
 Rules that matter:
 - Only **numeric** columns are kept (non-numeric are dropped); a *named numeric index* becomes a column.
 - Data objects are matched by **name**; pushing an existing name with `mode="new"` makes a duplicate - use `mode="update"` to refresh.
@@ -142,7 +165,7 @@ Rules that matter:
 Reads `.csv/.tsv/.txt/.xlsx/.json/.parquet` (DataFrame) and `.npy` (image). `--plot x:y1,y2`
 (use `:y` or `index:y` for the row index), `--sheet NAME|ID`, `--new-sheet`, `--subplot N`,
 `--title/--sheet-tags/--sheet-notes/--folder/--subplot-title/--x-label/--y-label` (sheet
-organization), `--notes` (data), `--plot-type Scatter`, `--sort`, `--update`, `--project FILE`, `--port N`.
+organization), `--notes` (data), `--plot-type Scatter`, `--sort`, `--x-tick-labels "0=RT; 1=4 K"` / `--y-tick-labels`, `--update`, `--project FILE`, `--port N`.
 
 ## 4. After inserting
 

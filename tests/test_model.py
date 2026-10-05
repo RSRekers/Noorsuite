@@ -551,3 +551,23 @@ def test_image_object_coords_roundtrip_and_make_ref():
     assert make_image_ref(plain, (0, 1)).aspect == "equal"
     o.update_from(np.zeros((2, 4)))                                  # x length changed -> stale
     assert 1 not in o.axis_coords and 0 in o.axis_coords
+
+
+def test_tick_label_mapping():
+    from NoorSuite.model import apply_tick_labels, format_tick_labels, parse_tick_labels
+    assert parse_tick_labels("0=Low; 1 = Mid ;bad; 2=High=ish\n3=x") == \
+        [("0", "Low"), ("1", "Mid"), ("2", "High=ish"), ("3", "x")]
+    assert format_tick_labels({0: "a", 2.5: "b"}) == "0=a; 2.5=b"
+    assert format_tick_labels(["lo", "hi"]) == "0=lo; 1=hi"
+    assert format_tick_labels({"ctrl": "Control"}) == "ctrl=Control"
+    assert format_tick_labels(None) == "" and format_tick_labels("1=x") == "1=x"
+    assert apply_tick_labels("", None, None) is None
+    assert apply_tick_labels("2=b; 0=a", None, None) == ([0.0, 2.0], ["a", "b"])   # sorted by value
+    # categorical axis: keys naming a category rename it, positions untouched
+    assert apply_tick_labels("ctrl=Control", [0.0, 1.0, 2.0], ["ctrl", "t1", "t2"]) == \
+        ([0.0, 1.0, 2.0], ["Control", "t1", "t2"])
+    assert apply_tick_labels("nope=x", None, None) is None
+    from NoorSuite.model import SubplotModel
+    s = SubplotModel()
+    s.x_tick_labels = "0=a"
+    assert SubplotModel.from_dict(s.to_dict()).x_tick_labels == "0=a"
