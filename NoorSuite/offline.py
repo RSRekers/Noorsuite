@@ -21,12 +21,14 @@ import os
 import numpy as np
 
 from .model import (INDEX_COL, DataObject, ImageObject, ImageRef, ProjectModel,
-                    SheetModel, TraceRef, append_notes, apply_sheet_annotations, make_image_ref,
+                    SheetModel, TraceRef, DocumentModel, append_notes, apply_sheet_annotations,
+                    make_image_ref,
                     merge_tags, split_folder_path, tree_move_sheet)
 from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
+                       ACTION_DOCUMENT, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_PING,
                        ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE)
@@ -74,6 +76,8 @@ class OfflineBackend:
             ACTION_LIST_SHEETS: self._list_sheets,
             ACTION_GET_DATA: self._get_data,
             ACTION_GET_IMAGE: self._get_image,
+            ACTION_LIST_DOCUMENTS: self._list_documents,
+            ACTION_GET_DOCUMENT: self._get_document,
         }.get(action)
         if handler is not None:            # queries: re-read so we see other writers
             if action != ACTION_PING:
@@ -89,6 +93,7 @@ class OfflineBackend:
             ACTION_REMOVE_TRACE: self._remove,
             ACTION_CLEAR: self._clear,
             ACTION_ORGANIZE: self._organize,
+            ACTION_DOCUMENT: self._document,
         }.get(action)
         if mutate is None:
             return {"status": "error", "message": f"unknown action {action!r}"}
@@ -212,6 +217,36 @@ class OfflineBackend:
         sub = sm.subplots[min(int(p.get("subplot_index", 0)), len(sm.subplots) - 1)]
         axes = p.get("display_axes") or [max(0, obj.ndim - 2), max(0, obj.ndim - 1)]
         sub.image = make_image_ref(obj, axes, p.get("image_style"))
+
+    def _find_document(self, key):
+        return next((d for d in self.project.documents if key in (d.doc_id, d.name)), None)
+
+    def _document(self, p):
+        key = p.get("name") or p.get("id")
+        dm = self._find_document(key)
+        text, mode = p.get("source", ""), p.get("mode", "replace")
+        if dm is None:
+            dm = DocumentModel(key or "Document", text)
+            self.project.documents.append(dm)
+            self.project.tree.append({"type": "document", "doc_id": dm.doc_id})
+        elif mode == "append" and dm.source:
+            dm.source = dm.source.rstrip() + "\n\n" + text
+        else:
+            dm.source = text
+        if p.get("folder"):
+            self.project.tree = tree_move_sheet(self.project.tree, dm.doc_id,
+                                                split_folder_path(p["folder"]), "document")
+
+    def _list_documents(self, p):
+        return {"status": "success", "documents": [
+            {"id": d.doc_id, "name": d.name, "chars": len(d.source)}
+            for d in self.project.documents]}
+
+    def _get_document(self, p):
+        dm = self._find_document(p.get("key"))
+        if dm is None:
+            return {"status": "error", "message": f"no document matching {p.get('key')!r}"}
+        return {"status": "success", "id": dm.doc_id, "name": dm.name, "source": dm.source}
 
     def _apply_organize(self, sm: SheetModel, org: dict) -> None:
         apply_sheet_annotations(sm, org)

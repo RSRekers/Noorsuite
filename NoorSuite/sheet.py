@@ -898,3 +898,23 @@ def _contains(artist, event) -> bool:
         return bool(hit)
     except Exception:
         return False
+
+
+def export_sheet_pdf(sm, repository, images, path, default_cm=None):
+    """Render a sheet model as a vector PDF at its own figure size (``latex.DEFAULT_FIG_CM``
+    when it has none), on a throw-away copy -- open tabs / zoom are untouched. Needs a
+    ``QApplication``; works offscreen."""
+    import matplotlib
+    from .latex import DEFAULT_FIG_CM
+    from .model import duplicate_sheet_model
+    sm = duplicate_sheet_model(sm)
+    if not (sm.fig_width_cm and sm.fig_height_cm):
+        sm.fig_width_cm, sm.fig_height_cm = default_cm or DEFAULT_FIG_CM
+    ps = PlotSheet(sm)
+    try:
+        ps.render(repository, images)
+        with matplotlib.rc_context({"pdf.fonttype": 42}):          # real, embeddable text
+            ps.savefig_export(path, "pdf",
+                              size_in=(sm.fig_width_cm / 2.54, sm.fig_height_cm / 2.54))
+    finally:
+        ps.deleteLater()

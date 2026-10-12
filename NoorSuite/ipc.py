@@ -20,6 +20,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_PING,
+                       ACTION_DOCUMENT, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
                        ACTION_ORGANIZE, ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT,
                        MUTATION_ACTIONS, QUERY_ACTIONS, IPCClient, frame, read_frame)
 
@@ -28,7 +29,8 @@ __all__ = ["IPCBridge", "IPCClient", "frame", "read_frame", "DEFAULT_PORT",
            "ACTION_APPEND_IMAGE", "ACTION_ADD_TO_SHEET", "ACTION_ADD_IMAGE_TO_SHEET",
            "ACTION_LIST_DATA", "ACTION_LIST_IMAGES", "ACTION_LIST_TRACES",
            "ACTION_LIST_SHEETS", "ACTION_GET_DATA", "ACTION_GET_IMAGE",
-           "ACTION_REMOVE_DATA", "ACTION_REMOVE_TRACE", "ACTION_CLEAR", "ACTION_ORGANIZE",
+           "ACTION_REMOVE_DATA", "ACTION_REMOVE_TRACE", "ACTION_CLEAR", "ACTION_ORGANIZE", "ACTION_DOCUMENT", "ACTION_LIST_DOCUMENTS",
+           "ACTION_GET_DOCUMENT",
            "MUTATION_ACTIONS", "QUERY_ACTIONS"]
 
 
@@ -112,6 +114,14 @@ class IPCBridge(QObject):
                 if key in (entry.get("id"), entry.get("name")):
                     return {"status": "success", **entry}
             return {"status": "error", "message": f"no data object matching {key!r}"}
+        if action == ACTION_LIST_DOCUMENTS:
+            return {"status": "success", "documents": self.snapshot.get("documents", [])}
+        if action == ACTION_GET_DOCUMENT:
+            key = payload.get("key")
+            for entry in self.snapshot.get("document_full", {}).values():
+                if key in (entry.get("id"), entry.get("name")):
+                    return {"status": "success", **entry}
+            return {"status": "error", "message": f"no document matching {key!r}"}
         if action == ACTION_GET_IMAGE:
             key = payload.get("key")
             for entry in self.snapshot.get("image_full", {}).values():

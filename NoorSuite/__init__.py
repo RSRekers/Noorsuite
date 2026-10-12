@@ -10,10 +10,10 @@ Jupyter side (exploratory)::
 GUI side: ``python -m NoorSuite --gui 55555``.
 """
 from .client import OfflineClient, SciSuiteClient, connect, launch
-from .model import (ColorMap, DataObject, ImageObject, ImageRef, ProjectModel,
+from .model import (ColorMap, DataObject, DocumentModel, ImageObject, ImageRef, ProjectModel,
                     SheetModel, SubplotModel, TraceRef)
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 __all__ = [
     "SciSuiteClient",
@@ -27,6 +27,7 @@ __all__ = [
     "SubplotModel",
     "SheetModel",
     "ColorMap",
+    "DocumentModel",
     "ProjectModel",
     "__version__",
 ]

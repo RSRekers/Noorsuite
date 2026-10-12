@@ -93,6 +93,27 @@ suite.push_heatmap_xyz(long_df, "f", "T", "sigma", name="sigma map")   # long fo
 In the GUI the same settings are in the **Image** section of the Axes tab (colour bands and edges,
 reverse, *Isolines*, *Axis ticks*, "Use axis coordinates"). Categorical (string) axes work too.
 
+## LaTeX articles with live figures
+
+Write the article next to the plots. **Tree -> right-click -> New LaTeX Document** opens a Document tab:
+the `.tex` source on the left, the compiled PDF on the right. Figures are NoorSheets:
+
+```latex
+\usepackage{noorsuite}          % after hyperref
+...
+\noorsheet{a1b2c3d4}            % the sheet with that id, as a vector PDF at its own size
+```
+
+- **Insert figure...** writes a ready `figure` environment for any sheet.
+- **Double-click a figure** in the preview (or a `\noorsheet` line in the source) to jump to its sheet;
+  change the plot and the document recompiles by itself (Auto-compile).
+- The sheet's *Figure* tab size (cm) is the printed size, so figure text matches the article's text.
+- **Export PDF...** / **Export LaTeX folder...** (main.tex + noorsuite.sty + figure PDFs, ready for a journal,
+  arXiv or Overleaf). Headless: `python -m NoorSuite latex build --project p.sciproj --doc Name --out paper.pdf`.
+- From code / Claude: `suite.push_document(name, source, mode="append")`, `suite.figure_snippet(sheet)`.
+- Needs a LaTeX engine: [tectonic](https://tectonic-typesetting.github.io) (`conda install -c conda-forge
+  tectonic`), MiKTeX or TeX Live -- found automatically, or set `$NOORSUITE_LATEX`.
+
 ## Custom tick labels
 
 Any subplot (line plot or heatmap) can show its own tick text: `x_tick_labels={0: "RT", 1: "77 K",

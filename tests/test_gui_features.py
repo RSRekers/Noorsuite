@@ -1,5 +1,6 @@
 """Headless GUI checks (skipped without PyQt6): zoom, export, duplicate, plot options."""
 import os
+import time
 
 import pytest
 
@@ -208,3 +209,47 @@ def test_custom_tick_labels_on_plot_and_categorical_heatmap(win):
     ax2 = ps2.fig.axes[0]
     assert [t.get_text() for t in ax2.get_xticklabels()] == ["u", "Vee", "w"]   # renamed
     assert [t.get_text() for t in ax2.get_yticklabels()] == ["u", "v", "w"]     # auto -> every label
+
+
+def _wait(cond, timeout=240):
+    t0 = time.time()
+    while not cond() and time.time() - t0 < timeout:
+        QApplication.processEvents()
+        time.sleep(0.05)
+    return cond()
+
+
+def test_document_tab_builds_and_double_click_opens_sheet(win):
+    from NoorSuite import latex
+    if latex.find_engine() is None:
+        pytest.skip("no LaTeX engine installed")
+    from NoorSuite.model import DocumentModel
+    sm = _plot(win, organize={"name": "IV curve"})
+    win.sheets[sm.sheet_id].fig_width_cm, win.sheets[sm.sheet_id].fig_height_cm = 10.0, 7.0
+    win.show()
+    dm = win.create_new_document("Paper", latex.article_template("T").replace(
+        r"\noorsheet{sheet-id}", latex.figure_snippet(sm.sheet_id, "IV curve", "Cap.")), None)
+    tab = win._open_document_tab(dm.doc_id)
+    tab.auto_check.setChecked(False)
+    opened = []
+    tab.sheetRequested.connect(opened.append)
+    tab.compile(force=True)
+    assert _wait(lambda: not tab._building and tab._pdf), tab.log.toPlainText()[-800:]
+    assert tab.status_label.text().strip().startswith("built"), tab.status_label.text()
+    QApplication.processEvents()
+    links = tab.preview._links
+    assert links and links[0] and links[0][0][1] == sm.sheet_id
+    rect = links[0][0][0]
+    scale = tab.preview._px_per_pt()
+    from PyQt6.QtCore import QPointF
+    key = tab.preview.link_at(0, QPointF(rect.center().x() * scale, rect.center().y() * scale))
+    assert key == sm.sheet_id
+    tab.editor.sheetRequested.emit(sm.sheet_id)
+    assert opened == [sm.sheet_id]
+    # source editing reaches the model, the tree and the project file format
+    tab.editor.setPlainText(tab.editor.toPlainText() + "\n% edit")
+    assert win.documents[dm.doc_id].source.endswith("% edit")
+    pm = win._project_model()
+    assert [d.name for d in pm.documents] == ["Paper"]
+    assert {"type": "document", "doc_id": dm.doc_id} in pm.tree
+    tab._source_timer.stop()

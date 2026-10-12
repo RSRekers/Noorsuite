@@ -10,6 +10,7 @@ subplot's trace list (checkbox = temporarily shown/hidden).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -34,19 +35,21 @@ from .colormap import available_specs, load_file, resolve_spec, sample, save_fil
 from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
                       ColormapPanel, FigureDialog, FigureStyleWidget, ImageDialog,
                       LegendDialog, TextDialog, TraceStyleDialog, TraceStyleWidget)
+from . import latex
+from .docview import DocumentTab
 from .fuzzy import fuzzy_match
-from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
+from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_DOCUMENT,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
                   ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
 from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
                     REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
-                    SPLIT_LAYOUTS, ColorMap, DataObject, ImageObject, ImageRef,
+                    SPLIT_LAYOUTS, ColorMap, DataObject, DocumentModel, ImageObject, ImageRef,
                     ProjectModel, SheetModel, SubplotModel, TraceRef, _new_id,
                     aggregate_series, append_notes, apply_sheet_annotations,
                     common_label, copy_subplot_style, duplicate_sheet_model, make_image_ref, merge_tags, resolve_sidecar_names,
                     split_folder_path, split_into_repeats)
-from .sheet import PlotSheet
+from .sheet import PlotSheet, export_sheet_pdf
 from .widgets import CollapsibleSection
 
 APP_NAME = "NOORSUITE"
@@ -84,6 +87,7 @@ ITEM_TYPE_ROLE = Qt.ItemDataRole.UserRole + 1
 ITEM_ID_ROLE = Qt.ItemDataRole.UserRole + 2
 TYPE_FOLDER = "folder"
 TYPE_SHEET = "sheet"
+TYPE_DOC = "document"
 MIME_COLS = "application/x-scisuite-cols"
 
 
@@ -211,6 +215,7 @@ class ColumnTree(QTreeWidget):
 # =====================================================================
 class ProjectTree(QTreeWidget):
     sheetActivated = pyqtSignal(str)
+    documentActivated = pyqtSignal(str)
     columnsDropped = pyqtSignal(object, dict)   # (sheet_id | None, selection)
     deleteRequested = pyqtSignal()              # Delete/Backspace on the selection
 
@@ -231,6 +236,8 @@ class ProjectTree(QTreeWidget):
             return
         if item is not None and item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
             self.sheetActivated.emit(item.data(0, ITEM_ID_ROLE))
+        elif item is not None and item.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
+            self.documentActivated.emit(item.data(0, ITEM_ID_ROLE))
 
     def keyPressEvent(self, event):
         if (event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
@@ -753,11 +760,15 @@ class SciSuiteWindow(QMainWindow):
         self._sheet_icon = st.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         self._data_icon = st.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
         self._image_icon = st.standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
+        self._doc_icon = st.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
 
         self.repository: dict[str, DataObject] = {}
         self.images: dict[str, ImageObject] = {}
         self.sheets: dict[str, SheetModel] = {}
         self.open_tabs: dict[str, PlotSheet] = {}
+        self.documents: dict[str, DocumentModel] = {}   # LaTeX documents
+        self.doc_tabs: dict[str, DocumentTab] = {}
+        self._last_sheet_id = None               # last PlotSheet that was current
         self.colormaps: list[ColorMap] = []      # project-wide colormap library
         self._ipc_data_full: dict = {}           # full column data for client get_data()
         self._ipc_image_full: dict = {}          # full image arrays for client get_image()
@@ -871,6 +882,7 @@ class SciSuiteWindow(QMainWindow):
         tl.addWidget(self.tree_search)
         self.tree = ProjectTree()
         self.tree.sheetActivated.connect(self._open_sheet_tab)
+        self.tree.documentActivated.connect(self._open_document_tab)
         self.tree.columnsDropped.connect(self._on_columns_dropped)
         self.tree.deleteRequested.connect(self._delete_selected_tree_items)
         self.tree.itemChanged.connect(self._on_tree_item_changed)
@@ -1045,6 +1057,7 @@ class SciSuiteWindow(QMainWindow):
             (None, None),
             ("New Folder", lambda: self._add_folder_item("New Folder", self._selected_folder())),
             ("New Sheet", lambda: self.create_new_sheet()),
+            ("New Document", lambda: self.create_new_document()),
             (None, None),
             ("Copy Plot", self.copy_plot_to_clipboard),
             ("Export SVG", self.export_svg),
@@ -1549,17 +1562,28 @@ class SciSuiteWindow(QMainWindow):
 
     def close_tab(self, index):
         widget = self.tab_widget.widget(index)
-        sheet_id = getattr(widget, "sheet_id", None)
         self.tab_widget.removeTab(index)
+        if isinstance(widget, DocumentTab):
+            self.doc_tabs.pop(widget.doc_id, None)
+            widget.deleteLater()
+            return
+        sheet_id = getattr(widget, "sheet_id", None)
         self.open_tabs.pop(sheet_id, None)
 
     def current_sheet(self) -> PlotSheet | None:
-        return self.tab_widget.currentWidget()
+        """The plot sheet in the current tab, or ``None`` (e.g. a document tab is current)."""
+        w = self.tab_widget.currentWidget()
+        if isinstance(w, PlotSheet):
+            self._last_sheet_id = w.model.sheet_id
+            return w
+        return None
 
     def _active_sheet_model(self) -> SheetModel | None:
         cs = self.current_sheet()
         if cs is not None:
             return cs.model
+        if self._last_sheet_id in self.sheets:
+            return self.sheets[self._last_sheet_id]
         return next(iter(self.sheets.values()), None)
 
     def on_sheet_tab_changed(self, _index):
@@ -1602,6 +1626,15 @@ class SciSuiteWindow(QMainWindow):
             spin.blockSignals(False)
 
     def _on_tree_item_changed(self, item, _column):
+        if item.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
+            dm = self.documents.get(item.data(0, ITEM_ID_ROLE))
+            if dm and item.text(0) and item.text(0) != dm.name:
+                dm.name = item.text(0)
+                tab = self.doc_tabs.get(dm.doc_id)
+                if tab is not None:
+                    self.tab_widget.setTabText(self.tab_widget.indexOf(tab), dm.name)
+                self._refresh_ipc_snapshot()
+            return
         if item.data(0, ITEM_TYPE_ROLE) != TYPE_SHEET:
             return
         sm = self.sheets.get(item.data(0, ITEM_ID_ROLE))
@@ -1629,6 +1662,7 @@ class SciSuiteWindow(QMainWindow):
         menu = QMenu()
         new_folder_act = menu.addAction("New Folder")
         new_sheet_act = menu.addAction("New Sheet")
+        new_doc_act = menu.addAction("New LaTeX Document")
         tags_act = menu.addAction("Set tags...") if is_sheet else None
         rename_act = menu.addAction("Rename") if item is not None else None
         dup_act = menu.addAction("Duplicate") if item is not None else None
@@ -1644,6 +1678,8 @@ class SciSuiteWindow(QMainWindow):
             self.sheets[sm.sheet_id] = sm
             self._add_sheet_tree_item(sm, parent)
             self._open_sheet_tab(sm.sheet_id)
+        elif action == new_doc_act:
+            self.create_new_document()
         elif action == tags_act and is_sheet:
             self._set_sheet_tags(item)
         elif action == rename_act and item is not None:
@@ -1652,6 +1688,8 @@ class SciSuiteWindow(QMainWindow):
             new = self._duplicate_tree_item(item)
             if new.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
                 self._open_sheet_tab(new.data(0, ITEM_ID_ROLE))
+            elif new.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
+                self._open_document_tab(new.data(0, ITEM_ID_ROLE))
         elif action == del_act and item is not None:
             self._delete_tree_item(item)
 
@@ -1662,7 +1700,12 @@ class SciSuiteWindow(QMainWindow):
         children keep their names and are appended in order."""
         top = dest is None
         parent = item.parent() if top else dest
-        if item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
+        if item.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
+            dm = self.documents[item.data(0, ITEM_ID_ROLE)]
+            new_dm = DocumentModel(dm.name + (" (copy)" if top else ""), dm.source)
+            self.documents[new_dm.doc_id] = new_dm
+            new = self._add_doc_tree_item(new_dm, parent)
+        elif item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
             sm = self.sheets[item.data(0, ITEM_ID_ROLE)]
             new_sm = duplicate_sheet_model(sm, None if top else sm.name)
             self.sheets[new_sm.sheet_id] = new_sm
@@ -1710,6 +1753,13 @@ class SciSuiteWindow(QMainWindow):
     def _delete_tree_item(self, item):
         if item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
             self._forget_sheet(item.data(0, ITEM_ID_ROLE))
+        elif item.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
+            tab = self.doc_tabs.pop(item.data(0, ITEM_ID_ROLE), None)
+            if tab is not None:
+                self.tab_widget.removeTab(self.tab_widget.indexOf(tab))
+                tab.deleteLater()
+            self.documents.pop(item.data(0, ITEM_ID_ROLE), None)
+            self._refresh_ipc_snapshot()
         else:
             for i in reversed(range(item.childCount())):
                 self._delete_tree_item(item.child(i))
@@ -1717,7 +1767,7 @@ class SciSuiteWindow(QMainWindow):
 
     @staticmethod
     def _count_sheets_in(item) -> int:
-        if item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
+        if item.data(0, ITEM_TYPE_ROLE) in (TYPE_SHEET, TYPE_DOC):
             return 1
         return sum(SciSuiteWindow._count_sheets_in(item.child(i))
                    for i in range(item.childCount()))
@@ -2162,21 +2212,150 @@ class SciSuiteWindow(QMainWindow):
         cs = self.current_sheet()
         if cs:
             cs.render(self.repository, self.images)
+            self._notify_documents()
 
     def _render_sheet(self, sheet_id):
         ps = self.open_tabs.get(sheet_id)
         if ps is not None:
             ps.render(self.repository, self.images)
+        self._notify_documents()
 
     def _refresh_open_sheets(self):
         for ps in self.open_tabs.values():
             ps.render(self.repository, self.images)
+        self._notify_documents()
+
+    # ------------------------------------------------------------ LaTeX documents
+    def _notify_documents(self):
+        for tab in list(self.doc_tabs.values()):
+            tab.sheets_changed()
+
+    # host protocol used by DocumentTab
+    def document_sheets(self) -> list:
+        return list(self.sheets.values())
+
+    def sheet_fingerprint(self, sheet_id) -> str:
+        """Hash of everything that determines how a sheet looks: its model and the data it
+        plots -- so documents only recompile when a referenced figure really changed."""
+        sm = self.sheets.get(sheet_id)
+        if sm is None:
+            return ""
+        h = hashlib.md5(json.dumps(sm.to_dict(), sort_keys=True, default=str).encode())
+        ids = {t.data_id for sub in sm.subplots for t in sub.traces}
+        ids |= {sub.image.data_id for sub in sm.subplots if sub.image is not None}
+        for oid in sorted(ids):
+            obj = self.repository.get(oid)
+            if obj is not None:
+                for c in obj.column_order:
+                    h.update(obj.columns[c].tobytes())
+                continue
+            img = self.images.get(oid)
+            if img is not None:
+                h.update(np.ascontiguousarray(img.data).tobytes())
+                h.update(json.dumps(img.axis_coords, sort_keys=True, default=str).encode())
+        return h.hexdigest()
+
+    def export_sheet_pdf(self, sheet_id, path):
+        """Render a sheet as a vector PDF at its own figure size (``_DOC_FIG_CM`` when the
+        sheet has none), on a throw-away copy so open tabs / zoom are untouched."""
+        export_sheet_pdf(self.sheets[sheet_id], self.repository, self.images, path)
+
+    def create_new_document(self, name=None, source=None, folder=None) -> DocumentModel:
+        name = name or f"Document {len(self.documents) + 1}"
+        dm = DocumentModel(name, source if source is not None
+                           else latex.article_template(name))
+        self.documents[dm.doc_id] = dm
+        parent = self._folder_item(split_folder_path(folder)) if folder \
+            else self._selected_folder()
+        self._add_doc_tree_item(dm, parent)
+        if source is None:
+            self._open_document_tab(dm.doc_id)
+        self._refresh_ipc_snapshot()
+        return dm
+
+    def _add_doc_tree_item(self, dm: DocumentModel, parent=None) -> QTreeWidgetItem:
+        self.tree.blockSignals(True)
+        item = QTreeWidgetItem(parent or self.tree.invisibleRootItem())
+        item.setText(0, dm.name)
+        item.setIcon(0, self._doc_icon)
+        item.setData(0, ITEM_TYPE_ROLE, TYPE_DOC)
+        item.setData(0, ITEM_ID_ROLE, dm.doc_id)
+        item.setToolTip(0, "LaTeX document")
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable
+                      | Qt.ItemFlag.ItemIsDragEnabled)
+        self.tree.blockSignals(False)
+        if parent is not None:
+            parent.setExpanded(True)
+        return item
+
+    def _open_document_tab(self, doc_id) -> "DocumentTab | None":
+        if doc_id in self.doc_tabs:
+            self.tab_widget.setCurrentWidget(self.doc_tabs[doc_id])
+            return self.doc_tabs[doc_id]
+        dm = self.documents.get(doc_id)
+        if dm is None:
+            return None
+        tab = DocumentTab(dm, self)
+        tab.sheetRequested.connect(self._open_sheet_from_document)
+        tab.contentChanged.connect(self._refresh_ipc_snapshot)
+        self.doc_tabs[doc_id] = tab
+        idx = self.tab_widget.addTab(tab, self._doc_icon, dm.name)
+        self.tab_widget.setCurrentIndex(idx)
+        return tab
+
+    def _open_sheet_from_document(self, sheet_id):
+        self._open_sheet_tab(sheet_id)
+        self.statusBar().showMessage(
+            "Editing a figure from the document - switch back to the Document tab to see "
+            "the preview update", 6000)
+
+    def _handle_document(self, payload: dict):
+        """IPC: create / replace / append a LaTeX document's source."""
+        key = payload.get("name") or payload.get("id")
+        dm = self.documents.get(key) or next(
+            (d for d in self.documents.values() if d.name == key), None)
+        text = payload.get("source", "")
+        mode = payload.get("mode", "replace")
+        if dm is None:
+            self.create_new_document(key or "Document", text, payload.get("folder"))
+            return
+        dm.source = (dm.source.rstrip() + "\n\n" + text) if mode == "append" and dm.source \
+            else text
+        tab = self.doc_tabs.get(dm.doc_id)
+        if tab is not None:
+            tab.set_source(dm.source)
+        if payload.get("folder"):
+            self._move_tree_item(self._doc_tree_item(dm.doc_id), payload["folder"])
+        self._refresh_ipc_snapshot()
+
+    def _doc_tree_item(self, doc_id):
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            it = stack.pop()
+            if it.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
+                if it.data(0, ITEM_ID_ROLE) == doc_id:
+                    return it
+            elif it.data(0, ITEM_TYPE_ROLE) == TYPE_FOLDER:
+                stack.extend(it.child(i) for i in range(it.childCount()))
+        return None
+
+    def _move_tree_item(self, item, folder_path):
+        if item is None:
+            return
+        dest = self._folder_item(split_folder_path(folder_path)) or self.tree.invisibleRootItem()
+        old = item.parent() or self.tree.invisibleRootItem()
+        if old is not dest:
+            self.tree.blockSignals(True)
+            dest.addChild(old.takeChild(old.indexOfChild(item)))
+            self.tree.blockSignals(False)
 
     # ---------------------------------------------------------- save / load / io
     def _serialize_tree(self) -> list:
         def node(item):
             if item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
                 return {"type": "sheet", "sheet_id": item.data(0, ITEM_ID_ROLE)}
+            if item.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
+                return {"type": "document", "doc_id": item.data(0, ITEM_ID_ROLE)}
             return {"type": "folder",
                     "id": item.data(0, ITEM_ID_ROLE) or _new_id(),
                     "name": item.text(0),
@@ -2194,6 +2373,11 @@ class SciSuiteWindow(QMainWindow):
                     if sm is not None:
                         self._add_sheet_tree_item(sm, parent)
                         placed.add(sm.sheet_id)
+                elif n.get("type") == "document":
+                    dm = self.documents.get(n.get("doc_id"))
+                    if dm is not None:
+                        self._add_doc_tree_item(dm, parent)
+                        placed.add(dm.doc_id)
                 else:
                     folder = self._add_folder_item(n.get("name", "Folder"), parent)
                     folder.setData(0, ITEM_ID_ROLE, n.get("id") or _new_id())
@@ -2203,6 +2387,9 @@ class SciSuiteWindow(QMainWindow):
         for sheet_id, sm in self.sheets.items():
             if sheet_id not in placed:
                 self._add_sheet_tree_item(sm)
+        for doc_id, dm in self.documents.items():
+            if doc_id not in placed:
+                self._add_doc_tree_item(dm)
 
     def _project_model(self) -> ProjectModel:
         pm = ProjectModel()
@@ -2211,6 +2398,7 @@ class SciSuiteWindow(QMainWindow):
         pm.sheets = list(self.sheets.values())
         pm.tree = self._serialize_tree()
         pm.colormaps = list(self.colormaps)
+        pm.documents = list(self.documents.values())
         cs = self.current_sheet()
         pm.active_sheet_id = cs.sheet_id if cs else next(iter(self.sheets), "")
         return pm
@@ -2220,6 +2408,8 @@ class SciSuiteWindow(QMainWindow):
         self.images.clear()
         self.sheets.clear()
         self.open_tabs.clear()
+        self.documents.clear()
+        self.doc_tabs.clear()
         self.colormaps = list(pm.colormaps)
         while self.tab_widget.count():
             self.tab_widget.removeTab(0)
@@ -2233,6 +2423,8 @@ class SciSuiteWindow(QMainWindow):
             self.images[img.id] = img
         for sm in pm.sheets:
             self.sheets[sm.sheet_id] = sm
+        for dm in pm.documents:
+            self.documents[dm.doc_id] = dm
         self._build_tree_from_nodes(pm.tree)
         self._refresh_data_list()
 
@@ -2434,7 +2626,10 @@ class SciSuiteWindow(QMainWindow):
 
         def recurse(item):
             child_match = any(recurse(item.child(i)) for i in range(item.childCount()))
-            if item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
+            if item.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
+                dm = self.documents.get(item.data(0, ITEM_ID_ROLE))
+                hay = f"{item.text(0)} {dm.source[:4000]}" if dm else item.text(0)
+            elif item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
                 sm = self.sheets.get(item.data(0, ITEM_ID_ROLE))
                 hay = self._sheet_haystack(sm) if sm else item.text(0)
             else:
@@ -2505,7 +2700,13 @@ class SciSuiteWindow(QMainWindow):
             "duplicate_name": name_counts[sm.name] > 1,
             "folder": folders.get(sm.sheet_id, ""),
         } for sm in self.sheets.values()]
-        self.ipc.snapshot = {"data_objects": data_objects, "images": images,
+        self.ipc.snapshot = {"documents": [
+                                 {"id": d.doc_id, "name": d.name, "chars": len(d.source)}
+                                 for d in self.documents.values()],
+                             "document_full": {
+                                 d.doc_id: {"id": d.doc_id, "name": d.name, "source": d.source}
+                                 for d in self.documents.values()},
+                             "data_objects": data_objects, "images": images,
                              "traces": traces, "sheets": sheets,
                              "data_full": self._ipc_data_full,
                              "image_full": self._ipc_image_full}
@@ -2538,6 +2739,8 @@ class SciSuiteWindow(QMainWindow):
             self._clear_all()
         elif action == ACTION_ORGANIZE:
             self._handle_organize(payload)
+        elif action == ACTION_DOCUMENT:
+            self._handle_document(payload)
 
     # ---- organize: names / tags / notes / folders (IPC) ----------------------
     def _sheet_tree_item(self, sheet_id):

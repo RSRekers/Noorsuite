@@ -517,6 +517,27 @@ title/x_label/y_label + trace labels).
   then the mapping -- a key that is an existing category label renames it; otherwise numeric keys
   define the ticks. Client args accept a dict, a list (positions 0..n-1) or the raw string.
 
+## LaTeX documents (`latex.py`, `docview.py`, `latex_build.py`)
+
+- A document is a `DocumentModel(doc_id, name, source)` in `ProjectModel.documents` (optional key, no
+  version bump), a tree node `{"type": "document", "doc_id"}` (`TYPE_DOC`; `tree_move_sheet(..., kind=
+  "document")`) and, when open, a `DocumentTab` in the same tab widget as the `PlotSheet`s -- so
+  **`current_sheet()` returns `None` while a document tab is current**; `_active_sheet_model()` then falls
+  back to `_last_sheet_id`. Never assume `tab_widget.currentWidget()` is a `PlotSheet`.
+- Figures: `\noorsheet[opts]{key}` (from `noorsuite.sty`, written into the build dir) ->
+  `\href{noorsuite://sheet/key}{\includegraphics{noorsuite-figures/key.pdf}}`; `key` = sheet id, or name slug
+  (`latex.resolve_ref`). `sheet.export_sheet_pdf` renders a *copy* of the sheet at its cm size
+  (`DEFAULT_FIG_CM` when unset) with `pdf.fonttype 42`. The preview finds the click target from PDF link
+  annotations (`QPdfLinkModel`, rectangles in points, top-left origin) -- hyperref is therefore required.
+- Build: tectonic/latexmk/xelatex/pdflatex via `latex.find_engine()` ($NOORSUITE_LATEX, config.json,
+  PATH, a `noorlatex` conda env) in `~/.noorsuite/build/<doc_id>/`; figures are exported on the GUI thread,
+  the engine runs in a worker thread (`_built` signal). Auto-compile is debounced and keyed on
+  `sheet_fingerprint` (sheet model + referenced data hashes), so tab switches don't rebuild.
+- Headless: `python -m NoorSuite latex build|export|engine` (`latex_build.py`, offscreen Qt; keep the
+  `QApplication` referenced or the process dies silently). Client/IPC: `push_document`, `list_documents`,
+  `get_document`, `figure_snippet`; mirrored in `OfflineBackend`.
+- In test files write LaTeX with raw strings (`r"\noorsheet{..}"`): `"\n"`/`"\u"` silently corrupt it.
+
 ## Claude skill & offline insertion
 
 - `NoorSuite/skill/SKILL.md` is the skill (package data; `{{PYTHON}}` is substituted with

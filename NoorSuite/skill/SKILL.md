@@ -146,6 +146,35 @@ text. Keys are data coordinates; the entries are stored as `"0=RT; 1=77 K"` (so 
 `;`). A string-labelled heatmap axis shows one tick per label by itself; the mapping only renames.
 In the GUI: Axes tab -> "X / Y tick labels" (same `value=text; value=text` syntax).
 
+### LaTeX articles with live figures
+
+The project can hold LaTeX documents. Figures are *sheets*: `\noorsheet{<sheet id>}` includes a sheet
+as a vector PDF at the sheet's own size (set it in the GUI Figure tab, e.g. 8.5 x 6 cm for one journal
+column; default 12 x 8 cm), so figure text has its printed size. In the GUI a **Document tab** (tree ->
+"New LaTeX Document") shows source + live PDF: double-click a figure to jump to its sheet; edits to the
+sheet recompile the preview; "Export PDF" / "Export LaTeX folder" deliver the result.
+
+```python
+sheets = suite.list_sheets()                             # find the sheet ids / names
+suite.push_document("Transport paper", r"""\documentclass{article}
+\usepackage{hyperref}
+\usepackage{noorsuite}      % provides \noorsheet (load it after hyperref)
+\begin{document}
+\section{Results}
+""" + suite.figure_snippet("IV curve, sample A3 @ 4 K", caption="Current vs voltage at 4 K.")
+    + "\n\\end{document}\n", folder="Papers")
+suite.push_document("Transport paper", r"\section{Discussion} ...", mode="append")  # add text later
+suite.get_document("Transport paper")                    # read the source back
+```
+
+Build a PDF without the GUI: `{{PYTHON}} -m NoorSuite latex build --project study.sciproj --doc "Transport paper" --out paper.pdf`
+(`latex export --folder DIR` writes main.tex + noorsuite.sty + figure PDFs; `latex engine` shows which
+engine is used - tectonic / latexmk / xelatex / pdflatex). If no engine is installed, say so; the document
+is still saved and can be built later. Reference figures by sheet **id** (stable across renames), keep one
+`\begin{figure}` per sheet with a caption that says what is shown (with units), and remember that
+`mode="append"` goes *after* `\end{document}` if you already closed it - write the whole body in one call
+or use `replace`.
+
 Rules that matter:
 - Only **numeric** columns are kept (non-numeric are dropped); a *named numeric index* becomes a column.
 - Data objects are matched by **name**; pushing an existing name with `mode="new"` makes a duplicate - use `mode="update"` to refresh.

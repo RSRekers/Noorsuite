@@ -875,6 +875,23 @@ class SheetModel:
         return sh
 
 
+class DocumentModel:
+    """A LaTeX document stored in the project: ``source`` is the ``.tex`` text; figures are
+    sheets referenced with ``\noorsheet{<sheet id>}`` (see :mod:`NoorSuite.latex`)."""
+
+    def __init__(self, name="Document", source="", doc_id=None):
+        self.doc_id = doc_id or _new_id()
+        self.name = name
+        self.source = source
+
+    def to_dict(self) -> dict:
+        return {"doc_id": self.doc_id, "name": self.name, "source": self.source}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DocumentModel":
+        return cls(d.get("name", "Document"), d.get("source", ""), d.get("doc_id"))
+
+
 class ProjectModel:
     """Serialization root: everything needed to restore a session."""
 
@@ -885,6 +902,7 @@ class ProjectModel:
         self.sheets: list[SheetModel] = []
         self.tree: list[dict] = []          # folder/sheet organization (raw nodes)
         self.colormaps: list[ColorMap] = []  # project-wide colormap library
+        self.documents: list[DocumentModel] = []   # LaTeX documents (optional key)
         self.active_sheet_id = ""
 
     def to_dict(self) -> dict:
@@ -896,6 +914,7 @@ class ProjectModel:
             "sheets": [s.to_dict() for s in self.sheets],
             "tree": self.tree,
             "colormaps": [c.to_dict() for c in self.colormaps],
+            "documents": [dm.to_dict() for dm in self.documents],
         }
 
     @classmethod
@@ -913,6 +932,7 @@ class ProjectModel:
         p.sheets = [SheetModel.from_dict(x) for x in d.get("sheets", [])]
         p.tree = d.get("tree", [])
         p.colormaps = [ColorMap.from_dict(c) for c in d.get("colormaps", [])]
+        p.documents = [DocumentModel.from_dict(x) for x in d.get("documents", [])]
         return p
 
     def to_json(self, indent=2) -> str:
@@ -1036,29 +1056,35 @@ def apply_sheet_annotations(sm, payload: dict) -> None:
                     setattr(sm.subplots[i], f, fields[f])
 
 
-def tree_move_sheet(nodes: list, sheet_id: str, folder_path: list) -> list:
-    """Return ``nodes`` (raw project tree) with ``sheet_id`` moved into the folder chain
-    ``folder_path`` (created as needed; ``[]`` = top level)."""
+def tree_move_sheet(nodes: list, sheet_id: str, folder_path: list,
+                    kind: str = "sheet") -> list:
+    """Return ``nodes`` (raw project tree) with the sheet (or, ``kind="document"``, the
+    document) ``sheet_id`` moved into the folder chain ``folder_path`` (created as
+    needed; ``[]`` = top level)."""
+    key = "sheet_id" if kind == "sheet" else "doc_id"
+
     def strip(lst):
         out = []
         for n in lst:
-            if n.get("type") == "sheet":
-                if n.get("sheet_id") != sheet_id:
+            if n.get("type") in ("sheet", "document"):
+                if not (n.get("type") == kind and n.get(key) == sheet_id):
                     out.append(n)
-            else:
+            elif n.get("type") == "folder":
                 out.append({**n, "children": strip(n.get("children", []))})
+            else:
+                out.append(n)
         return out
 
     nodes = strip(nodes)
     level = nodes
     for part in folder_path:
-        folder = next((n for n in level if n.get("type") != "sheet"
+        folder = next((n for n in level if n.get("type") == "folder"
                        and n.get("name") == part), None)
         if folder is None:
             folder = {"type": "folder", "id": _new_id(), "name": part, "children": []}
             level.append(folder)
         level = folder["children"]
-    level.append({"type": "sheet", "sheet_id": sheet_id})
+    level.append({"type": kind, key: sheet_id})
     return nodes
 
 

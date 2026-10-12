@@ -22,7 +22,8 @@ import pandas as pd
 from .model import PLOT_TYPES, ImageRef, format_tick_labels, heatmap_from_xyz
 from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
-                       ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
+                       ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_DOCUMENT,
+                       ACTION_GET_DATA, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_REMOVE_DATA,
@@ -448,6 +449,38 @@ class SciSuiteClient:
         targeting a sheet by name if you're not sure it's unique."""
         resp = self._ipc.send({"action": ACTION_LIST_SHEETS}) or {}
         return pd.DataFrame(resp.get("sheets", []), columns=_SHEET_COLUMNS)
+
+    # ------------------------------------------------------------- LaTeX documents
+    def push_document(self, name, source, *, mode="replace", folder=None):
+        """Create or update a LaTeX document stored in the project (shown in the project
+        tree, opened with its live PDF preview in the GUI). ``mode="append"`` adds to the
+        end of an existing one. Figures are sheets: ``\\noorsheet{<sheet id>}`` --
+        :meth:`figure_snippet` returns a ready ``figure`` environment."""
+        return self._ipc.send({"action": ACTION_DOCUMENT, "name": name, "source": source,
+                               "mode": mode, "folder": folder or ""})
+
+    def list_documents(self) -> pd.DataFrame:
+        resp = self._ipc.send({"action": ACTION_LIST_DOCUMENTS}) or {}
+        return pd.DataFrame(resp.get("documents", []), columns=["id", "name", "chars"])
+
+    def get_document(self, key) -> str:
+        """The LaTeX source of a document (by id or name)."""
+        resp = self._ipc.send({"action": ACTION_GET_DOCUMENT, "key": key}) or {}
+        if resp.get("status") != "success":
+            raise KeyError(resp.get("message", f"no document matching {key!r}"))
+        return resp["source"]
+
+    def figure_snippet(self, sheet, caption="", label="", width="") -> str:
+        """A LaTeX ``figure`` environment that includes ``sheet`` (id or name) via
+        ``\\noorsheet`` -- paste it into a document, or pass it to
+        :meth:`push_document` with ``mode="append"``."""
+        from .latex import figure_snippet
+        sheets = self.list_sheets()
+        hit = sheets[(sheets["id"] == sheet) | (sheets["name"] == sheet)]
+        if hit.empty:
+            raise KeyError(f"no sheet matching {sheet!r}; see list_sheets()")
+        row = hit.iloc[0]
+        return figure_snippet(row["id"], row["name"], caption, label, width)
 
     def remove_data(self, key):
         """Remove a data object (and every trace referencing it) by id or name."""
