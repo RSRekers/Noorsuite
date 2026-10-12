@@ -115,10 +115,9 @@ the `.tex` source on the left, the compiled PDF on the right. Figures are NoorSh
   selected*, or **drag** a thumbnail -- or drag a sheet / a whole folder straight from the project tree --
   into the source to insert the figure environments.
 - **Zotero**: *Cite (Zotero)...* (Ctrl+Shift+Z) opens Zotero's picker, stores the chosen items in the project
-  and inserts `\cite{key}`. No Better BibTeX library export needed (only its picker, like the Obsidian
-  `Zoterolink` script). The *References* tab lists the project's references (cite / `\citep` / `\citet` /
+  and inserts `\cite{key}`. The *References* tab lists the project's references (cite / `\citep` / `\citet` /
   link back to Zotero) and inserts the reference list in the style you choose (plain, unsrt, ieeetr, alpha,
-  plainnat, apalike ...). `references.bib` is generated when building.
+  plainnat, apalike ...). `references.bib` is generated when building. Make sure to activate the local API of Zotero under Settings>Advanced>Miscellaneous>Allow other Applications on this computer to communicate with Zotero.
 - **Numbering**: citations are numbered in order of first appearance and the reference list is in that order.
   The default format is **ACS Guide** (the April 2025 revision of the *ACS Guide to Scholarly Communication*,
   chapter 4.3): superscript numbers in the text, `(1)` labels in the list, authors as `Family, A. B.`, bold
