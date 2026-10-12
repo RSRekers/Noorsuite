@@ -31,7 +31,7 @@ from PyQt6.QtGui import (QAction, QColor, QDrag, QFont, QFontDatabase, QIcon, QK
                          QPixmap, QSyntaxHighlighter, QTextCharFormat)
 from PyQt6.QtPdf import QPdfDocument, QPdfLinkModel
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
-                             QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+                             QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
                              QListView, QListWidget, QListWidgetItem, QMessageBox,
                              QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QTabWidget,
                              QToolBar, QVBoxLayout, QWidget)
@@ -406,25 +406,14 @@ class FigurePanel(QWidget):
         return "\n".join(out)
 
 
-_BIB_STYLES = [
-    ("plain  - numbered, sorted by author", "plain", False),
-    ("unsrt  - numbered, in order of citation", "unsrt", False),
-    ("ieeetr - IEEE-like numbered", "ieeetr", False),
-    ("abbrv  - numbered, abbreviated names", "abbrv", False),
-    ("alpha  - [Smi20] labels", "alpha", False),
-    ("plainnat - author-year (natbib)", "plainnat", True),
-    ("abbrvnat - author-year, abbreviated (natbib)", "abbrvnat", True),
-    ("unsrtnat - author-year, citation order (natbib)", "unsrtnat", True),
-    ("apalike - author-year (APA-like)", "apalike", False),
-]
-
-
 class ReferencePanel(QWidget):
     """The project's bibliography: add from Zotero, cite, link, insert the reference list."""
 
     insertRequested = pyqtSignal(str)
     pickRequested = pyqtSignal(bool)         # insert a \cite after picking?
-    ensurePackage = pyqtSignal(str)          # e.g. "natbib"
+    ensurePackage = pyqtSignal(str)          # a full \usepackage line to make sure is there
+    importFileRequested = pyqtSignal()
+    importLibraryRequested = pyqtSignal()
 
     def __init__(self, host, parent=None):
         super().__init__(parent)
@@ -443,15 +432,27 @@ class ReferencePanel(QWidget):
         lay.addWidget(self.list, 1)
 
         row = QHBoxLayout()
-        add = QPushButton("Add from Zotero...")
+        add = QPushButton("Pick in Zotero...")
         add.setToolTip("Open Zotero's picker (Zotero + Better BibTeX must be running); the "
-                       "items are stored in this project")
+                       "chosen items are stored in this project")
         add.clicked.connect(lambda: self.pickRequested.emit(False))
         row.addWidget(add)
         rm = QPushButton("Remove")
         rm.clicked.connect(self._remove)
         row.addWidget(rm)
         lay.addLayout(row)
+        row_i = QHBoxLayout()
+        imp_lib = QPushButton("Import library...")
+        imp_lib.setToolTip("Import the whole Zotero library or one collection (uses Zotero's "
+                           "local API, which has to be enabled in Zotero)")
+        imp_lib.clicked.connect(self.importLibraryRequested.emit)
+        row_i.addWidget(imp_lib)
+        imp_file = QPushButton("Import file...")
+        imp_file.setToolTip("Import a .bib (BibTeX) or .json (CSL-JSON) export, e.g. Zotero: "
+                            "File -> Export Library...")
+        imp_file.clicked.connect(self.importFileRequested.emit)
+        row_i.addWidget(imp_file)
+        lay.addLayout(row_i)
         row2 = QHBoxLayout()
         for text, mode, tip in (("\\cite", "cite", "\\cite{key,...} - numbered citations"),
                                 ("\\citep", "citep", "\\citep{key} - (Author, year), natbib"),
@@ -467,9 +468,13 @@ class ReferencePanel(QWidget):
         lay.addLayout(row2)
 
         self.style_combo = QComboBox()
-        for text, _name, _nat in _BIB_STYLES:
-            self.style_combo.addItem(text)
-        lay.addWidget(QLabel("Reference list format:"))
+        for st in latex.BIB_STYLES:
+            self.style_combo.addItem(st["label"], st["id"])
+        self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(latex.get_bib_style())))
+        self.style_combo.currentIndexChanged.connect(
+            lambda: latex.set_bib_style(self.style_combo.currentData()))
+        lay.addWidget(QLabel("Citation / reference list format (default for new "
+                             "documents and for builds):"))
         lay.addWidget(self.style_combo)
         ins = QPushButton("Insert reference list at cursor")
         ins.setToolTip("\\bibliographystyle{...}\\bibliography{references} -- references.bib is "
@@ -511,7 +516,7 @@ class ReferencePanel(QWidget):
         if not keys:
             return
         if cmd in ("citep", "citet"):
-            self.ensurePackage.emit("natbib")
+            self.ensurePackage.emit(r"\usepackage{natbib}")
         self.insertRequested.emit(f"\\{cmd}{{{','.join(keys)}}}")
 
     def _link(self):
@@ -534,11 +539,11 @@ class ReferencePanel(QWidget):
             self.host.remove_references(keys)
 
     def _insert_bibliography(self):
-        _text, name, nat = _BIB_STYLES[self.style_combo.currentIndex()]
-        if nat:
-            self.ensurePackage.emit("natbib")
+        st = latex.bib_style(self.style_combo.currentData())
+        for line in st["packages"]:
+            self.ensurePackage.emit(line)
         self.insertRequested.emit(
-            f"\\bibliographystyle{{{name}}}\n\\bibliography{{references}}")
+            f"\\bibliographystyle{{{st['bst']}}}\n\\bibliography{{references}}")
 
 
 # --------------------------------------------------------------------- document tab
@@ -629,7 +634,9 @@ class DocumentTab(QWidget):
         self.refs = ReferencePanel(host)
         self.refs.insertRequested.connect(self.insert_text)
         self.refs.pickRequested.connect(lambda ins: self.pick_from_zotero(insert=ins))
-        self.refs.ensurePackage.connect(self._ensure_package)
+        self.refs.ensurePackage.connect(self._ensure_package_line)
+        self.refs.importFileRequested.connect(self.import_reference_file)
+        self.refs.importLibraryRequested.connect(self.import_zotero_library)
         self.side = QTabWidget()
         self.side.addTab(self.figures, "Figures")
         self.side.addTab(self.refs, "References")
@@ -703,19 +710,23 @@ class DocumentTab(QWidget):
                                                 else text + "\n")
             self.editor.setFocus()
 
-    def _ensure_package(self, name: str):
-        """Add ``\\usepackage{name}`` before ``\\begin{document}`` if it is missing."""
+    def _ensure_package_line(self, line: str):
+        r"""Put a ``\usepackage...`` line before ``\begin{document}`` unless that package (or
+        achemso, which brings its own citations) is already loaded."""
+        m = re.search(r"\{([^}]*)\}\s*$", line)
         src = self.source()
-        if re.search(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*\b" + re.escape(name) + r"\b", src):
+        if m is None or latex.package_loaded(src, m.group(1)):
             return
-        m = re.search(r"\\begin\{document\}", src)
-        if m is None:
+        if "natbib" in m.group(1) and latex.package_loaded(src, "achemso"):
+            return
+        b = re.search(r"\\begin\{document\}", src)
+        if b is None:
             return
         cur = self.editor.textCursor()
-        pos = cur.position()
-        cur.setPosition(m.start())
-        cur.insertText(f"\\usepackage{{{name}}}\n")
-        cur.setPosition(pos + len(f"\\usepackage{{{name}}}\n") if pos >= m.start() else pos)
+        pos, ins = cur.position(), line + "\n"
+        cur.setPosition(b.start())
+        cur.insertText(ins)
+        cur.setPosition(pos + len(ins) if pos >= b.start() else pos)
         self.editor.setTextCursor(cur)
 
     # -- sheets / references -----------------------------------------------------------
@@ -785,6 +796,42 @@ class DocumentTab(QWidget):
             self.editor.textCursor().insertText("\\cite{" + ",".join(keys) + "}")
             self.editor.setFocus()
 
+    def import_reference_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import references", "", "References (*.bib *.json *.csljson);;All files (*)")
+        if not path:
+            return
+        try:
+            records = zotero.load_file(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import references", f"Could not read {path}:\n{exc}")
+            return
+        keys = self.host.add_references(records)
+        self.status_label.setText(f"  imported {len(keys)} reference(s) from {Path(path).name}")
+
+    def import_zotero_library(self):
+        """Whole library or one collection via Zotero's local API (off by default)."""
+        try:
+            cols = zotero.local_collections()
+        except zotero.ZoteroError as exc:
+            QMessageBox.information(self, "Import Zotero library", str(exc))
+            return
+        names = ["(whole library)"] + [n for _k, n in cols]
+        choice, ok = QInputDialog.getItem(self, "Import Zotero library", "Import:", names,
+                                          0, False)
+        if not ok:
+            return
+        coll = None if names.index(choice) == 0 else cols[names.index(choice) - 1][0]
+        self.status_label.setText("  importing from Zotero ...")
+        QApplication.processEvents()
+        try:
+            records = zotero.local_library(coll)
+        except zotero.ZoteroError as exc:
+            QMessageBox.warning(self, "Import Zotero library", str(exc))
+            return
+        keys = self.host.add_references(records)
+        self.status_label.setText(f"  imported {len(keys)} reference(s) from Zotero")
+
     # -- build ---------------------------------------------------------------------------
     def _load_cached_pdf(self):
         pdf = self.workdir / "out" / "main.pdf"
@@ -832,7 +879,8 @@ class DocumentTab(QWidget):
         self._building = True
         self.compile_act.setEnabled(False)
         t0 = time.time()
-        latex.prepare_workdir(self.workdir, self.source())
+        build_src, bib_notes = latex.ensure_bibliography(self.source())
+        latex.prepare_workdir(self.workdir, build_src)
         # references.bib from the stored Zotero items (only the ones the text cites)
         cited = zotero.cite_keys(self.source())
         recs = self.host.document_references()
@@ -849,6 +897,7 @@ class DocumentTab(QWidget):
             res = latex.build_pdf(self.workdir, engine)
             res.missing = missing
             res.undefined = undefined
+            res.notes = bib_notes
             res.fig_seconds, res.fig_exported, res.fig_cached = t_fig, exported, cached
             self._built.emit(res)
 
@@ -858,6 +907,8 @@ class DocumentTab(QWidget):
         self._building = False
         self.compile_act.setEnabled(True)
         log = res.log
+        for n in getattr(res, "notes", []):
+            log = f"[note] {n}\n\n" + log
         if getattr(res, "undefined", None):
             log = f"[warning] citation key(s) not in the project's references: " \
                   f"{', '.join(res.undefined)}\n\n" + log
@@ -868,6 +919,8 @@ class DocumentTab(QWidget):
             notes.append(f"{len(res.missing)} missing sheet(s): {', '.join(res.missing)}")
         if getattr(res, "undefined", None):
             notes.append(f"{len(res.undefined)} unknown citation(s)")
+        if getattr(res, "notes", None):
+            notes.append("reference list added to the build (see log)")
         note = (", " + "; ".join(notes)) if notes else ""
         if res.ok:
             self._pdf = res.pdf

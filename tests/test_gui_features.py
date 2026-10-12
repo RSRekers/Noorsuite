@@ -24,6 +24,10 @@ def win(app, monkeypatch):
     # never touch the real ~/.scisuite_session.json (the user's live session)
     monkeypatch.setattr(appmod.SciSuiteWindow, "load_session", lambda self: None)
     monkeypatch.setattr(appmod.SciSuiteWindow, "save_session", lambda self: None)
+    from NoorSuite import latex as _latex                      # never write the user's config
+    monkeypatch.setattr(_latex, "_config_path",
+                        lambda: __import__("pathlib").Path(os.environ.get("TMP", ".")) /
+                        "noorsuite_test_config.json")
     w = appmod.SciSuiteWindow(port=55590 + os.getpid() % 300)
     w._autosave_timer.stop()
     yield w
@@ -346,10 +350,15 @@ def test_zotero_pick_stores_references_and_inserts_cite(win, monkeypatch):
     tab.refs.insertRequested.connect(got.append)
     tab.refs._cite("citep")
     assert got == ["\\citep{doe2021test}"]
-    assert "\\usepackage{natbib}" in tab.source()                     # added automatically
-    tab.refs.style_combo.setCurrentIndex(5)                            # plainnat
+    from NoorSuite import latex as _l
+    assert _l.package_loaded(tab.source(), "natbib")                   # template has it (ACS)
+    assert tab.source().count("natbib") == 1                           # ... and not added twice
+    tab.refs.style_combo.setCurrentIndex(tab.refs.style_combo.findData("plainnat"))
     tab.refs._insert_bibliography()
     assert got[-1] == "\\bibliographystyle{plainnat}\n\\bibliography{references}"
+    tab.refs.style_combo.setCurrentIndex(0)                            # ACS is the default
+    tab.refs._insert_bibliography()
+    assert got[-1] == "\\bibliographystyle{achemso}\n\\bibliography{references}"
 
 
 def test_second_compile_reuses_unchanged_figures(win):

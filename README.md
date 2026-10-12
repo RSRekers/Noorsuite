@@ -119,6 +119,13 @@ the `.tex` source on the left, the compiled PDF on the right. Figures are NoorSh
   `Zoterolink` script). The *References* tab lists the project's references (cite / `\citep` / `\citet` /
   link back to Zotero) and inserts the reference list in the style you choose (plain, unsrt, ieeetr, alpha,
   plainnat, apalike ...). `references.bib` is generated when building.
+- **Numbering**: citations are numbered in order of first appearance and the reference list is in that order.
+  The default format is **ACS** (`achemso`: superscript numbers); pick another (unsrt, ieeetr, plain, plainnat,
+  apalike, ...) in the References tab -- it is remembered. If a text cites but has no reference list, the
+  build adds one (ACS) to its built copy, so you never get a bare `?`.
+- **Library**: *Pick in Zotero...* (individual items), *Import library...* (whole library or a collection;
+  needs Zotero's local API switched on), *Import file...* (a `.bib` or CSL-JSON export, e.g. Zotero's own
+  *File -> Export Library...*, which does not need Better BibTeX).
 - The editor is **black on white** by default (toggle *Dark editor* for light-on-dark); the data panel is
   collapsed and the inspector hidden while a document tab is current, to give it the width.
 - Builds only re-export the figures that changed; the status bar shows "figures N new / M cached".

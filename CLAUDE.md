@@ -554,6 +554,15 @@ title/x_label/y_label + trace labels).
   `*`), `to_bibtex()` writes entries, `cite_keys()` scans `\cite*`. Records persist in
   `ProjectModel.references` (optional key); `DocumentTab.compile` writes `references.bib` for the cited
   keys only; `latex_build` does the same headless. IPC: `references` / `list_references`.
+- **Bibliography format**: `latex.BIB_STYLES` (id, label, bst, preamble packages; default `acs` =
+  natbib `super,sort&compress` + `achemso.bst`, citations numbered by first occurrence), stored in
+  `~/.noorsuite/config.json` (`bib_style`, overridable by `$NOORSUITE_BIB_STYLE`). `latex.
+  ensure_bibliography(source)` returns a *build copy* with the reference list / natbib added when the text
+  cites but lacks them -- never edit the user's source for that (a bare `[?]` was the symptom). The tectonic
+  engine needs the real HOME (a fake one fails with "Unable to find standard directories").
+  Import: `zotero.parse_bibtex` / `load_file` (.bib, CSL-JSON) / `local_library` + `local_collections`
+  (Zotero local API, 403 unless enabled); `merge_record` keeps the already-cited key for the same
+  `zotero_key`.
 - **DocumentTab side panel**: `FigurePanel` (thumbnails via `host.sheet_thumbnail` -> `sheet.export_
   sheet_png`, cached in `~/.noorsuite/thumbs/<id>-<fingerprint>-<px>.png`; items need an explicit
   `setSizeHint`, uniform item sizes clip icons) and `ReferencePanel`. Drops: `LatexEditor.dropEvent`

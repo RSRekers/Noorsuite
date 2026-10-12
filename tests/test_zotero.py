@@ -107,3 +107,101 @@ As shown by Smith \cite{smith2020quantum}, noise matters.
         return
     text = fitz.open(str(out))[0].get_text()
     assert "Quantum transport" in text and "[1]" in text       # numbered entry + citation
+
+
+def test_default_style_is_acs_and_build_copy_gets_a_reference_list(tmp_path, monkeypatch):
+    monkeypatch.setattr(latex, "_config_path", lambda: tmp_path / "config.json")
+    assert latex.get_bib_style() == "acs" and latex.bib_style()["bst"] == "achemso"
+    src = "\\documentclass{article}\n\\begin{document}\nText \\cite{a} and \\citep{b}.\n" \
+          "\\end{document}\n"
+    out, notes = latex.ensure_bibliography(src)
+    assert "\\usepackage[super,sort&compress]{natbib}" in out          # ACS needs natbib super
+    assert out.index("\\bibliographystyle{achemso}") < out.index("\\end{document}")
+    assert "\\bibliography{references}" in out and notes
+    assert latex.package_loaded(out, "natbib") and not latex.package_loaded(src, "natbib")
+    # nothing cited -> untouched; reference list already present -> untouched
+    assert latex.ensure_bibliography("\\begin{document}x\\end{document}") == \
+        ("\\begin{document}x\\end{document}", [])
+    done = src.replace("\\end{document}", "\\bibliography{mine}\n\\end{document}")
+    assert "bibliographystyle" not in latex.ensure_bibliography(done)[0]
+    # \citep alone (own reference list, no natbib) gets natbib
+    out2, notes2 = latex.ensure_bibliography(
+        "\\documentclass{article}\n\\begin{document}\\citep{x}\n\\bibliography{mine}\n"
+        "\\end{document}")
+    assert "\\usepackage{natbib}" in out2 and notes2
+    # a chosen default is remembered
+    latex.set_bib_style("unsrt")
+    assert latex.get_bib_style() == "unsrt"
+    assert "\\bibliographystyle{unsrt}" in latex.ensure_bibliography(src)[0]
+    assert "natbib" in latex.article_template("T", "plainnat")
+    assert "natbib" not in latex.article_template("T", "plain")
+
+
+def test_import_bibtex_and_csl_files_and_dedupe(tmp_path):
+    bib = tmp_path / "lib.bib"
+    bib.write_text(
+        "@article{smith_2020,\n  author = {Smith, Jane A. and M{\\\"u}ller, Hans and "
+        "{World Health Organization}},\n  title = {{Quantum} transport \\& noise},\n"
+        "  journal = {J. Am. Chem. Soc.}, volume = 142, number = {4},\n"
+        "  pages = {1234--1240}, year = 2020, doi = \"10.1021/jacs.9b12345\"\n}\n"
+        "@book{landau, author={Landau, L.}, title={Statistical Physics},\n"
+        "  publisher={Pergamon}, address={Oxford}, year={2011}}\n", encoding="utf-8")
+    recs = zotero.load_file(bib)
+    assert [r["key"] for r in recs] == ["smith_2020", "landau"]
+    a = recs[0]
+    assert a["authors"] == [["Smith", "Jane A."], ["M\u00fcller", "Hans"],
+                            ["World Health Organization*", ""]]
+    assert a["title"] == "Quantum transport & noise" and a["pages"] == "1234-1240"
+    assert (a["year"], a["volume"], a["issue"], a["container"]) == \
+        ("2020", "142", "4", "J. Am. Chem. Soc.")
+    assert recs[1]["type"] == "book" and recs[1]["place"] == "Oxford"
+    # round trip: our own BibTeX output parses back to the same record
+    again = zotero.parse_bibtex(zotero.to_bibtex(a))[0]
+    assert again["title"] == a["title"] and again["authors"] == a["authors"]
+    js = tmp_path / "lib.json"
+    js.write_text('{"items": [' + __import__("json").dumps(CSL) + "]}", encoding="utf-8")
+    assert zotero.load_file(js)[0]["key"] == "smith2020quantum"
+
+    # the same Zotero item imported later under a generated key keeps the cited key
+    suite = OfflineClient(tmp_path / "p.sciproj")
+    suite.push_references([CSL])                                     # BBT key, item ABCD1234
+    other = {**CSL, "citationKey": "", "id": "http://zotero.org/users/1/items/ABCD1234"}
+    other.pop("citationKey")
+    suite.push_references([other])
+    pm = ProjectModel.load(tmp_path / "p.sciproj")
+    assert [r["key"] for r in pm.references] == ["smith2020quantum"]
+
+
+@needs_engine
+def test_citations_are_numbered_by_occurrence_with_acs_default(tmp_path):
+    pytest.importorskip("PyQt6")
+    fitz = pytest.importorskip("fitz")
+    import subprocess
+    import sys
+    suite = OfflineClient(tmp_path / "p.sciproj")
+    suite.push_references([CSL, ZOT])
+    # Landau is cited FIRST, Smith second; the document has no reference list at all
+    body = ("\\documentclass{article}\n\\usepackage{hyperref}\n\\usepackage{noorsuite}\n"
+            "\\begin{document}\nFirst \\cite{landau2011statistical}, then "
+            "\\cite{smith2020quantum}, and again \\cite{landau2011statistical}.\n"
+            "\\end{document}\n")
+    suite.push_document("Doc", body)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {**os.environ, "PYTHONPATH": root, "QT_QPA_PLATFORM": "offscreen",
+           "NOORSUITE_BIB_STYLE": "acs", "NOORSUITE_LATEX": latex.find_engine()}
+    out = tmp_path / "doc.pdf"
+    r = subprocess.run([sys.executable, "-m", "NoorSuite", "latex", "build", "--project",
+                        str(tmp_path / "p.sciproj"), "--doc", "Doc", "--out", str(out)],
+                       env=env, capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-2000:]
+    assert "no reference list" in r.stderr                               # told what was added
+    text = fitz.open(str(out))[0].get_text()
+    assert "?" not in text                                               # no unresolved [?]
+    # numbered by first occurrence: Landau is entry 1, Smith entry 2, whatever the author order
+    refs = text[text.index("References"):]
+    assert refs.index("Landau, L.") < refs.index("Smith, J. A.")
+    flat = " ".join(refs.split())                          # undo line wrapping
+    assert "Phys. Rev. B 2020, 101" in flat
+    # the in-text numbers: superscript 1 after "First", 2 after "then", 1 again at the end
+    assert "First1, then2, and again1" in text.replace("\n", " ").replace(" ,", ",") \
+        or "First1" in text.replace("\n", "")

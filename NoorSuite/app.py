@@ -2280,10 +2280,20 @@ class SciSuiteWindow(QMainWindow):
 
     def add_references(self, records) -> list:
         """Store bibliography records (already normalized); returns their keys."""
+        from .zotero import merge_record
         keys = []
+        by_zk = {r["zotero_key"]: k for k, r in self.references.items() if r.get("zotero_key")}
         for rec in records:
-            if rec.get("key"):
-                self.references[rec["key"]] = dict(rec)
+            if not rec.get("key"):
+                continue
+            old = by_zk.get(rec.get("zotero_key") or "")
+            if old is not None and old in self.references:     # same Zotero item, other key
+                merged = merge_record(self.references.pop(old), rec)
+                self.references[merged["key"]] = merged
+                keys.append(merged["key"])
+            else:
+                self.references[rec["key"]] = merge_record(self.references[rec["key"]], rec) \
+                    if rec["key"] in self.references else dict(rec)
                 keys.append(rec["key"])
         for tab in self.doc_tabs.values():
             tab.references_changed()

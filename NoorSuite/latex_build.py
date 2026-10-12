@@ -82,7 +82,10 @@ def main(argv) -> int:
     dm = _pick_document(pm, a.doc)
     workdir = Path(tempfile.mkdtemp(prefix="noorsuite_tex_"))
     try:
-        latex.prepare_workdir(workdir, dm.source)
+        source, notes = latex.ensure_bibliography(dm.source)
+        for n in notes:
+            print("note:", n, file=sys.stderr)
+        latex.prepare_workdir(workdir, source)
         from . import zotero
         (workdir / "references.bib").write_text(
             zotero.bibtex_file(pm.references, used=zotero.cite_keys(dm.source)),

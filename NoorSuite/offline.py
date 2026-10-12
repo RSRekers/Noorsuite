@@ -241,9 +241,19 @@ class OfflineBackend:
                                                 split_folder_path(p["folder"]), "document")
 
     def _references(self, p):
+        from .zotero import merge_record
         by_key = {r["key"]: r for r in self.project.references}
         for rec in p.get("items", []):
-            if rec.get("key"):
+            if not rec.get("key"):
+                continue
+            old = next((k for k, r in by_key.items() if rec.get("zotero_key")
+                        and r.get("zotero_key") == rec["zotero_key"]), None)
+            if old is not None:
+                merged = merge_record(by_key.pop(old), rec)
+                by_key[merged["key"]] = merged
+            elif rec["key"] in by_key:
+                by_key[rec["key"]] = merge_record(by_key[rec["key"]], rec)
+            else:
                 by_key[rec["key"]] = rec
         self.project.references = list(by_key.values())
 

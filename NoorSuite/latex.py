@@ -78,8 +78,114 @@ Write your text here. Insert a figure with \emph{Insert figure...} in the toolba
 \end{document}
 """
 
-def article_template(title: str = "Title") -> str:
-    return ARTICLE_TEMPLATE.replace("@TITLE@", title)
+# Reference-list formats. ``packages`` are the preamble lines the format needs (natbib for
+# author-year / superscript citations, achemso for the ACS journal look).
+BIB_STYLES = [
+    {"id": "acs", "label": "ACS - achemso.bst, superscript numbers (default)",
+     "bst": "achemso", "packages": [r"\usepackage[super,sort&compress]{natbib}"]},
+    {"id": "acs-notitle", "label": "ACS journal - achemso package, no article titles",
+     "bst": "achemso", "packages": [r"\usepackage{achemso}"]},
+    {"id": "plain", "label": "plain - numbered, sorted by author", "bst": "plain", "packages": []},
+    {"id": "unsrt", "label": "unsrt - numbered, in order of citation", "bst": "unsrt",
+     "packages": []},
+    {"id": "ieeetr", "label": "ieeetr - IEEE-like numbered", "bst": "ieeetr", "packages": []},
+    {"id": "abbrv", "label": "abbrv - numbered, abbreviated names", "bst": "abbrv",
+     "packages": []},
+    {"id": "alpha", "label": "alpha - [Smi20] labels", "bst": "alpha", "packages": []},
+    {"id": "plainnat", "label": "plainnat - author-year (natbib)", "bst": "plainnat",
+     "packages": [r"\usepackage{natbib}"]},
+    {"id": "abbrvnat", "label": "abbrvnat - author-year, abbreviated (natbib)",
+     "bst": "abbrvnat", "packages": [r"\usepackage{natbib}"]},
+    {"id": "unsrtnat", "label": "unsrtnat - author-year, citation order (natbib)",
+     "bst": "unsrtnat", "packages": [r"\usepackage{natbib}"]},
+    {"id": "apalike", "label": "apalike - author-year (APA-like)", "bst": "apalike",
+     "packages": []},
+]
+DEFAULT_BIB_STYLE = "acs"
+
+
+def bib_style(style_id: str | None = None) -> dict:
+    wanted = style_id or get_bib_style()
+    return next((s for s in BIB_STYLES if s["id"] == wanted), BIB_STYLES[0])
+
+
+def get_bib_style() -> str:
+    """The default reference-list format: ``$NOORSUITE_BIB_STYLE``, else the user's choice in
+    ``~/.noorsuite/config.json``, else ACS."""
+    if os.environ.get("NOORSUITE_BIB_STYLE"):
+        return os.environ["NOORSUITE_BIB_STYLE"]
+    try:
+        return json.loads(_config_path().read_text(encoding="utf-8")).get(
+            "bib_style", DEFAULT_BIB_STYLE)
+    except (OSError, ValueError):
+        return DEFAULT_BIB_STYLE
+
+
+def set_bib_style(style_id: str) -> None:
+    path = _config_path()
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    cfg["bib_style"] = style_id
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def package_loaded(source: str, name: str) -> bool:
+    r"""Is ``name`` loaded via ``\usepackage`` (or is it the document class)?"""
+    pat = r"\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{[^}]*\b" + re.escape(name) + r"\b"
+    cls = r"\\documentclass(?:\[[^\]]*\])?\{" + re.escape(name) + r"\}"
+    return bool(re.search(pat, source) or re.search(cls, source))
+
+
+def ensure_bibliography(source: str, style_id: str | None = None):
+    r"""Make citations resolvable in the *built* copy of a document: if it cites (``\cite*``) but
+    has no ``\bibliography{...}``, add the reference list in the default format before the final
+    ``\end{document}``; add natbib when ``\citep`` / ``\citet`` need it. Returns
+    ``(source, notes)`` -- the user's own text is never changed, ``notes`` say what was added."""
+    from . import zotero
+    code = "\n".join(_COMMENT_RE.sub("", ln) for ln in source.splitlines())
+    if not zotero.cite_keys(source):
+        return source, []
+    notes, preamble = [], []
+    style = bib_style(style_id)
+    has_list = re.search(r"\\bibliography\s*\{|\\begin\{thebibliography\}|\\printbibliography",
+                         code)
+    if not has_list:
+        for line in style["packages"]:
+            name = re.search(r"\{([^}]*)\}\s*$", line).group(1)
+            if not package_loaded(code, name) and not package_loaded(code, "achemso"):
+                preamble.append(line)
+        end = list(re.finditer(r"\\end\{document\}", source))
+        if end:
+            at = end[-1].start()
+            source = (source[:at] + f"\\bibliographystyle{{{style['bst']}}}\n"
+                      f"\\bibliography{{references}}\n" + source[at:])
+            notes.append(f"no reference list in the text: added \\bibliography with the "
+                         f"'{style['id']}' format ({style['bst']}.bst) to the built copy - "
+                         "use References -> Insert reference list to make it permanent")
+    if re.search(r"\\cite[pt]\*?\b|\\cite(?:author|year)\b", code) \
+            and not package_loaded(code, "natbib") and not package_loaded(code, "achemso") \
+            and not any("natbib" in p for p in preamble):
+        preamble.append(r"\usepackage{natbib}")
+        notes.append(r"\citep/\citet need natbib: added \usepackage{natbib} to the built copy")
+    if preamble:
+        m = re.search(r"\\begin\{document\}", source)
+        if m:
+            source = source[:m.start()] + "\n".join(preamble) + "\n" + source[m.start():]
+    return source, notes
+
+
+def article_template(title: str = "Title", style_id: str | None = None) -> str:
+    text = ARTICLE_TEMPLATE.replace("@TITLE@", title)
+    pk = "\n".join(bib_style(style_id)["packages"])
+    return text.replace(r"\usepackage{noorsuite}   % \noorsheet{...}: NoorSuite sheets as figures",
+                        r"\usepackage{noorsuite}   % \noorsheet{...}: NoorSuite sheets as figures"
+                        + ("\n" + pk if pk else ""))
 
 
 _REF_RE = re.compile(r"\\noorsheet\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
