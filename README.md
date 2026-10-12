@@ -122,8 +122,11 @@ the `.tex` source on the left, the compiled PDF on the right. Figures are NoorSh
 - **Numbering**: citations are numbered in order of first appearance and the reference list is in that order.
   The default format is **ACS Guide** (the April 2025 revision of the *ACS Guide to Scholarly Communication*,
   chapter 4.3): superscript numbers in the text, `(1)` labels in the list, authors as `Family, A. B.`, bold
-  year, italic volume, `DOI:` as a hyperlink; journal titles abbreviated only if all of them have an
-  abbreviation (the Guide wants one convention). NoorSuite writes the list itself (see `refstyle.py`; all
+  year, italic volume, the DOI as a hyperlinked `https://doi.org/...` URL; journal titles use Zotero's
+  abbreviation where there is one (`J. Electrochem. Soc.`). Example of an entry:
+  `Daubner, S.; Nestler, B. Microstructure Characterization ... Tortuosity. J. Electrochem. Soc. 2024, 171
+  (12), 120514. https://doi.org/10.1149/1945-7111/ad9a07.` Items picked in Zotero's picker sometimes arrive as
+  little more than a title; such records are completed from the library automatically (when Zotero runs). NoorSuite writes the list itself (see `refstyle.py`; all
   rules are in that one file). BibTeX formats (the older `achemso.bst`, unsrt, ieeetr, plain, plainnat,
   apalike, ...) stay available in the References tab. The format belongs to the *document*; the mouse wheel
   never changes it. Switching format is fully reversible: the document's own natbib / achemso / apalike /

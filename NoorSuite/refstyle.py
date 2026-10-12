@@ -35,7 +35,7 @@ _SPECIAL = {"&": r"\&", "%": r"\%", "#": r"\#", "_": r"\_"}
 def esc(text: str) -> str:
     """Escape LaTeX specials in bibliographic text (``$...$`` math is left alone)."""
     out, in_math = [], False
-    for ch in str(text):
+    for ch in str(text).replace("\u00a0", " "):
         if ch == "$":
             in_math = not in_math
             out.append(ch)
@@ -83,10 +83,18 @@ def _pages(p: str) -> str:
 
 
 def _doi(rec) -> str:
+    r"""The DOI as a hyperlink whose text is the full https://doi.org/... URL (ACS Guide 2025:
+    DOI hyperlinks are required), followed by the closing period."""
     doi = re.sub(r"^https?://(dx\.)?doi\.org/", "", rec.get("doi", "").strip(), flags=re.I)
     if not doi:
         return ""
-    return rf"\href{{https://doi.org/{esc(doi)}}}{{DOI: {esc(doi)}}}"
+    url = f"https://doi.org/{doi}"
+    return rf"\href{{{esc_url(url)}}}{{{esc(url)}}}."
+
+
+def esc_url(url: str) -> str:
+    """URL for the first argument of ``\\href`` (only ``%`` and ``#`` need a backslash)."""
+    return url.replace("%", r"\%").replace("#", r"\#")
 
 
 def _join(parts, sep=" "):
@@ -106,7 +114,7 @@ def format_reference(rec: dict, abbreviate: bool = False, max_authors=None) -> s
         rec.get("pages", ""))
     doi = _doi(rec)
     url = rec.get("url", "").strip()
-    link = doi or (rf"\url{{{url}}}" if url else "")
+    link = doi or (rf"\href{{{esc_url(url)}}}{{{esc(url)}}}." if url else "")
 
     def lead():
         if not who:
@@ -121,8 +129,10 @@ def format_reference(rec: dict, abbreviate: bool = False, max_authors=None) -> s
                      (rf"\textit{{{vol}}}" + (f" ({issue})" if issue else "")
                       + ("," if pages else "")) if vol else (f"({issue})," if issue else ""),
                      pages])
-        body = f"{lead()}{title}. {src.rstrip(',')}."
-        return _join([body, (link + "." if False else link)])
+        head = f"{lead()}{title}."
+        tail = src.rstrip(",").strip()
+        body = _join([head, tail + "." if tail else ""])
+        return _join([body, link])
     if typ in ("book", "edited-book"):
         pub = _join([esc(rec.get("publisher", "")) + (":" if rec.get("place") else ""),
                      esc(rec.get("place", ""))])
@@ -196,6 +206,10 @@ def number_citations(source: str, records, max_authors=None, abbreviate=None,
     ``\bibliography{...}`` marker (or the end of the document) becomes the formatted list.
     ``abbreviate=None`` abbreviates journal names only if *every* cited journal record has an
     abbreviation (the Guide wants one convention for the whole list)."""
+    ends = list(re.finditer(r"\\end\{document\}", source))
+    tail = ""
+    if ends:                      # anything after \end{document} is ignored by LaTeX
+        source, tail = source[:ends[-1].end()], source[ends[-1].end():]
     by_key = {r["key"]: r for r in records}
     order: list = []
     undefined: list = []
@@ -247,14 +261,17 @@ def number_citations(source: str, records, max_authors=None, abbreviate=None,
         journals = [r for r in cited if r.get("container")
                     and str(r.get("type", "")).lower() in
                     ("journalarticle", "article-journal", "article")]
-        abbreviate = bool(journals) and all(r.get("container_short") for r in journals)
+        abbreviate = True      # use each record's abbreviation where it has one
     entries = "\n".join(
         rf"\bibitem{{{r['key']}}} {format_reference(r, abbreviate, max_authors)}" for r in cited)
     block = (r"\makeatletter\renewcommand\@biblabel[1]{(#1)}\makeatother" "\n"
              rf"\begin{{thebibliography}}{{{max(9, len(cited))}}}" "\n" + entries +
              "\n" r"\end{thebibliography}" "\n")
+    if tail.strip() and (zotero.cite_keys(tail) or r"\noorsheet" in tail):
+        notes.append(r"text after \end{document} is ignored by LaTeX (it contains citations / "
+                     "figures) - move it above \\end{document}")
     if not order:
-        return source, [], undefined, notes
+        return source + tail, [], undefined, notes
     marker = re.compile(r"^[ \t]*\\bibliography\s*\{[^}]*\}[ \t]*\n?", re.M)
     style_line = re.compile(r"^[ \t]*\\bibliographystyle\s*\{[^}]*\}[ \t]*\n?", re.M)
     text = style_line.sub("", text)
@@ -269,4 +286,4 @@ def number_citations(source: str, records, max_authors=None, abbreviate=None,
             notes.append("no reference list in the text: the ACS list was added before "
                          r"\end{document} of the built copy - use References -> Insert "
                          "reference list to place it yourself")
-    return text, [r["key"] for r in cited], undefined, notes
+    return text + tail, [r["key"] for r in cited], undefined, notes

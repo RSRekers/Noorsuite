@@ -780,6 +780,7 @@ class DocumentTab(QWidget):
         if engine is None:
             self.log.setPlainText(latex.build_pdf(self.workdir, None).log)
         self._load_cached_pdf()
+        QTimer.singleShot(1500, lambda: self._complete_records(None))   # old, thin records
 
     # -- theme --------------------------------------------------------------------
     def _apply_theme(self):
@@ -852,10 +853,21 @@ class DocumentTab(QWidget):
         if self.auto_check.isChecked():
             self._source_timer.start(self.AUTO_DELAY_MS)
 
+    def _cursor_before_end_document(self):
+        """The editor cursor, moved in front of ``\\end{document}`` if it was behind it
+        (text there is ignored by LaTeX -- citations and figures would silently vanish)."""
+        cur = self.editor.textCursor()
+        ends = list(re.finditer(r"\\end\{document\}", self.source()))
+        if ends and cur.position() > ends[-1].start():
+            cur.setPosition(ends[-1].start())
+            self.editor.setTextCursor(cur)
+            self.status_label.setText("  inserted before \\end{document}")
+        return cur
+
     def insert_text(self, text: str):
         if text:
-            self.editor.textCursor().insertText(text if text.endswith("\n") or "\n" not in text
-                                                else text + "\n")
+            cur = self._cursor_before_end_document()
+            cur.insertText(text if text.endswith("\n") or "\n" not in text else text + "\n")
             self.editor.setFocus()
 
     def _ensure_package_line(self, line: str):
@@ -942,8 +954,9 @@ class DocumentTab(QWidget):
         keys = self.host.add_references(records)
         self.side.setCurrentWidget(self.refs)
         self.status_label.setText(f"  added {len(keys)} reference(s)")
+        self._complete_records(keys)
         if insert:
-            self.editor.textCursor().insertText("\\cite{" + ",".join(keys) + "}")
+            self._cursor_before_end_document().insertText("\\cite{" + ",".join(keys) + "}")
             self.editor.setFocus()
 
     def import_reference_file(self):
@@ -1007,8 +1020,16 @@ class DocumentTab(QWidget):
         self.side.setCurrentWidget(self.refs)
         self.status_label.setText(f"  added {len(keys)} reference(s)")
         if cite and keys:
-            self.editor.textCursor().insertText("\\cite{" + ",".join(keys) + "}")
+            self._cursor_before_end_document().insertText("\\cite{" + ",".join(keys) + "}")
             self.editor.setFocus()
+
+    def _complete_records(self, keys=None):
+        """Fetch the full data (authors, year, journal, pages, DOI ...) for records that
+        only have a title -- picker items often do. Runs in the background, merges in."""
+        recs = {r["key"]: r for r in self.host.document_references()}
+        todo = [k for k in (keys if keys is not None else recs)
+                if k in recs and not zotero.is_complete(recs[k])]
+        self._resolve_unknown_keys(todo)
 
     # -- unknown \cite keys: look them up in Zotero (typed by hand, copied from Obsidian) ---
     def _resolve_unknown_keys(self, undefined):
@@ -1087,8 +1108,10 @@ class DocumentTab(QWidget):
         (self.workdir / "references.bib").write_text(
             zotero.bibtex_file(recs, used=info["cited"]), encoding="utf-8")
         undefined = info["undefined"]
-        if undefined:
-            self._resolve_unknown_keys(undefined)
+        incomplete = [k for k in info["cited"] if k in {r["key"] for r in recs}
+                      and not zotero.is_complete(next(r for r in recs if r["key"] == k))]
+        if undefined or incomplete:
+            self._resolve_unknown_keys(undefined + incomplete)
         # figures on the GUI thread (they are Qt widgets), the engine off-thread
         missing, exported, cached = self._export_figures(self.workdir / latex.FIGURES_DIR)
         t_fig = time.time() - t0

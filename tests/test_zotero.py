@@ -203,11 +203,11 @@ def test_citations_are_numbered_by_occurrence_with_acs_default(tmp_path):
     assert "?" not in text                                               # no unresolved [?]
     # numbered by first occurrence: Landau is entry 1, Smith entry 2, whatever the author order
     refs = text[text.index("References"):]
-    assert refs.index("Landau, L.") < refs.index("Smith, J. A.")
     flat = " ".join(refs.split())                          # undo line wrapping
+    assert flat.index("Landau, L.") < flat.index("Smith, J.")
     assert "(1) Landau, L." in flat or "(1)" in flat       # ACS list labels
     assert "Phys. Rev. B 2020, 101 (4), 045101" in flat    # year bold, volume italic, issue, pages
-    assert "DOI: 10.1103/PhysRevB.101.045101" in flat
+    assert "https://doi.org/10.1103/PhysRevB.101.045101." in flat    # DOI as a link URL, then "."
     # the in-text numbers: superscript 1 after "First", 2 after "then", 1 again at the end
     body = " ".join(text.split())
     assert "First 1, then 2, and again 1." in body                       # superscripts extract spaced
@@ -273,7 +273,7 @@ def test_native_acs_numbering_and_entry_formatting():
         < out.index("\\bibitem{chap1}")
     assert "\\bibitem{smith2020} Smith, J. A.; Lee, J.-P. Quantum transport in M\\_x films. " \
            "\\textit{J. Am. Chem. Soc.} \\textbf{2020}, \\textit{142} (4), 1234--1240. " \
-           "\\href{https://doi.org/10.1021/jacs.9b12345}{DOI: 10.1021/jacs.9b12345}" in out
+           "\\href{https://doi.org/10.1021/jacs.9b12345}{https://doi.org/10.1021/jacs.9b12345}." in out
     assert "\\bibitem{landau2011} Landau, L. D. \\textit{Statistical Physics}; " \
            "Pergamon: Oxford, 2011." in out
     assert "In \\textit{Handbook}; Roe, R., Ed.; Wiley: New York, 2018; pp 10--20." in out
@@ -470,3 +470,51 @@ def test_every_format_builds_and_switching_back_and_forth_works(tmp_path):
                    "apalike", "acs", "acs-guide"):
         src = latex.apply_bib_style(src, target)
         build(src, latex.detect_bib_style(src) or target)
+
+
+def test_entry_matches_the_acs_reference_example_and_thin_records_are_detected():
+    from NoorSuite import refstyle
+    # the reference the user gave as the target format
+    rec = zotero.normalize({
+        "type": "article-journal", "citationKey": "daubner2024",
+        "title": "Microstructure Characterization of Battery Materials Based on Voxelated "
+                 "Image Data: Computation of Active Surface Area and Tortuosity",
+        "author": [{"family": "Daubner", "given": "S."}, {"family": "Nestler", "given": "B."}],
+        "container-title": "Journal of The Electrochemical Society",
+        "journalAbbreviation": "J. Electrochem. Soc.", "volume": "171", "issue": "12",
+        "page": "120514", "issued": {"date-parts": [["2024"]]}, "DOI": "10.1149/1945-7111/ad9a07"})
+    entry = refstyle.format_reference(rec, abbreviate=True)
+    assert entry == (
+        "Daubner, S.; Nestler, B. Microstructure Characterization of Battery Materials Based on "
+        "Voxelated Image Data: Computation of Active Surface Area and Tortuosity. "
+        "\\textit{J. Electrochem. Soc.} \\textbf{2024}, \\textit{171} (12), 120514. "
+        "\\href{https://doi.org/10.1149/1945-7111/ad9a07}{https://doi.org/10.1149/1945-7111/ad9a07}.")
+    # placeholders from publisher metadata are not values: no "n/a (n/a)" / "0 (0)"
+    junk = zotero.normalize({"type": "article-journal", "citationKey": "k", "title": "T",
+                             "author": [{"family": "A", "given": "B"}], "volume": "n/a",
+                             "issue": "0", "page": "N/A", "container-title": "J",
+                             "issued": {"date-parts": [[2024]]}})
+    assert (junk["volume"], junk["issue"], junk["pages"]) == ("", "", "")
+    assert "n/a" not in refstyle.format_reference(junk)
+    # a record that is only a title (what the picker used to leave behind) is "incomplete" ...
+    thin = {"key": "x", "type": "article-journal", "title": "Only a title",
+            "zotero_key": "ABCD1234"}
+    assert not zotero.is_complete(thin) and zotero.is_complete(rec)
+    # ... and prints without dangling ". ." when it has nothing else
+    assert ". ." not in refstyle.format_reference(thin)
+    # the merge keeps the cite key the text already uses and fills in the data
+    merged = zotero.merge_record(thin, {**rec, "key": "someOtherKey"})
+    assert merged["key"] == "x" and merged["authors"] and merged["year"] == "2024"
+
+
+def test_text_after_end_document_is_not_numbered_and_is_reported():
+    from NoorSuite import refstyle
+    recs = [{"key": "a", "type": "book", "title": "A", "authors": [["Doe", "J."]], "year": "2020",
+             "publisher": "P", "place": "X", "editors": [], "container": "",
+             "container_short": "", "volume": "", "issue": "", "pages": "", "doi": "",
+             "url": "", "isbn": "", "month": "", "zotero_key": ""}]
+    src = ("\\begin{document}\nIn text \\cite{a}.\n\\bibliography{references}\n\\end{document}\n"
+           "\\cite{a} \\noorsheet{x}\n")
+    out, cited, undefined, notes = refstyle.number_citations(src, recs)
+    assert cited == ["a"] and any("after \\end{document}" in n for n in notes)
+    assert out.endswith("\\cite{a} \\noorsheet{x}\n")              # tail left exactly as is

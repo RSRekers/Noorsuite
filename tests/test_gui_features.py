@@ -466,3 +466,34 @@ def test_zotero_library_search_add_cite_and_unknown_keys_are_resolved(win, monke
     assert info["undefined"] == [] and "\\textsuperscript{1,2}" not in out
     assert "\\textsuperscript{2}" in out                               # numbered by occurrence
     assert out.index("Huang, C.") < out.index("Typed by hand")
+
+
+def test_thin_picker_records_are_completed_from_zotero_and_cites_stay_before_end(win, monkeypatch):
+    from NoorSuite import zotero
+    full = {"key": "naik2023", "type": "article-journal", "title": "Heterogeneities affect",
+            "authors": [["Naik", "Kaustubh G."]], "editors": [], "year": "2023", "month": "",
+            "container": "Energy Storage Materials", "container_short": "Energy Storage Materials",
+            "volume": "55", "issue": "", "pages": "312-321", "doi": "10.1016/j.ensm.2022.11.055",
+            "url": "", "publisher": "", "place": "", "isbn": "", "zotero_key": "376IJDEL"}
+    thin = {"key": "naik2023", "type": "article-journal", "title": "Heterogeneities affect",
+            "authors": [], "editors": [], "year": "", "zotero_key": "376IJDEL"}
+    calls = []
+    monkeypatch.setattr(zotero, "rpc_find_keys",
+                        lambda keys: (calls.append(list(keys)) or [full], []))
+    ids, dm, tab = _doc_win(win, 1)
+    win.add_references([thin])
+    assert not zotero.is_complete(win.references["naik2023"])
+    tab.editor.setPlainText(tab.source().replace(
+        "\\end{document}", "Cited \\cite{naik2023}.\n\\end{document}"))
+    tab._complete_records(None)                                       # what the tab does on open
+    assert _wait(lambda: zotero.is_complete(win.references.get("naik2023", {})), 10)
+    assert win.references["naik2023"]["authors"] == [["Naik", "Kaustubh G."]]
+    assert win.references["naik2023"]["key"] == "naik2023"            # the cited key is kept
+    assert calls and calls[0] == ["naik2023"]
+
+    # a citation inserted with the cursor behind \end{document} lands in front of it
+    tab.editor.moveCursor(tab.editor.textCursor().MoveOperation.End)
+    tab.insert_text("\\cite{naik2023}")
+    src = tab.source()
+    assert src.index("\\cite{naik2023}", src.index("Cited")) < src.rindex("\\end{document}")
+    assert src.rstrip().endswith("\\end{document}")

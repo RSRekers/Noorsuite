@@ -561,6 +561,14 @@ title/x_label/y_label + trace labels).
   `*`), `to_bibtex()` writes entries, `cite_keys()` scans `\cite*`. Records persist in
   `ProjectModel.references` (optional key); `DocumentTab.compile` writes `references.bib` for the cited
   keys only; `latex_build` does the same headless. IPC: `references` / `list_references`.
+- **Thin records**: items from the CAYW picker arrived with only `key/type/title/zotero_key` (all of a
+  user's 7 references; entries printed as a bare title and natbib failed with "Bibliography not compatible
+  with author-year citations" on APA). `zotero.is_complete` (authors/editors AND year) decides;
+  `DocumentTab._complete_records` re-fetches by exact citation key through the JSON-RPC and
+  `merge_record` fills the gaps while keeping the cited key. Runs on tab open, after a pick and at every
+  build. Publisher placeholders (`n/a`, `0`, `-`) are not values (`zotero.normalize`'s `val`). The ACS entry
+  layout is pinned by `test_entry_matches_the_acs_reference_example...` -- the user's own example string.
+  Insertions are redirected in front of `\end{document}`; `number_citations` leaves text behind it alone.
 - **Switching formats must be reversible** (regression: apalike.sty + natbib = "\bibhang already
   defined", every later format failed). `latex.MANAGED_PACKAGES` is the set of citation packages
   (`natbib, achemso, apalike, apacite`); `apply_bib_style` (explicit switch) replaces them with the preset's,

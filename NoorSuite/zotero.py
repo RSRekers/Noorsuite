@@ -134,6 +134,11 @@ def normalize(raw: dict) -> dict | None:
             and "/" not in raw["id"] and len(raw["id"]) != 8:
         key = raw["id"]
     year, month = _year_month(raw)
+
+    def val(*names):
+        v = str(_first(raw, *names, default="")).replace("\u00a0", " ").strip()
+        return "" if v.lower() in ("n/a", "na", "none", "null", "-", "0") else v
+
     rec = {
         "key": str(key),
         "type": str(_first(raw, "type", "itemType", default="misc")),
@@ -146,9 +151,9 @@ def normalize(raw: dict) -> dict | None:
                                 "proceedingsTitle", "websiteTitle", default="")),
         "container_short": str(_first(raw, "container-title-short", "journalAbbreviation",
                                       "journal-abbreviation", default="")),
-        "volume": str(_first(raw, "volume", default="")),
-        "issue": str(_first(raw, "issue", "number", default="")),
-        "pages": str(_first(raw, "page", "pages", default="")),
+        "volume": val("volume"),
+        "issue": val("issue", "number"),
+        "pages": val("page", "pages"),
         "doi": str(_first(raw, "DOI", "doi", default="")),
         "url": str(_first(raw, "URL", "url", default="")),
         "publisher": str(_first(raw, "publisher", "institution", "university", default="")),
@@ -558,3 +563,9 @@ def rpc_find_keys(keys) -> tuple:
                 break
         (found if rec else missing).append(rec or key)
     return found, missing
+
+
+def is_complete(rec: dict) -> bool:
+    """A record with something to cite by: authors (or editors) *and* a year. Picker items
+    sometimes arrive as little more than a title -- those get completed from the library."""
+    return bool(rec.get("authors") or rec.get("editors")) and bool(rec.get("year"))
