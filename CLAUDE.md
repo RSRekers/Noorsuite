@@ -546,6 +546,13 @@ title/x_label/y_label + trace labels).
   token length >= 3 -- never over the content blob. `-x` excludes (no subsequence), `#t`/`tag:`/`name:`/
   `note:` scope, `"phrase"`. `SciSuiteWindow._sheet_fields` builds the sheet fields; old `fuzzy_match` is
   kept for non-search uses. Don't go back to one concatenated haystack + subsequence.
+- **Zotero library access = Better BibTeX JSON-RPC** (`POST /better-bibtex/json-rpc`, verified live
+  against Zotero 10.0.6 + BBT 9.0.71): `item.search("")` returns the *whole library* as CSL-JSON with
+  `citation-key` (5000 items ~5 s), `item.search(term)` filters; `user.groups` lists collections (no
+  per-collection item method exists). Wrappers: `zotero.rpc`, `rpc_search`, `rpc_find_keys` (exact citation-key
+  match). The UI searches live (thread + `_zgen` generation counter so the newest search wins) and
+  `DocumentTab` resolves unknown `\cite` keys through it (`_lookup_tried` stops retry loops). The local
+  Zotero `/api` is off by default (403) -- do not depend on it. Never write a UI that needs the BBT *export*.
 - **Zotero** (`zotero.py`, stdlib): `cayw_pick()` = GET `http://127.0.0.1:23119/better-bibtex/cayw?
   format=json` (blocks until the user confirms in Zotero's popup -> call it off the GUI thread; Zotero
   core has no `/cayw` and the local `/api` answers 403 unless enabled -- `local_search` documents that).

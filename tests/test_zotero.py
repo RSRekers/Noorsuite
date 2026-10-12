@@ -284,3 +284,82 @@ def test_native_acs_numbering_and_entry_formatting():
     # the default build path goes through the native formatter
     built, bnotes, info = latex.prepare_build_source(src, recs, "acs-guide")
     assert "\\begin{thebibliography}" in built and info["cited"][0] == "landau2011"
+
+
+# --- Better BibTeX JSON-RPC (the way the whole library is reached) ----------------------------
+BBT_ITEM = {   # the shape a real Zotero 10 / Better BibTeX 9 answer has (observed live)
+    "id": "http://zotero.org/users/local/IKH8whoc/items/7LJNWAYI", "type": "article-journal",
+    "citation-key": "huangSolidStateBatteryCathode2021", "citekey": "huangSolidStateBatteryCathode2021",
+    "title": "A Solid-State Battery Cathode with a Polymer Composite Electrolyte",
+    "container-title": "Advanced Energy Materials", "journalAbbreviation": "Adv. Energy Mater.",
+    "volume": "11", "issue": "1", "page": "2002387",
+    "DOI": "https://doi.org/10.1002/aenm.202002387",
+    "issued": {"date-parts": [["2021"]]},
+    "author": [{"family": "Huang", "given": "Chun"}, {"family": "Grant", "given": "Patrick S."}],
+    "library": "My Library",
+}
+
+
+@pytest.fixture
+def fake_bbt():
+    """A tiny JSON-RPC server answering like Better BibTeX's /better-bibtex/json-rpc."""
+    import http.server
+    import json
+    import threading
+
+    items = [BBT_ITEM, {**BBT_ITEM, "id": "http://zotero.org/users/local/IKH8whoc/items/ABCD2345",
+                        "citation-key": "doe2019other", "citekey": "doe2019other",
+                        "title": "Another paper", "author": [{"family": "Doe", "given": "Jo"}],
+                        "issued": {"date-parts": [[2019]]}}]
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            m, p = req["method"], req.get("params") or []
+            if m == "api.ready":
+                out = {"result": {"zotero": "10.0.6", "betterbibtex": "9.0.71"}}
+            elif m == "item.search":
+                term = (p[0] if p else "").lower()
+                out = {"result": [i for i in items if not term
+                                  or term in json.dumps(i).lower()]}
+            else:
+                out = {"error": {"code": -32601, "message": f"Method not found: {m}"}}
+            body = json.dumps({"jsonrpc": "2.0", **out, "id": req.get("id")}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/better-bibtex/json-rpc"
+    srv.shutdown()
+
+
+def test_rpc_search_and_key_lookup_against_a_bbt_shaped_server(fake_bbt, monkeypatch):
+    monkeypatch.setattr(zotero, "RPC_URL", fake_bbt)
+    assert zotero.rpc_available()
+    allrecs = zotero.rpc_search("")
+    assert [r["key"] for r in allrecs] == ["huangSolidStateBatteryCathode2021", "doe2019other"]
+    r = allrecs[0]
+    assert (r["year"], r["volume"], r["issue"], r["pages"]) == ("2021", "11", "1", "2002387")
+    assert r["container_short"] == "Adv. Energy Mater." and r["zotero_key"] == "7LJNWAYI"
+    assert r["authors"] == [["Huang", "Chun"], ["Grant", "Patrick S."]]
+    assert [x["key"] for x in zotero.rpc_search("another")] == ["doe2019other"]
+    found, missing = zotero.rpc_find_keys(["doe2019other", "nope2000x"])
+    assert [f["key"] for f in found] == ["doe2019other"] and missing == ["nope2000x"]
+    with pytest.raises(zotero.ZoteroError):
+        zotero.rpc("no.such.method")
+
+
+def test_apalike_preset_loads_its_package_and_default_is_acs_guide(tmp_path, monkeypatch):
+    monkeypatch.delenv("NOORSUITE_BIB_STYLE", raising=False)
+    monkeypatch.setattr(latex, "_config_path", lambda: tmp_path / "none.json")
+    assert latex.get_bib_style() == "acs-guide"
+    out, _ = latex.ensure_bibliography(
+        "\\documentclass{article}\n\\begin{document}\\cite{a}\n\\end{document}", "apalike")
+    assert "\\usepackage{apalike}" in out and "\\bibliographystyle{apalike}" in out

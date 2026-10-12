@@ -102,7 +102,7 @@ BIB_STYLES = [
     {"id": "unsrtnat", "label": "unsrtnat - author-year, citation order (natbib)",
      "bst": "unsrtnat", "packages": [r"\usepackage{natbib}"]},
     {"id": "apalike", "label": "apalike - author-year (APA-like)", "bst": "apalike",
-     "packages": []},
+     "packages": [r"\usepackage{apalike}"]},
 ]
 DEFAULT_BIB_STYLE = "acs-guide"
 

@@ -486,6 +486,29 @@ class SciSuiteClient:
         from .zotero import cayw_pick
         return self.push_references(cayw_pick())
 
+    def zotero_search(self, query: str = "", limit: int = 50) -> pd.DataFrame:
+        """Search the whole Zotero library (Better BibTeX JSON-RPC: no picker, no library
+        export; Zotero must be running). Columns: key, label, year, doi. Add hits to the
+        project with :meth:`zotero_add`."""
+        from .zotero import label, rpc_search
+        recs = rpc_search(query, limit=limit)
+        self._last_zotero = {r["key"]: r for r in recs}
+        return pd.DataFrame([{"key": r["key"], "label": label(r), "year": r["year"],
+                              "doi": r["doi"]} for r in recs],
+                            columns=["key", "label", "year", "doi"])
+
+    def zotero_add(self, keys) -> list:
+        """Store library items in the project by citation key (the key you cite with, e.g.
+        ``\\cite{huangSolidStateBatteryCathode2021}``); returns the keys that were found."""
+        from .zotero import rpc_find_keys
+        keys = [keys] if isinstance(keys, str) else list(keys)
+        found, missing = rpc_find_keys(keys)
+        if found:
+            self._ipc.send({"action": ACTION_REFERENCES, "items": found})
+        if missing:
+            print(f"[zotero] not found in the library: {missing}")
+        return [r["key"] for r in found]
+
     def list_references(self) -> pd.DataFrame:
         resp = self._ipc.send({"action": ACTION_LIST_REFERENCES}) or {}
         return pd.DataFrame(resp.get("references", []),

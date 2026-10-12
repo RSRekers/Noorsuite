@@ -422,3 +422,47 @@ def test_format_combo_ignores_the_wheel_and_the_format_is_per_document(win):
     # editing the text to another style is picked up (the text is the truth)
     tab.editor.setPlainText(tab.source().replace("{unsrt}", "{alpha}"))
     assert tab.bib_style_id() == "alpha" and combo.currentData() == "alpha"
+
+
+def test_zotero_library_search_add_cite_and_unknown_keys_are_resolved(win, monkeypatch):
+    from NoorSuite import zotero
+    rec = {"key": "huang2021", "type": "article-journal", "title": "A battery cathode",
+           "authors": [["Huang", "Chun"]], "editors": [], "year": "2021", "month": "",
+           "container": "Adv. Energy Mater.", "container_short": "", "volume": "11",
+           "issue": "1", "pages": "2002387", "doi": "10.1002/aenm.202002387", "url": "",
+           "publisher": "", "place": "", "isbn": "", "zotero_key": "7LJNWAYI"}
+    typed = {**rec, "key": "typedByHand2020", "title": "Typed by hand", "zotero_key": "ZZZZ9999"}
+    searches = []
+    monkeypatch.setattr(zotero, "rpc_search", lambda terms="", limit=None:
+                        (searches.append(terms) or [rec]))
+    monkeypatch.setattr(zotero, "rpc_find_keys", lambda keys: (
+        [typed] if "typedByHand2020" in keys else [],
+        [k for k in keys if k != "typedByHand2020"]))
+    ids, dm, tab = _doc_win(win, 1)
+
+    # 1. search the library in the panel -> results -> "Add & cite"
+    tab.refs.zsearch.setText("huang")
+    assert _wait(lambda: tab.refs.zlist.count() == 1, 10)
+    assert searches[-1] == "huang"
+    tab.refs.zlist.selectAll()
+    tab.editor.moveCursor(tab.editor.textCursor().MoveOperation.End)
+    tab.refs._zotero_add(True)
+    QApplication.processEvents()
+    assert "huang2021" in win.references
+    assert "\\cite{huang2021}" in tab.source()
+    assert tab.refs.list.count() == 1                                  # shows in the project tab
+
+    # 2. a key typed by hand (or copied from Obsidian) is looked up in Zotero when building
+    tab.editor.setPlainText(tab.source().replace(
+        "\\end{document}", "Also \\cite{typedByHand2020}.\n\\end{document}"))
+    from NoorSuite import latex
+    recs = win.document_references()
+    out, notes, info = latex.prepare_build_source(tab.source(), recs, "acs-guide")
+    assert info["undefined"] == ["typedByHand2020"]                    # shown as ? ...
+    tab._resolve_unknown_keys(info["undefined"])                       # ... then fetched
+    assert _wait(lambda: "typedByHand2020" in win.references, 10)
+    out, notes, info = latex.prepare_build_source(tab.source(), win.document_references(),
+                                                  "acs-guide")
+    assert info["undefined"] == [] and "\\textsuperscript{1,2}" not in out
+    assert "\\textsuperscript{2}" in out                               # numbered by occurrence
+    assert out.index("Huang, C.") < out.index("Typed by hand")

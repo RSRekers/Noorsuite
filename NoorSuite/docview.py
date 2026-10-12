@@ -422,51 +422,92 @@ class FigurePanel(QWidget):
 
 
 class ReferencePanel(QWidget):
-    """The project's bibliography: add from Zotero, cite, link, insert the reference list."""
+    """The project's bibliography and a live search of the Zotero library: find, add + cite,
+    format, reference list."""
 
     insertRequested = pyqtSignal(str)
     pickRequested = pyqtSignal(bool)         # insert a \cite after picking?
     ensurePackage = pyqtSignal(str)          # a full \usepackage line to make sure is there
     importFileRequested = pyqtSignal()
-    importLibraryRequested = pyqtSignal()
+    importLibraryRequested = pyqtSignal()    # the whole Zotero library
+    zoteroSearchRequested = pyqtSignal(str)
+    zoteroAddRequested = pyqtSignal(list, bool)    # records, also insert \cite?
     styleChosen = pyqtSignal(str)            # user picked a format for THIS document
     makeDefaultRequested = pyqtSignal(str)
 
     def __init__(self, host, parent=None):
         super().__init__(parent)
         self.host = host
+        self._zotero_records: list = []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         self.status = QLabel("")
         lay.addWidget(self.status)
+
+        self.tabs = QTabWidget()
+        # -- page 1: the project's references
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.setContentsMargins(2, 2, 2, 2)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search references: author, year, title, key")
+        self.search.setPlaceholderText("Filter the project's references")
         self.search.textChanged.connect(self._filter)
-        lay.addWidget(self.search)
+        pl.addWidget(self.search)
         self.list = QListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.itemDoubleClicked.connect(lambda _: self._cite("cite"))
-        lay.addWidget(self.list, 1)
+        pl.addWidget(self.list, 1)
+        self.tabs.addTab(page, "In this project")
+        # -- page 2: search the whole Zotero library (Better BibTeX JSON-RPC)
+        zpage = QWidget()
+        zl = QVBoxLayout(zpage)
+        zl.setContentsMargins(2, 2, 2, 2)
+        self.zsearch = QLineEdit()
+        self.zsearch.setPlaceholderText("Search Zotero: author, title, year, citation key ...")
+        self._ztimer = QTimer(self)
+        self._ztimer.setSingleShot(True)
+        self._ztimer.timeout.connect(lambda: self.zoteroSearchRequested.emit(
+            self.zsearch.text().strip()))
+        self.zsearch.textChanged.connect(lambda _t: self._ztimer.start(450))
+        zl.addWidget(self.zsearch)
+        self.zlist = QListWidget()
+        self.zlist.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.zlist.itemDoubleClicked.connect(lambda _: self._zotero_add(True))
+        zl.addWidget(self.zlist, 1)
+        self.zstatus = QLabel("Type to search your Zotero library.")
+        self.zstatus.setWordWrap(True)
+        zl.addWidget(self.zstatus)
+        zrow = QHBoxLayout()
+        add_cite = QPushButton("Add && cite")
+        add_cite.setToolTip("Store the selected items in the project and insert \\cite{...} "
+                            "at the cursor (or double-click)")
+        add_cite.clicked.connect(lambda: self._zotero_add(True))
+        zrow.addWidget(add_cite)
+        add = QPushButton("Add to project")
+        add.clicked.connect(lambda: self._zotero_add(False))
+        zrow.addWidget(add)
+        zl.addLayout(zrow)
+        self.tabs.addTab(zpage, "Zotero library")
+        lay.addWidget(self.tabs, 1)
 
         row = QHBoxLayout()
-        add = QPushButton("Pick in Zotero...")
-        add.setToolTip("Open Zotero's picker (Zotero + Better BibTeX must be running); the "
-                       "chosen items are stored in this project")
-        add.clicked.connect(lambda: self.pickRequested.emit(False))
-        row.addWidget(add)
+        pick = QPushButton("Pick in Zotero...")
+        pick.setToolTip("Zotero's own picker window (Better BibTeX 'cite as you write')")
+        pick.clicked.connect(lambda: self.pickRequested.emit(False))
+        row.addWidget(pick)
         rm = QPushButton("Remove")
         rm.clicked.connect(self._remove)
         row.addWidget(rm)
         lay.addLayout(row)
         row_i = QHBoxLayout()
-        imp_lib = QPushButton("Import library...")
-        imp_lib.setToolTip("Import the whole Zotero library or one collection (uses Zotero's "
-                           "local API, which has to be enabled in Zotero)")
+        imp_lib = QPushButton("Import whole library")
+        imp_lib.setToolTip("Copy every item of the Zotero library into this project "
+                           "(thousands of entries - normally not needed: cited keys are "
+                           "looked up automatically)")
         imp_lib.clicked.connect(self.importLibraryRequested.emit)
         row_i.addWidget(imp_lib)
         imp_file = QPushButton("Import file...")
-        imp_file.setToolTip("Import a .bib (BibTeX) or .json (CSL-JSON) export, e.g. Zotero: "
-                            "File -> Export Library...")
+        imp_file.setToolTip("A .bib (BibTeX) or .json (CSL-JSON) export")
         imp_file.clicked.connect(self.importFileRequested.emit)
         row_i.addWidget(imp_file)
         lay.addLayout(row_i)
@@ -497,12 +538,12 @@ class ReferencePanel(QWidget):
             lambda: self.makeDefaultRequested.emit(self.style_combo.currentData()))
         lay.addWidget(self.make_default_btn)
         ins = QPushButton("Insert reference list at cursor")
-        ins.setToolTip("\\bibliographystyle{...}\\bibliography{references} -- references.bib is "
-                       "generated from the stored items (only the cited ones)")
+        ins.setToolTip("Marks where the reference list goes (generated from the cited items)")
         ins.clicked.connect(self._insert_bibliography)
         lay.addWidget(ins)
         self.refresh()
 
+    # -- project references -------------------------------------------------------------
     def refresh(self):
         keep = {it.data(Qt.ItemDataRole.UserRole) for it in self.list.selectedItems()}
         self.list.clear()
@@ -531,6 +572,25 @@ class ReferencePanel(QWidget):
     def _selected_keys(self) -> list:
         return [it.data(Qt.ItemDataRole.UserRole) for it in self.list.selectedItems()]
 
+    # -- Zotero library search -------------------------------------------------------------
+    def set_zotero_results(self, records, message=""):
+        self._zotero_records = list(records)
+        self.zlist.clear()
+        for rec in records[:300]:
+            item = QListWidgetItem(zotero.label(rec) + f"\n    {rec['key']}")
+            item.setToolTip(zotero.label(rec) + (f"\n{rec['doi']}" if rec.get("doi") else ""))
+            item.setData(Qt.ItemDataRole.UserRole, rec["key"])
+            self.zlist.addItem(item)
+        extra = f" (showing the first 300 - refine the search)" if len(records) > 300 else ""
+        self.zstatus.setText(message or f"{len(records)} item(s){extra}")
+
+    def _zotero_add(self, cite: bool):
+        keys = {it.data(Qt.ItemDataRole.UserRole) for it in self.zlist.selectedItems()}
+        chosen = [r for r in self._zotero_records if r["key"] in keys]
+        if chosen:
+            self.zoteroAddRequested.emit(chosen, cite)
+
+    # -- inserting -------------------------------------------------------------------------
     def _cite(self, cmd):
         keys = self._selected_keys()
         if not keys:
@@ -577,6 +637,8 @@ class DocumentTab(QWidget):
     contentChanged = pyqtSignal()
     _built = pyqtSignal(object)           # BuildResult, from the worker thread
     _picked = pyqtSignal(object, bool, str)   # raw Zotero items / error, insert?, message
+    _zsearched = pyqtSignal(object, str, int)  # records, message, generation
+    _resolved = pyqtSignal(object, object)     # records found, keys still missing
 
     AUTO_DELAY_MS = 1500
 
@@ -662,6 +724,8 @@ class DocumentTab(QWidget):
         self.refs.styleChosen.connect(self.set_bib_style)
         self.refs.makeDefaultRequested.connect(self._make_default_style)
         self.refs.importLibraryRequested.connect(self.import_zotero_library)
+        self.refs.zoteroSearchRequested.connect(self.search_zotero)
+        self.refs.zoteroAddRequested.connect(self.add_zotero_records)
         self.side = QTabWidget()
         self.side.addTab(self.figures, "Figures")
         self.side.addTab(self.refs, "References")
@@ -692,6 +756,10 @@ class DocumentTab(QWidget):
         self._source_timer.timeout.connect(lambda: self.compile())
         self._built.connect(self._on_built)
         self._picked.connect(self._on_picked)
+        self._zsearched.connect(self._on_zsearched)
+        self._resolved.connect(self._on_resolved)
+        self._zgen = 0                       # newest library search wins
+        self._lookup_tried: set = set()      # cite keys already looked up in Zotero
         self._apply_theme()
 
         engine = latex.find_engine()
@@ -847,7 +915,9 @@ class DocumentTab(QWidget):
             self.status_label.setText("  Zotero: not available")
             QMessageBox.warning(self, "Zotero", error)
             return
-        records = [r for r in (zotero.normalize(i) for i in items) if r]
+        records = [r if "key" in r and "authors" in r else zotero.normalize(r)
+                   for r in items if isinstance(r, dict)]
+        records = [r for r in records if r]
         if not records:
             self.status_label.setText("  nothing picked")
             return
@@ -872,27 +942,76 @@ class DocumentTab(QWidget):
         self.status_label.setText(f"  imported {len(keys)} reference(s) from {Path(path).name}")
 
     def import_zotero_library(self):
-        """Whole library or one collection via Zotero's local API (off by default)."""
-        try:
-            cols = zotero.local_collections()
-        except zotero.ZoteroError as exc:
-            QMessageBox.information(self, "Import Zotero library", str(exc))
+        """Copy the whole library into the project (Better BibTeX JSON-RPC, a few seconds)."""
+        if QMessageBox.question(
+                self, "Import whole library",
+                "Copy every item of your Zotero library into this project?\n\n"
+                "That can be thousands of entries (it makes the project file larger). "
+                "You normally do not need it: search the library in the 'Zotero library' tab "
+                "and add what you cite -- unknown \\cite keys are also looked up automatically."
+        ) != QMessageBox.StandardButton.Yes:
             return
-        names = ["(whole library)"] + [n for _k, n in cols]
-        choice, ok = QInputDialog.getItem(self, "Import Zotero library", "Import:", names,
-                                          0, False)
-        if not ok:
+        self.status_label.setText("  importing the Zotero library ...")
+
+        def work():
+            try:
+                self._picked.emit([r for r in zotero.rpc_search("")], False, "")
+            except zotero.ZoteroError as exc:
+                self._picked.emit([], False, str(exc))
+
+        threading.Thread(target=work, daemon=True).start()
+        self._importing_records = True
+
+    # -- live search of the Zotero library -----------------------------------------------------
+    def search_zotero(self, text: str):
+        self._zgen += 1
+        gen = self._zgen
+        if not text:
+            self.refs.set_zotero_results([], "Type to search your Zotero library.")
             return
-        coll = None if names.index(choice) == 0 else cols[names.index(choice) - 1][0]
-        self.status_label.setText("  importing from Zotero ...")
-        QApplication.processEvents()
-        try:
-            records = zotero.local_library(coll)
-        except zotero.ZoteroError as exc:
-            QMessageBox.warning(self, "Import Zotero library", str(exc))
-            return
+        self.refs.zstatus.setText("searching Zotero ...")
+
+        def work():
+            try:
+                recs = zotero.rpc_search(text, limit=2000)
+                self._zsearched.emit(recs, "", gen)
+            except zotero.ZoteroError as exc:
+                self._zsearched.emit([], str(exc), gen)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_zsearched(self, records, message, gen):
+        if gen == self._zgen:
+            self.refs.set_zotero_results(records, message)
+
+    def add_zotero_records(self, records, cite: bool):
         keys = self.host.add_references(records)
-        self.status_label.setText(f"  imported {len(keys)} reference(s) from Zotero")
+        self.side.setCurrentWidget(self.refs)
+        self.status_label.setText(f"  added {len(keys)} reference(s)")
+        if cite and keys:
+            self.editor.textCursor().insertText("\\cite{" + ",".join(keys) + "}")
+            self.editor.setFocus()
+
+    # -- unknown \cite keys: look them up in Zotero (typed by hand, copied from Obsidian) ---
+    def _resolve_unknown_keys(self, undefined):
+        todo = [k for k in undefined if k not in self._lookup_tried]
+        if not todo:
+            return
+        self._lookup_tried.update(todo)
+
+        def work():
+            try:
+                found, missing = zotero.rpc_find_keys(todo)
+            except zotero.ZoteroError:
+                found, missing = [], todo
+            self._resolved.emit(found, missing)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_resolved(self, found, missing):
+        if found:
+            self.host.add_references(found)
+            self.status_label.setText(f"  found {len(found)} cited key(s) in Zotero")
 
     # -- build ---------------------------------------------------------------------------
     def _load_cached_pdf(self):
@@ -949,6 +1068,8 @@ class DocumentTab(QWidget):
         (self.workdir / "references.bib").write_text(
             zotero.bibtex_file(recs, used=info["cited"]), encoding="utf-8")
         undefined = info["undefined"]
+        if undefined:
+            self._resolve_unknown_keys(undefined)
         # figures on the GUI thread (they are Qt widgets), the engine off-thread
         missing, exported, cached = self._export_figures(self.workdir / latex.FIGURES_DIR)
         t_fig = time.time() - t0

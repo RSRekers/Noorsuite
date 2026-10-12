@@ -491,3 +491,70 @@ def load_file(path) -> list:
         items = data.get("items", data) if isinstance(data, dict) else data
         return [r for r in (normalize(i) for i in items) if r]
     return parse_bibtex(text)
+
+
+# ----------------------------------------------- Better BibTeX JSON-RPC (no picker, no export)
+RPC_URL = BASE + "/better-bibtex/json-rpc"
+
+
+def rpc(method: str, params=None, timeout: float = 180.0, url: str | None = None):
+    """Call a Better BibTeX JSON-RPC method (it ships with the plugin and needs neither the
+    picker nor the plugin's library *export*). Raises :class:`ZoteroError`."""
+    url = url or RPC_URL
+    body = json.dumps({"jsonrpc": "2.0", "method": method, "params": params or [],
+                       "id": 1}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            out = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise ZoteroError(f"Zotero answered HTTP {exc.code} - is Better BibTeX enabled?") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise ZoteroError("Zotero is not reachable on 127.0.0.1:23119 - start Zotero "
+                          "(with Better BibTeX) first.") from exc
+    if out.get("error"):
+        raise ZoteroError(f"Better BibTeX: {out['error'].get('message', out['error'])}")
+    return out.get("result")
+
+
+def rpc_available() -> bool:
+    try:
+        return bool(rpc("api.ready", timeout=2.0))
+    except ZoteroError:
+        return False
+
+
+def rpc_search(terms: str = "", limit: int | None = None) -> list:
+    """Normalized records of every library item matching ``terms`` (``""`` = the whole
+    library, several thousand items in a few seconds). Items without a citation key get a
+    generated one; attachments / notes are not returned by Zotero here."""
+    items = rpc("item.search", [terms or ""]) or []
+    out, seen = [], set()
+    for raw in items:
+        rec = normalize(raw)
+        if rec and rec["key"] not in seen:
+            seen.add(rec["key"])
+            out.append(rec)
+            if limit and len(out) >= limit:
+                break
+    return out
+
+
+def rpc_find_keys(keys) -> tuple:
+    """``(records, missing)``: look up citation keys (as typed in a document or an
+    Obsidian ``[[@key]]``) in the library; only an exact citation-key match counts."""
+    found, missing = [], []
+    for key in keys:
+        try:
+            hits = rpc("item.search", [key], timeout=60.0) or []
+        except ZoteroError:
+            missing.append(key)
+            continue
+        rec = None
+        for raw in hits:
+            ck = raw.get("citation-key") or raw.get("citationKey") or raw.get("citekey")
+            if ck == key:
+                rec = normalize(raw)
+                break
+        (found if rec else missing).append(rec or key)
+    return found, missing

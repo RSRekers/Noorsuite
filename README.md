@@ -128,9 +128,12 @@ the `.tex` source on the left, the compiled PDF on the right. Figures are NoorSh
   apalike, ...) stay available in the References tab. The format belongs to the *document*; the mouse wheel
   never changes it. If a text cites but has no reference list, the build adds one to its built copy, so you
   never get a bare `?`.
-- **Library**: *Pick in Zotero...* (individual items), *Import library...* (whole library or a collection;
-  needs Zotero's local API switched on), *Import file...* (a `.bib` or CSL-JSON export, e.g. Zotero's own
-  *File -> Export Library...*, which does not need Better BibTeX).
+- **Library**: the *Zotero library* tab of the References panel searches your whole library live (author,
+  title, year, citation key) and *Add & cite* stores the item in the project and inserts `\cite{key}`. It
+  talks to Better BibTeX's JSON-RPC, so there is no picker window, no library export and no Zotero setting to
+  switch. Typing a citation key by hand (or pasting one from Obsidian) works too: unknown keys are looked up
+  in Zotero while building. *Pick in Zotero...* (the picker window), *Import whole library* and *Import
+  file...* (`.bib` / CSL-JSON) are still there.
 - The editor is **black on white** by default (toggle *Dark editor* for light-on-dark); the data panel is
   collapsed and the inspector hidden while a document tab is current, to give it the width.
 - Builds only re-export the figures that changed; the status bar shows "figures N new / M cached".
