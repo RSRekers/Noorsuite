@@ -554,8 +554,15 @@ title/x_label/y_label + trace labels).
   `*`), `to_bibtex()` writes entries, `cite_keys()` scans `\cite*`. Records persist in
   `ProjectModel.references` (optional key); `DocumentTab.compile` writes `references.bib` for the cited
   keys only; `latex_build` does the same headless. IPC: `references` / `list_references`.
-- **Bibliography format**: `latex.BIB_STYLES` (id, label, bst, preamble packages; default `acs` =
-  natbib `super,sort&compress` + `achemso.bst`, citations numbered by first occurrence), stored in
+- **Bibliography format**: `latex.BIB_STYLES` (id, label, bst, preamble packages; `native` marks formats
+  NoorSuite writes itself). Default `acs-guide` = `refstyle.number_citations`: `\cite*` -> superscript
+  numbers by first appearance (runs of 3+ as `1--3`), `\bibliography{..}` marker -> a `thebibliography`
+  with `(n)` labels, entries from `refstyle.format_reference` (ACS Guide, April 2025 revision: no 2026
+  revision exists in public sources -- change rules *only* there). `latex.prepare_build_source` is the single
+  entry for GUI + headless builds. BibTeX presets (`acs` = natbib `super,sort&compress` + `achemso.bst`, ...)
+  remain; the format is stored per document (`DocumentModel.bib_style`, or the text's own
+  `\bibliographystyle`) and the combo ignores the wheel -- a global default may only change on an
+  explicit "Use as default". The user default is stored in
   `~/.noorsuite/config.json` (`bib_style`, overridable by `$NOORSUITE_BIB_STYLE`). `latex.
   ensure_bibliography(source)` returns a *build copy* with the reference list / natbib added when the text
   cites but lacks them -- never edit the user's source for that (a bare `[?]` was the symptom). The tectonic

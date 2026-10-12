@@ -177,12 +177,14 @@ suite.list_references()               # key, "Smith et al. (2020) - Title", zote
 text = r"As shown before \cite{%s}." % keys[0]      # \citep / \citet need \usepackage{natbib}
 ```
 
-Citations are **numbered in order of first appearance** and the reference list follows that order. The default
-format is **ACS** (`achemso`: superscript numbers, ACS-style entries); `latex.set_bib_style("unsrt")` etc.
-changes the user default (`acs`, `acs-notitle`, `plain`, `unsrt`, `ieeetr`, `abbrv`, `alpha`, `plainnat`,
-`abbrvnat`, `unsrtnat`, `apalike`). You do not have to write the reference list: when a document cites but
-has no `\bibliography{...}`, the build adds `\bibliographystyle{achemso}` + `\bibliography{references}`
-(and natbib) to its *built copy*; put those two lines before `\end{document}` to make it permanent.
+Citations are **numbered in order of first appearance** and the reference list follows that order. The
+default format is **`acs-guide`**: NoorSuite itself writes superscript numbers and an ACS Guide (April 2025
+revision) formatted list - authors `Smith, J. A.; Lee, K.`, bold year, italic volume, `DOI:` as a hyperlink,
+journal names abbreviated only if every cited journal has an abbreviation. Other formats: `acs` (older
+achemso.bst), `acs-notitle`, `plain`, `unsrt`, `ieeetr`, `abbrv`, `alpha`, `plainnat`, `abbrvnat`, `unsrtnat`,
+`apalike` (`latex.set_bib_style(id)` sets the user default; a document keeps its own choice). You do not have to
+write the reference list: put `\bibliography{references}` where it should go, or leave it out and the build adds
+the list before `\end{document}` of its *built copy*. Write plain `\cite{key}`; never type numbers yourself.
 `references.bib` is generated at build time from the stored items, only for the keys that are cited.
 A citation showing `[?]` / `?` means exactly this missing reference list or an unknown key. In the GUI: **Cite (Zotero)...**
 (Ctrl+Shift+Z) in the Document tab, and the References tab (cite / link / reference-list format). Items cited

@@ -82,14 +82,18 @@ def main(argv) -> int:
     dm = _pick_document(pm, a.doc)
     workdir = Path(tempfile.mkdtemp(prefix="noorsuite_tex_"))
     try:
-        source, notes = latex.ensure_bibliography(dm.source)
+        style_id = latex.detect_bib_style(dm.source, getattr(dm, "bib_style", "")) \
+            or getattr(dm, "bib_style", "") or None
+        source, notes, info = latex.prepare_build_source(dm.source, pm.references, style_id)
         for n in notes:
             print("note:", n, file=sys.stderr)
+        for k in info["undefined"]:
+            print(f"warning: citation key {k!r} is not in the project's references",
+                  file=sys.stderr)
         latex.prepare_workdir(workdir, source)
         from . import zotero
         (workdir / "references.bib").write_text(
-            zotero.bibtex_file(pm.references, used=zotero.cite_keys(dm.source)),
-            encoding="utf-8")
+            zotero.bibtex_file(pm.references, used=info["cited"]), encoding="utf-8")
         missing = render_figures(pm, dm, workdir)
         for key in missing:
             print(f"warning: no sheet matches \noorsheet{{{key}}}", file=sys.stderr)

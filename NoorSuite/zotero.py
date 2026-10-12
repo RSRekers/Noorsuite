@@ -144,6 +144,8 @@ def normalize(raw: dict) -> dict | None:
         "month": month,
         "container": str(_first(raw, "container-title", "publicationTitle", "bookTitle",
                                 "proceedingsTitle", "websiteTitle", default="")),
+        "container_short": str(_first(raw, "container-title-short", "journalAbbreviation",
+                                      "journal-abbreviation", default="")),
         "volume": str(_first(raw, "volume", default="")),
         "issue": str(_first(raw, "issue", "number", default="")),
         "pages": str(_first(raw, "page", "pages", default="")),

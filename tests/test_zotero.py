@@ -111,28 +111,29 @@ As shown by Smith \cite{smith2020quantum}, noise matters.
 
 def test_default_style_is_acs_and_build_copy_gets_a_reference_list(tmp_path, monkeypatch):
     monkeypatch.setattr(latex, "_config_path", lambda: tmp_path / "config.json")
-    assert latex.get_bib_style() == "acs" and latex.bib_style()["bst"] == "achemso"
+    assert latex.get_bib_style() == "acs-guide" and latex.bib_style()["native"] == "acs"
+    assert latex.bib_style("acs")["bst"] == "achemso"         # the older BibTeX route stays
     src = "\\documentclass{article}\n\\begin{document}\nText \\cite{a} and \\citep{b}.\n" \
           "\\end{document}\n"
-    out, notes = latex.ensure_bibliography(src)
+    out, notes = latex.ensure_bibliography(src, "acs")
     assert "\\usepackage[super,sort&compress]{natbib}" in out          # ACS needs natbib super
     assert out.index("\\bibliographystyle{achemso}") < out.index("\\end{document}")
     assert "\\bibliography{references}" in out and notes
     assert latex.package_loaded(out, "natbib") and not latex.package_loaded(src, "natbib")
     # nothing cited -> untouched; reference list already present -> untouched
-    assert latex.ensure_bibliography("\\begin{document}x\\end{document}") == \
+    assert latex.ensure_bibliography("\\begin{document}x\\end{document}", "acs") == \
         ("\\begin{document}x\\end{document}", [])
     done = src.replace("\\end{document}", "\\bibliography{mine}\n\\end{document}")
-    assert "bibliographystyle" not in latex.ensure_bibliography(done)[0]
+    assert "bibliographystyle" not in latex.ensure_bibliography(done, "acs")[0]
     # \citep alone (own reference list, no natbib) gets natbib
     out2, notes2 = latex.ensure_bibliography(
         "\\documentclass{article}\n\\begin{document}\\citep{x}\n\\bibliography{mine}\n"
-        "\\end{document}")
+        "\\end{document}", "acs")
     assert "\\usepackage{natbib}" in out2 and notes2
     # a chosen default is remembered
     latex.set_bib_style("unsrt")
     assert latex.get_bib_style() == "unsrt"
-    assert "\\bibliographystyle{unsrt}" in latex.ensure_bibliography(src)[0]
+    assert "\\bibliographystyle{unsrt}" in latex.ensure_bibliography(src)[0]   # default now unsrt
     assert "natbib" in latex.article_template("T", "plainnat")
     assert "natbib" not in latex.article_template("T", "plain")
 
@@ -188,7 +189,7 @@ def test_citations_are_numbered_by_occurrence_with_acs_default(tmp_path):
     suite.push_document("Doc", body)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env = {**os.environ, "PYTHONPATH": root, "QT_QPA_PLATFORM": "offscreen",
-           "NOORSUITE_BIB_STYLE": "acs", "NOORSUITE_LATEX": latex.find_engine()}
+           "NOORSUITE_BIB_STYLE": "acs-guide", "NOORSUITE_LATEX": latex.find_engine()}
     out = tmp_path / "doc.pdf"
     r = subprocess.run([sys.executable, "-m", "NoorSuite", "latex", "build", "--project",
                         str(tmp_path / "p.sciproj"), "--doc", "Doc", "--out", str(out)],
@@ -201,7 +202,85 @@ def test_citations_are_numbered_by_occurrence_with_acs_default(tmp_path):
     refs = text[text.index("References"):]
     assert refs.index("Landau, L.") < refs.index("Smith, J. A.")
     flat = " ".join(refs.split())                          # undo line wrapping
-    assert "Phys. Rev. B 2020, 101" in flat
+    assert "(1) Landau, L." in flat or "(1)" in flat       # ACS list labels
+    assert "Phys. Rev. B 2020, 101 (4), 045101" in flat    # year bold, volume italic, issue, pages
+    assert "DOI: 10.1103/PhysRevB.101.045101" in flat
     # the in-text numbers: superscript 1 after "First", 2 after "then", 1 again at the end
-    assert "First1, then2, and again1" in text.replace("\n", " ").replace(" ,", ",") \
-        or "First1" in text.replace("\n", "")
+    body = " ".join(text.split())
+    assert "First 1, then 2, and again 1." in body                       # superscripts extract spaced
+
+
+def test_detect_and_apply_bib_style(tmp_path, monkeypatch):
+    monkeypatch.setattr(latex, "_config_path", lambda: tmp_path / "config.json")
+    src = ("\\documentclass{article}\n\\usepackage{hyperref}\n"
+           "\\usepackage[super,sort&compress]{natbib}\n\\begin{document}\n"
+           "Text \\cite{a}.\n\\bibliographystyle{achemso}\n\\bibliography{references}\n"
+           "\\end{document}\n")
+    assert latex.detect_bib_style(src) == "acs"
+    assert latex.detect_bib_style(src.replace("achemso}", "alpha}")) == "alpha"
+    assert latex.detect_bib_style("no style here") == ""
+    assert latex.detect_bib_style("% \\bibliographystyle{alpha}\n") == ""        # commented out
+    plain = latex.apply_bib_style(src, "unsrt")                  # numbered in brackets
+    assert "\\bibliographystyle{unsrt}" in plain and "natbib" not in plain
+    assert "\\usepackage{hyperref}" in plain and "\\cite{a}" in plain       # rest untouched
+    back = latex.apply_bib_style(plain, "acs")
+    assert "\\usepackage[super,sort&compress]{natbib}" in back
+    assert "\\bibliographystyle{achemso}" in back
+    assert back.count("natbib") == 1                                         # never duplicated
+    assert latex.detect_bib_style(back, prefer="acs-notitle") == "acs-notitle"   # shares achemso.bst
+    nat = latex.apply_bib_style(src, "plainnat")
+    assert "\\usepackage{natbib}" in nat and "super" not in nat
+
+
+def test_document_model_keeps_its_own_format():
+    from NoorSuite.model import DocumentModel
+    d = DocumentModel("P", "x", bib_style="unsrt")
+    assert DocumentModel.from_dict(d.to_dict()).bib_style == "unsrt"
+    assert DocumentModel.from_dict({"name": "old", "source": "y"}).bib_style == ""   # old files
+
+
+def test_native_acs_numbering_and_entry_formatting():
+    from NoorSuite import refstyle
+    recs = [zotero.normalize(r) for r in [
+        {"type": "article-journal", "citationKey": "smith2020", "title": "Quantum transport in M_x films",
+         "author": [{"family": "Smith", "given": "Jane Ann"}, {"family": "Lee", "given": "Jean-Pierre"}],
+         "container-title": "Journal of the American Chemical Society",
+         "container-title-short": "J. Am. Chem. Soc.", "volume": "142", "issue": "4",
+         "page": "1234-1240", "issued": {"date-parts": [[2020]]}, "DOI": "10.1021/jacs.9b12345"},
+        {"type": "book", "citationKey": "landau2011", "title": "Statistical Physics",
+         "author": [{"family": "Landau", "given": "Lev D."}], "publisher": "Pergamon",
+         "publisher-place": "Oxford", "issued": {"date-parts": [[2011]]}},
+        {"type": "chapter", "citationKey": "chap1", "title": "A chapter",
+         "author": [{"family": "Doe", "given": "J."}], "editor": [{"family": "Roe", "given": "R."}],
+         "container-title": "Handbook", "publisher": "Wiley", "publisher-place": "New York",
+         "page": "10-20", "issued": {"date-parts": [[2018]]}}]]
+    src = ("\\begin{document}\nSee \\cite{landau2011}, then \\cite{smith2020,chap1} and "
+           "\\citet{smith2020}, \\citep[p.~3]{nokey}. % \\cite{hidden}\n"
+           "\\cite{landau2011,smith2020,chap1}\n\\bibliography{references}\n\\end{document}\n")
+    out, cited, undefined, notes = refstyle.number_citations(src, recs)
+    assert cited == ["landau2011", "smith2020", "chap1"]                  # first appearance
+    assert undefined == ["nokey"]
+    assert "See \\textsuperscript{1}, then \\textsuperscript{2,3}" in out
+    assert "Smith et al.\\textsuperscript{2}" in out                       # \citet
+    assert "\\textsuperscript{1--3}" in out                                # run of three
+    assert "\\textsuperscript{?}" in out                                   # unknown key
+    assert "% \\cite{hidden}" in out                                       # comments untouched
+    assert "\\bibliography{references}" not in out                         # marker replaced
+    assert out.index("\\bibitem{landau2011}") < out.index("\\bibitem{smith2020}") \
+        < out.index("\\bibitem{chap1}")
+    assert "\\bibitem{smith2020} Smith, J. A.; Lee, J.-P. Quantum transport in M\\_x films. " \
+           "\\textit{J. Am. Chem. Soc.} \\textbf{2020}, \\textit{142} (4), 1234--1240. " \
+           "\\href{https://doi.org/10.1021/jacs.9b12345}{DOI: 10.1021/jacs.9b12345}" in out
+    assert "\\bibitem{landau2011} Landau, L. D. \\textit{Statistical Physics}; " \
+           "Pergamon: Oxford, 2011." in out
+    assert "In \\textit{Handbook}; Roe, R., Ed.; Wiley: New York, 2018; pp 10--20." in out
+    # one convention for the whole list: a single journal without abbreviation -> all full names
+    recs[0]["container_short"] = ""
+    out2 = refstyle.number_citations(src, recs)[0]
+    assert "\\textit{Journal of the American Chemical Society}" in out2
+    # nothing cited -> the text is left alone
+    assert refstyle.number_citations("\\begin{document}x\\end{document}", recs)[0] == \
+        "\\begin{document}x\\end{document}"
+    # the default build path goes through the native formatter
+    built, bnotes, info = latex.prepare_build_source(src, recs, "acs-guide")
+    assert "\\begin{thebibliography}" in built and info["cited"][0] == "landau2011"

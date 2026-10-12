@@ -287,6 +287,21 @@ class PdfPreview(QScrollArea):
         super().keyPressEvent(event)
 
 
+class _NoWheelComboBox(QComboBox):
+    """A combo box that only changes on click: scrolling a panel with the mouse wheel over
+    it must never switch the value (that silently reformatted the bibliography)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.view().isVisible():
+            super().wheelEvent(event)
+        else:
+            event.ignore()                    # let the surrounding panel scroll instead
+
+
 # ---------------------------------------------------------------------- side panels
 class _FigureList(QListWidget):
     """Thumbnail list of the project's sheets; drag out = the figure environment as text."""
@@ -414,6 +429,8 @@ class ReferencePanel(QWidget):
     ensurePackage = pyqtSignal(str)          # a full \usepackage line to make sure is there
     importFileRequested = pyqtSignal()
     importLibraryRequested = pyqtSignal()
+    styleChosen = pyqtSignal(str)            # user picked a format for THIS document
+    makeDefaultRequested = pyqtSignal(str)
 
     def __init__(self, host, parent=None):
         super().__init__(parent)
@@ -467,15 +484,18 @@ class ReferencePanel(QWidget):
         row2.addWidget(link)
         lay.addLayout(row2)
 
-        self.style_combo = QComboBox()
+        self.style_combo = _NoWheelComboBox()
         for st in latex.BIB_STYLES:
             self.style_combo.addItem(st["label"], st["id"])
         self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(latex.get_bib_style())))
-        self.style_combo.currentIndexChanged.connect(
-            lambda: latex.set_bib_style(self.style_combo.currentData()))
-        lay.addWidget(QLabel("Citation / reference list format (default for new "
-                             "documents and for builds):"))
+        self.style_combo.activated.connect(      # only a real user choice, never programmatic
+            lambda _i: self.styleChosen.emit(self.style_combo.currentData()))
+        lay.addWidget(QLabel("Citation / reference list format of this document:"))
         lay.addWidget(self.style_combo)
+        self.make_default_btn = QPushButton("Use as default for new documents")
+        self.make_default_btn.clicked.connect(
+            lambda: self.makeDefaultRequested.emit(self.style_combo.currentData()))
+        lay.addWidget(self.make_default_btn)
         ins = QPushButton("Insert reference list at cursor")
         ins.setToolTip("\\bibliographystyle{...}\\bibliography{references} -- references.bib is "
                        "generated from the stored items (only the cited ones)")
@@ -542,6 +562,9 @@ class ReferencePanel(QWidget):
         st = latex.bib_style(self.style_combo.currentData())
         for line in st["packages"]:
             self.ensurePackage.emit(line)
+        if st.get("native"):                  # NoorSuite writes the list at this marker
+            self.insertRequested.emit("\\bibliography{references}")
+            return
         self.insertRequested.emit(
             f"\\bibliographystyle{{{st['bst']}}}\n\\bibliography{{references}}")
 
@@ -636,6 +659,8 @@ class DocumentTab(QWidget):
         self.refs.pickRequested.connect(lambda ins: self.pick_from_zotero(insert=ins))
         self.refs.ensurePackage.connect(self._ensure_package_line)
         self.refs.importFileRequested.connect(self.import_reference_file)
+        self.refs.styleChosen.connect(self.set_bib_style)
+        self.refs.makeDefaultRequested.connect(self._make_default_style)
         self.refs.importLibraryRequested.connect(self.import_zotero_library)
         self.side = QTabWidget()
         self.side.addTab(self.figures, "Figures")
@@ -698,8 +723,45 @@ class DocumentTab(QWidget):
         if text != self.editor.toPlainText():
             self.editor.setPlainText(text)
 
+    # -- reference-list format of this document --------------------------------------------
+    def bib_style_id(self) -> str:
+        """The format in effect: the document's own ``\\bibliographystyle``, else the stored
+        per-document choice, else the user's default."""
+        return latex.detect_bib_style(self.source(), self.model.bib_style) \
+            or self.model.bib_style or latex.get_bib_style()
+
+    def _sync_style_combo(self):
+        combo = self.refs.style_combo
+        idx = combo.findData(self.bib_style_id())
+        if idx >= 0 and idx != combo.currentIndex():
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+
+    def set_bib_style(self, style_id: str):
+        """Explicit user choice: store it on the document and rewrite the document's own
+        package / ``\\bibliographystyle`` lines (one undoable edit)."""
+        self.model.bib_style = style_id
+        new = latex.apply_bib_style(self.source(), style_id)
+        if new != self.source():
+            cur = self.editor.textCursor()
+            cur.beginEditBlock()
+            cur.select(cur.SelectionType.Document)
+            cur.insertText(new)
+            cur.endEditBlock()
+        self.status_label.setText(f"  format: {latex.bib_style(style_id)['label']}")
+        self.contentChanged.emit()
+        if self.auto_check.isChecked():
+            self._source_timer.start(self.AUTO_DELAY_MS)
+
+    def _make_default_style(self, style_id: str):
+        latex.set_bib_style(style_id)
+        self.status_label.setText(f"  default for new documents: "
+                                  f"{latex.bib_style(style_id)['label']}")
+
     def _on_text_changed(self):
         self.model.source = self.editor.toPlainText()
+        self._sync_style_combo()
         self.contentChanged.emit()
         if self.auto_check.isChecked():
             self._source_timer.start(self.AUTO_DELAY_MS)
@@ -879,15 +941,14 @@ class DocumentTab(QWidget):
         self._building = True
         self.compile_act.setEnabled(False)
         t0 = time.time()
-        build_src, bib_notes = latex.ensure_bibliography(self.source())
-        latex.prepare_workdir(self.workdir, build_src)
-        # references.bib from the stored Zotero items (only the ones the text cites)
-        cited = zotero.cite_keys(self.source())
+        style_id = self.bib_style_id()
         recs = self.host.document_references()
-        known = {r["key"] for r in recs}
+        build_src, bib_notes, info = latex.prepare_build_source(self.source(), recs, style_id)
+        latex.prepare_workdir(self.workdir, build_src)
+        # references.bib from the stored items (used by the BibTeX formats)
         (self.workdir / "references.bib").write_text(
-            zotero.bibtex_file(recs, used=cited), encoding="utf-8")
-        undefined = [k for k in cited if k not in known]
+            zotero.bibtex_file(recs, used=info["cited"]), encoding="utf-8")
+        undefined = info["undefined"]
         # figures on the GUI thread (they are Qt widgets), the engine off-thread
         missing, exported, cached = self._export_figures(self.workdir / latex.FIGURES_DIR)
         t_fig = time.time() - t0
@@ -898,6 +959,7 @@ class DocumentTab(QWidget):
             res.missing = missing
             res.undefined = undefined
             res.notes = bib_notes
+            res.style = latex.bib_style(style_id)
             res.fig_seconds, res.fig_exported, res.fig_cached = t_fig, exported, cached
             self._built.emit(res)
 
@@ -925,10 +987,13 @@ class DocumentTab(QWidget):
         if res.ok:
             self._pdf = res.pdf
             self.preview.load(res.pdf)
+            cites = bool(zotero.cite_keys(self.source()))
+            fmt = f"; references: {res.style['id']}" if cites and getattr(res, "style", None) \
+                else ""
             self.status_label.setText(
                 f"  built in {res.seconds + getattr(res, 'fig_seconds', 0):.1f} s "
                 f"(LaTeX {res.seconds:.1f} s; figures {getattr(res, 'fig_exported', 0)} new / "
-                f"{getattr(res, 'fig_cached', 0)} cached){note}")
+                f"{getattr(res, 'fig_cached', 0)} cached{fmt}){note}")
         else:
             self.status_label.setText("  build FAILED - see the log" + note)
         if self._again:

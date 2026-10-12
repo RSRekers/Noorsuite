@@ -120,9 +120,14 @@ the `.tex` source on the left, the compiled PDF on the right. Figures are NoorSh
   link back to Zotero) and inserts the reference list in the style you choose (plain, unsrt, ieeetr, alpha,
   plainnat, apalike ...). `references.bib` is generated when building.
 - **Numbering**: citations are numbered in order of first appearance and the reference list is in that order.
-  The default format is **ACS** (`achemso`: superscript numbers); pick another (unsrt, ieeetr, plain, plainnat,
-  apalike, ...) in the References tab -- it is remembered. If a text cites but has no reference list, the
-  build adds one (ACS) to its built copy, so you never get a bare `?`.
+  The default format is **ACS Guide** (the April 2025 revision of the *ACS Guide to Scholarly Communication*,
+  chapter 4.3): superscript numbers in the text, `(1)` labels in the list, authors as `Family, A. B.`, bold
+  year, italic volume, `DOI:` as a hyperlink; journal titles abbreviated only if all of them have an
+  abbreviation (the Guide wants one convention). NoorSuite writes the list itself (see `refstyle.py`; all
+  rules are in that one file). BibTeX formats (the older `achemso.bst`, unsrt, ieeetr, plain, plainnat,
+  apalike, ...) stay available in the References tab. The format belongs to the *document*; the mouse wheel
+  never changes it. If a text cites but has no reference list, the build adds one to its built copy, so you
+  never get a bare `?`.
 - **Library**: *Pick in Zotero...* (individual items), *Import library...* (whole library or a collection;
   needs Zotero's local API switched on), *Import file...* (a `.bib` or CSL-JSON export, e.g. Zotero's own
   *File -> Export Library...*, which does not need Better BibTeX).

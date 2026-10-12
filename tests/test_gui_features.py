@@ -19,15 +19,14 @@ def app():
 
 
 @pytest.fixture
-def win(app, monkeypatch):
+def win(app, monkeypatch, tmp_path):
     from NoorSuite import app as appmod
     # never touch the real ~/.scisuite_session.json (the user's live session)
     monkeypatch.setattr(appmod.SciSuiteWindow, "load_session", lambda self: None)
     monkeypatch.setattr(appmod.SciSuiteWindow, "save_session", lambda self: None)
     from NoorSuite import latex as _latex                      # never write the user's config
-    monkeypatch.setattr(_latex, "_config_path",
-                        lambda: __import__("pathlib").Path(os.environ.get("TMP", ".")) /
-                        "noorsuite_test_config.json")
+    monkeypatch.delenv("NOORSUITE_BIB_STYLE", raising=False)
+    monkeypatch.setattr(_latex, "_config_path", lambda: tmp_path / "config.json")   # per test
     w = appmod.SciSuiteWindow(port=55590 + os.getpid() % 300)
     w._autosave_timer.stop()
     yield w
@@ -356,7 +355,10 @@ def test_zotero_pick_stores_references_and_inserts_cite(win, monkeypatch):
     tab.refs.style_combo.setCurrentIndex(tab.refs.style_combo.findData("plainnat"))
     tab.refs._insert_bibliography()
     assert got[-1] == "\\bibliographystyle{plainnat}\n\\bibliography{references}"
-    tab.refs.style_combo.setCurrentIndex(0)                            # ACS is the default
+    tab.refs.style_combo.setCurrentIndex(0)                            # ACS Guide: native list
+    tab.refs._insert_bibliography()
+    assert got[-1] == "\\bibliography{references}"                  # just the marker
+    tab.refs.style_combo.setCurrentIndex(tab.refs.style_combo.findData("acs"))
     tab.refs._insert_bibliography()
     assert got[-1] == "\\bibliographystyle{achemso}\n\\bibliography{references}"
 
@@ -383,3 +385,40 @@ def test_second_compile_reuses_unchanged_figures(win):
     tab._pdf = ""
     third = build()
     assert "1 new / 1 cached" in third, third
+
+
+def test_format_combo_ignores_the_wheel_and_the_format_is_per_document(win):
+    from PyQt6.QtCore import QPoint, QPointF, Qt as _Qt
+    from PyQt6.QtGui import QWheelEvent
+    from NoorSuite import latex as _l
+    ids, dm, tab = _doc_win(win, 1)
+    combo = tab.refs.style_combo
+    start = combo.currentIndex()
+    assert combo.currentData() == "acs-guide"                         # ACS Guide by default
+    ev = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, -120),
+                     _Qt.MouseButton.NoButton, _Qt.KeyboardModifier.NoModifier,
+                     _Qt.ScrollPhase.NoScrollPhase, False)
+    for _ in range(8):
+        QApplication.sendEvent(combo, ev)
+    assert combo.currentIndex() == start                              # wheel never changes it
+    assert tab.model.bib_style == ""
+
+    # an explicit choice rewrites THIS document and is remembered with it
+    tab.editor.setPlainText(tab.source().replace(
+        r"\end{document}", "Text \\cite{k}.\n\\bibliographystyle{achemso}\n"
+        "\\bibliography{references}\n\\end{document}"))
+    tab.set_bib_style("unsrt")
+    assert tab.model.bib_style == "unsrt"
+    assert "\\bibliographystyle{unsrt}" in tab.source()
+    assert "natbib" not in tab.source() and tab.bib_style_id() == "unsrt"
+    assert combo.currentData() == "unsrt"                             # combo follows the text
+
+    # changing the user's default (or another document) does not reformat this one
+    _l.set_bib_style("alpha")
+    assert tab.bib_style_id() == "unsrt"
+    build_src, notes = _l.ensure_bibliography("\\begin{document}\\cite{k}\\end{document}",
+                                              tab.bib_style_id())
+    assert "\\bibliographystyle{unsrt}" in build_src
+    # editing the text to another style is picked up (the text is the truth)
+    tab.editor.setPlainText(tab.source().replace("{unsrt}", "{alpha}"))
+    assert tab.bib_style_id() == "alpha" and combo.currentData() == "alpha"

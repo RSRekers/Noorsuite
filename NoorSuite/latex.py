@@ -81,7 +81,10 @@ Write your text here. Insert a figure with \emph{Insert figure...} in the toolba
 # Reference-list formats. ``packages`` are the preamble lines the format needs (natbib for
 # author-year / superscript citations, achemso for the ACS journal look).
 BIB_STYLES = [
-    {"id": "acs", "label": "ACS - achemso.bst, superscript numbers (default)",
+    {"id": "acs-guide",
+     "label": "ACS Guide (2025 rev.) - numbers by occurrence, DOI links (default)",
+     "bst": "", "packages": [], "native": "acs"},
+    {"id": "acs", "label": "ACS - achemso.bst, superscript numbers (older layout)",
      "bst": "achemso", "packages": [r"\usepackage[super,sort&compress]{natbib}"]},
     {"id": "acs-notitle", "label": "ACS journal - achemso package, no article titles",
      "bst": "achemso", "packages": [r"\usepackage{achemso}"]},
@@ -101,7 +104,7 @@ BIB_STYLES = [
     {"id": "apalike", "label": "apalike - author-year (APA-like)", "bst": "apalike",
      "packages": []},
 ]
-DEFAULT_BIB_STYLE = "acs"
+DEFAULT_BIB_STYLE = "acs-guide"
 
 
 def bib_style(style_id: str | None = None) -> dict:
@@ -178,6 +181,67 @@ def ensure_bibliography(source: str, style_id: str | None = None):
         if m:
             source = source[:m.start()] + "\n".join(preamble) + "\n" + source[m.start():]
     return source, notes
+
+
+_MANAGED_PKG_RE = re.compile(
+    r"^[ \t]*\\usepackage(?:\[[^\]]*\])?\{(?:natbib|achemso)\}[ \t]*(?:%.*)?\n?", re.M)
+_BST_RE = re.compile(r"\\bibliographystyle\s*\{([^}]*)\}")
+
+
+def detect_bib_style(source: str, prefer: str = "") -> str:
+    r"""Style id of the document's own ``\bibliographystyle{...}`` (``""`` if it has none).
+    Several presets share ``achemso.bst``; ``prefer`` (the stored choice) breaks the tie, else the
+    ``achemso`` package in the preamble does."""
+    code = "\n".join(_COMMENT_RE.sub("", ln) for ln in source.splitlines())
+    m = _BST_RE.search(code)
+    if m is None:
+        return ""
+    hits = [s["id"] for s in BIB_STYLES if s["bst"] == m.group(1).strip()]
+    if not hits:
+        return ""
+    if prefer in hits:
+        return prefer
+    if "acs-notitle" in hits and package_loaded(code, "achemso") \
+            and not re.search(r"\\usepackage(?:\[[^\]]*\])?\{natbib\}", code):
+        return "acs-notitle"
+    return hits[0]
+
+
+def apply_bib_style(source: str, style_id: str) -> str:
+    r"""``source`` rewritten for ``style_id``: the natbib / achemso package lines are replaced by
+    the format's own, and an existing ``\bibliographystyle{...}`` is switched. Nothing else
+    is touched; a document without a reference list just gets the preamble lines."""
+    st = bib_style(style_id)
+    if st.get("native"):
+        out = _MANAGED_PKG_RE.sub("", source)
+        return re.sub(r"^[ \t]*\\bibliographystyle\s*\{[^}]*\}[ \t]*\n?", "", out, flags=re.M)
+    if package_loaded(source, "achemso") and re.search(
+            r"\\documentclass(?:\[[^\]]*\])?\{achemso\}", source):
+        return _BST_RE.sub(lambda m: f"\\bibliographystyle{{{st['bst']}}}", source)
+    out = _MANAGED_PKG_RE.sub("", source)
+    pk = "\n".join(st["packages"])
+    m = re.search(r"\\begin\{document\}", out)
+    if pk and m:
+        out = out[:m.start()] + pk + "\n" + out[m.start():]
+    return _BST_RE.sub(lambda m: f"\\bibliographystyle{{{st['bst']}}}", out)
+
+
+def prepare_build_source(source: str, records, style_id: str | None = None):
+    r"""The text that is actually compiled, for the document's reference format:
+    ``(build_source, notes, info)`` with ``info = {"cited": [keys in order], "undefined":
+    [keys], "style": style}``. Native formats number the citations and write the list
+    themselves (:mod:`NoorSuite.refstyle`); BibTeX formats get ``ensure_bibliography``."""
+    from . import zotero
+    st = bib_style(style_id)
+    if st.get("native"):
+        from . import refstyle
+        src, cited, undefined, notes = refstyle.number_citations(source, records)
+        return src, notes, {"cited": cited, "undefined": undefined, "style": st}
+    src, notes = ensure_bibliography(source, style_id)
+    known = {r["key"] for r in records}
+    cited = zotero.cite_keys(source)
+    return src, notes, {"cited": cited, "undefined": [k for k in cited if k not in known],
+                        "style": st}
 
 
 def article_template(title: str = "Title", style_id: str | None = None) -> str:
