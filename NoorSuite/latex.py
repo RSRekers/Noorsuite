@@ -101,8 +101,8 @@ BIB_STYLES = [
      "bst": "abbrvnat", "packages": [r"\usepackage{natbib}"]},
     {"id": "unsrtnat", "label": "unsrtnat - author-year, citation order (natbib)",
      "bst": "unsrtnat", "packages": [r"\usepackage{natbib}"]},
-    {"id": "apalike", "label": "apalike - author-year (APA-like)", "bst": "apalike",
-     "packages": [r"\usepackage{apalike}"]},
+    {"id": "apalike", "label": "apalike - author-year (APA-like, natbib)", "bst": "apalike",
+     "packages": [r"\usepackage{natbib}"]},
 ]
 DEFAULT_BIB_STYLE = "acs-guide"
 
@@ -158,6 +158,14 @@ def ensure_bibliography(source: str, style_id: str | None = None):
     style = bib_style(style_id)
     has_list = re.search(r"\\bibliography\s*\{|\\begin\{thebibliography\}|\\printbibliography",
                          code)
+    if re.search(r"\\bibliography\s*\{", code) and not _BST_RE.search(code):
+        m = re.search(r"^[ \t]*\\bibliography\s*\{", source, re.M)    # marker without a style
+        if m:
+            source = (source[:m.start()] + f"\\bibliographystyle{{{style['bst']}}}\n"
+                      + source[m.start():])
+            notes.append(f"the reference list had no \\bibliographystyle: added "
+                         f"'{style['bst']}' to the built copy")
+            code = "\n".join(_COMMENT_RE.sub("", ln) for ln in source.splitlines())
     if not has_list:
         for line in style["packages"]:
             name = re.search(r"\{([^}]*)\}\s*$", line).group(1)
@@ -183,9 +191,63 @@ def ensure_bibliography(source: str, style_id: str | None = None):
     return source, notes
 
 
-_MANAGED_PKG_RE = re.compile(
-    r"^[ \t]*\\usepackage(?:\[[^\]]*\])?\{(?:natbib|achemso)\}[ \t]*(?:%.*)?\n?", re.M)
+# Packages that belong to a citation format. They change what \cite and the reference list
+# look like and several clash with each other (apalike + natbib: "\bibhang already defined"),
+# so switching formats must remove the previous format's packages -- not just natbib.
+MANAGED_PACKAGES = ("natbib", "achemso", "apalike", "apacite")
 _BST_RE = re.compile(r"\\bibliographystyle\s*\{([^}]*)\}")
+_USEPKG_RE = re.compile(
+    r"^(?P<ind>[ \t]*)\\usepackage(?P<opt>\[[^\]]*\])?\{(?P<names>[^}]*)\}(?P<tail>[ \t]*(?:%.*)?)\n?",
+    re.M)
+
+
+def strip_packages(source: str, names) -> str:
+    r"""``source`` without ``\usepackage`` entries for ``names`` (options and comma lists
+    handled: ``\usepackage{amsmath,natbib}`` keeps amsmath). Commented lines are left."""
+    names = set(names)
+
+    def fix(m):
+        pkgs = [p.strip() for p in m.group("names").split(",") if p.strip()]
+        keep = [p for p in pkgs if p not in names]
+        if len(keep) == len(pkgs):
+            return m.group(0)
+        if not keep:
+            return ""
+        opt = m.group("opt") or ""
+        return f"{m.group('ind')}\\usepackage{opt}{{{','.join(keep)}}}{m.group('tail')}\n"
+    return _USEPKG_RE.sub(fix, source)
+
+
+def _insert_before_begin_document(source: str, lines) -> str:
+    m = re.search(r"\\begin\{document\}", source)
+    if not m or not lines:
+        return source
+    return source[:m.start()] + "\n".join(lines) + "\n" + source[m.start():]
+
+
+def normalize_for_style(source: str, style_id: str | None = None):
+    r"""The build copy's packages made consistent with the document's format: packages of
+    *other* formats are dropped, the format's own are added when missing. A natbib the
+    document loads itself is kept (it may carry the user's options). Returns
+    ``(source, notes)``; the user's text is never modified, only the compiled copy."""
+    st = bib_style(style_id)
+    needed = {re.search(r"\{([^}]*)\}\s*$", p).group(1) for p in st["packages"]}
+    if re.search(r"\\documentclass(?:\[[^\]]*\])?\{achemso\}", source):
+        return source, []                         # the ACS class brings its own citations
+    present = {n for n in MANAGED_PACKAGES if package_loaded(source, n)}
+    drop = present - needed
+    notes = []
+    out = source
+    if drop:
+        out = strip_packages(out, drop)
+        notes.append("packages of another citation format were left in the text "
+                     f"({', '.join(sorted(drop))}) - removed from the built copy; "
+                     "choose the format in References to clean the document itself")
+    add = [p for p in st["packages"]
+           if re.search(r"\{([^}]*)\}\s*$", p).group(1) not in present]
+    if add:
+        out = _insert_before_begin_document(out, add)
+    return out, notes
 
 
 def detect_bib_style(source: str, prefer: str = "") -> str:
@@ -212,32 +274,48 @@ def apply_bib_style(source: str, style_id: str) -> str:
     the format's own, and an existing ``\bibliographystyle{...}`` is switched. Nothing else
     is touched; a document without a reference list just gets the preamble lines."""
     st = bib_style(style_id)
-    if st.get("native"):
-        out = _MANAGED_PKG_RE.sub("", source)
-        return re.sub(r"^[ \t]*\\bibliographystyle\s*\{[^}]*\}[ \t]*\n?", "", out, flags=re.M)
-    if package_loaded(source, "achemso") and re.search(
-            r"\\documentclass(?:\[[^\]]*\])?\{achemso\}", source):
-        return _BST_RE.sub(lambda m: f"\\bibliographystyle{{{st['bst']}}}", source)
-    out = _MANAGED_PKG_RE.sub("", source)
-    pk = "\n".join(st["packages"])
-    m = re.search(r"\\begin\{document\}", out)
-    if pk and m:
-        out = out[:m.start()] + pk + "\n" + out[m.start():]
-    return _BST_RE.sub(lambda m: f"\\bibliographystyle{{{st['bst']}}}", out)
+    if re.search(r"\\documentclass(?:\[[^\]]*\])?\{achemso\}", source):
+        return _BST_RE.sub(lambda m: f"\\bibliographystyle{{{st['bst']}}}", source) \
+            if not st.get("native") else source
+    out = strip_packages(source, MANAGED_PACKAGES)
+    out = _insert_before_begin_document(out, st["packages"])
+    if st.get("native"):                   # NoorSuite writes the list: no BibTeX style line
+        return re.sub(r"^[ \t]*\\bibliographystyle\s*\{[^}]*\}[ \t]*\n?", "", out,
+                      flags=re.M)
+    line = f"\\bibliographystyle{{{st['bst']}}}"
+    if _BST_RE.search(out):
+        return _BST_RE.sub(lambda m: line, out)
+    m = re.search(r"^[ \t]*\\bibliography\s*\{", out, re.M)      # keep marker + add the style
+    return out[:m.start()] + line + "\n" + out[m.start():] if m else out
 
 
-def prepare_build_source(source: str, records, style_id: str | None = None):
+NUMERIC_BST_ONLY = {"plain", "unsrt", "ieeetr", "abbrv", "alpha", "acs", "acs-notitle"}
+
+
+def prepare_build_source(source: str, records, style_id: str | None = None,
+                         cite_mode: str = "superscript"):
     r"""The text that is actually compiled, for the document's reference format:
     ``(build_source, notes, info)`` with ``info = {"cited": [keys in order], "undefined":
     [keys], "style": style}``. Native formats number the citations and write the list
     themselves (:mod:`NoorSuite.refstyle`); BibTeX formats get ``ensure_bibliography``."""
     from . import zotero
     st = bib_style(style_id)
+    source, pk_notes = normalize_for_style(source, style_id)
     if st.get("native"):
         from . import refstyle
-        src, cited, undefined, notes = refstyle.number_citations(source, records)
-        return src, notes, {"cited": cited, "undefined": undefined, "style": st}
+        src, cited, undefined, notes = refstyle.number_citations(
+            source, records, cite_mode=cite_mode)
+        return src, pk_notes + notes, {"cited": cited, "undefined": undefined, "style": st}
+    conv_notes = []
+    if st["id"] in NUMERIC_BST_ONLY and re.search(r"\\cite[pt]\*?\b", source):
+        # numbered BibTeX formats cannot print author names, and natbib (which would define
+        # \citep / \citet) clashes with several of their .bst files: plain \cite instead
+        source = re.sub(r"\\cite[pt]\*?(?=\s*(?:\[|\{))", r"\\cite", source)
+        conv_notes.append(r"\citep / \citet need an author-year format; this numbered format "
+                          r"prints them as \cite in the built copy")
     src, notes = ensure_bibliography(source, style_id)
+    notes = conv_notes + notes
+    notes = pk_notes + notes
     known = {r["key"] for r in records}
     cited = zotero.cite_keys(source)
     return src, notes, {"cited": cited, "undefined": [k for k in cited if k not in known],
@@ -397,8 +475,12 @@ def build_pdf(workdir, engine=None, timeout=300) -> BuildResult:
         try:
             res = subprocess.run(cmd, cwd=wd, capture_output=True, text=True, timeout=timeout,
                                  encoding="utf-8", errors="replace", **flags)
-            if res.returncode != 0 and "--only-cached" in cmd:
-                cmd = [c for c in cmd if c != "--only-cached"]       # package not cached yet
+            text = res.stdout + res.stderr
+            # --only-cached never downloads: a package -- or a BibTeX style file such as
+            # ieeetr.bst / plainnat.bst -- that is not cached yet makes the run fail or, worse,
+            # "succeed" with every citation printed as "?". Retry online in both cases.
+            if "--only-cached" in cmd and (res.returncode != 0 or "issued by BibTeX" in text):
+                cmd = [c for c in cmd if c != "--only-cached"]
                 res = subprocess.run(cmd, cwd=wd, capture_output=True, text=True,
                                      timeout=timeout, encoding="utf-8", errors="replace",
                                      **flags)

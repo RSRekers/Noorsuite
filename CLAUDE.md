@@ -561,6 +561,16 @@ title/x_label/y_label + trace labels).
   `*`), `to_bibtex()` writes entries, `cite_keys()` scans `\cite*`. Records persist in
   `ProjectModel.references` (optional key); `DocumentTab.compile` writes `references.bib` for the cited
   keys only; `latex_build` does the same headless. IPC: `references` / `list_references`.
+- **Switching formats must be reversible** (regression: apalike.sty + natbib = "\bibhang already
+  defined", every later format failed). `latex.MANAGED_PACKAGES` is the set of citation packages
+  (`natbib, achemso, apalike, apacite`); `apply_bib_style` (explicit switch) replaces them with the preset's,
+  fixes/inserts the `\bibliographystyle` line before the `\bibliography{..}` marker, and
+  `normalize_for_style` does the same non-destructively for the build copy. The `apalike` preset is natbib +
+  `apalike.bst` (never `apalike.sty`). Numeric BibTeX presets (`NUMERIC_BST_ONLY`) turn `\citep/\citet` into
+  `\cite` *before* `ensure_bibliography`, otherwise natbib gets added and breaks `ieeetr.bst`. tectonic's
+  `--only-cached` makes BibTeX print `?` for a not-yet-downloaded `.bst` (exit code 0!): `build_pdf` retries
+  online when the output says "issued by BibTeX". `DocumentModel.cite_mode` (`refstyle.CITE_MODES`) picks
+  superscript / `(1)` / `[1]`. Test with a chain of switches (`test_every_format_builds_and_...`).
 - **Bibliography format**: `latex.BIB_STYLES` (id, label, bst, preamble packages; `native` marks formats
   NoorSuite writes itself). Default `acs-guide` = `refstyle.number_citations`: `\cite*` -> superscript
   numbers by first appearance (runs of 3+ as `1--3`), `\bibliography{..}` marker -> a `thebibliography`

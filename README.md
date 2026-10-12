@@ -126,7 +126,10 @@ the `.tex` source on the left, the compiled PDF on the right. Figures are NoorSh
   abbreviation (the Guide wants one convention). NoorSuite writes the list itself (see `refstyle.py`; all
   rules are in that one file). BibTeX formats (the older `achemso.bst`, unsrt, ieeetr, plain, plainnat,
   apalike, ...) stay available in the References tab. The format belongs to the *document*; the mouse wheel
-  never changes it. If a text cites but has no reference list, the build adds one to its built copy, so you
+  never changes it. Switching format is fully reversible: the document's own natbib / achemso / apalike /
+  apacite lines are replaced (not accumulated), a missing `\bibliographystyle` is put back, and the build
+  copy ignores leftovers of another format, so APA -> ACS -> APA -> ... always compiles. In-text numbers
+  can be superscript (default), italic in parentheses `(1)` or `[1]`; both are ACS Guide variants. If a text cites but has no reference list, the build adds one to its built copy, so you
   never get a bare `?`.
 - **Library**: the *Zotero library* tab of the References panel searches your whole library live (author,
   title, year, citation key) and *Add & cite* stores the item in the project and inserts `\cite{key}`. It

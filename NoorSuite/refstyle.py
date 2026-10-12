@@ -175,7 +175,21 @@ def _range_text(nums) -> str:
     return ",".join(out)
 
 
-def number_citations(source: str, records, max_authors=None, abbreviate=None):
+CITE_MODES = {"superscript": "Superscript numbers",
+              "parentheses": "Italic numbers in parentheses (1)",
+              "brackets": "Numbers in square brackets [1]"}
+
+
+def _wrap_numbers(text: str, mode: str) -> str:
+    if mode == "parentheses":
+        return rf"(\textit{{{text}}})"
+    if mode == "brackets":
+        return f"[{text}]"
+    return rf"\textsuperscript{{{text}}}"
+
+
+def number_citations(source: str, records, max_authors=None, abbreviate=None,
+                     cite_mode: str = "superscript"):
     r"""``(new_source, cited_keys, undefined, notes)``.
 
     ``\cite``-family commands become superscript numbers by order of first appearance, the
@@ -217,7 +231,8 @@ def number_citations(source: str, records, max_authors=None, abbreviate=None):
             if cmd == "citeyear":
                 rec = by_key.get(keys[0]) if keys else None
                 return esc(rec.get("year", "")) if rec else "?"
-            sup = rf"\textsuperscript{{{_range_text(nums)}}}" if nums else r"\textsuperscript{?}"
+            sup = _wrap_numbers(_range_text(nums), cite_mode) if nums \
+                else _wrap_numbers("?", cite_mode)
             if cmd == "citet" and keys and keys[0] in by_key and by_key[keys[0]].get("authors"):
                 fam = by_key[keys[0]]["authors"][0][0].rstrip("*")
                 return esc(fam) + (" et al." if len(by_key[keys[0]]["authors"]) > 1 else "") + sup

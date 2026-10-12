@@ -879,22 +879,25 @@ class DocumentModel:
     """A LaTeX document stored in the project: ``source`` is the ``.tex`` text; figures are
     sheets referenced with ``\noorsheet{<sheet id>}`` (see :mod:`NoorSuite.latex`)."""
 
-    def __init__(self, name="Document", source="", doc_id=None, bib_style=""):
+    def __init__(self, name="Document", source="", doc_id=None, bib_style="",
+                 cite_mode="superscript"):
         self.doc_id = doc_id or _new_id()
         self.name = name
         self.source = source
         # reference-list format (latex.BIB_STYLES id) for *this* document; "" -> the user's
         # default. Kept per document so changing it elsewhere never reformats this one.
         self.bib_style = bib_style
+        # how citation numbers appear in the text (refstyle.CITE_MODES), native formats only
+        self.cite_mode = cite_mode
 
     def to_dict(self) -> dict:
         return {"doc_id": self.doc_id, "name": self.name, "source": self.source,
-                "bib_style": self.bib_style}
+                "bib_style": self.bib_style, "cite_mode": self.cite_mode}
 
     @classmethod
     def from_dict(cls, d: dict) -> "DocumentModel":
         return cls(d.get("name", "Document"), d.get("source", ""), d.get("doc_id"),
-                   d.get("bib_style", ""))
+                   d.get("bib_style", ""), d.get("cite_mode", "superscript"))
 
 
 class ProjectModel:

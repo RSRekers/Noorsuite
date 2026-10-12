@@ -84,7 +84,8 @@ def main(argv) -> int:
     try:
         style_id = latex.detect_bib_style(dm.source, getattr(dm, "bib_style", "")) \
             or getattr(dm, "bib_style", "") or None
-        source, notes, info = latex.prepare_build_source(dm.source, pm.references, style_id)
+        source, notes, info = latex.prepare_build_source(
+            dm.source, pm.references, style_id, getattr(dm, "cite_mode", "superscript"))
         for n in notes:
             print("note:", n, file=sys.stderr)
         for k in info["undefined"]:

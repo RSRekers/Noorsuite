@@ -434,6 +434,7 @@ class ReferencePanel(QWidget):
     zoteroAddRequested = pyqtSignal(list, bool)    # records, also insert \cite?
     styleChosen = pyqtSignal(str)            # user picked a format for THIS document
     makeDefaultRequested = pyqtSignal(str)
+    citeModeChosen = pyqtSignal(str)         # how numbers look in the text (this document)
 
     def __init__(self, host, parent=None):
         super().__init__(parent)
@@ -533,6 +534,14 @@ class ReferencePanel(QWidget):
             lambda _i: self.styleChosen.emit(self.style_combo.currentData()))
         lay.addWidget(QLabel("Citation / reference list format of this document:"))
         lay.addWidget(self.style_combo)
+        from .refstyle import CITE_MODES
+        self.cite_mode_combo = _NoWheelComboBox()
+        for mode, text in CITE_MODES.items():
+            self.cite_mode_combo.addItem(text, mode)
+        self.cite_mode_combo.activated.connect(
+            lambda _i: self.citeModeChosen.emit(self.cite_mode_combo.currentData()))
+        lay.addWidget(QLabel("Numbers in the text (ACS Guide allows either):"))
+        lay.addWidget(self.cite_mode_combo)
         self.make_default_btn = QPushButton("Use as default for new documents")
         self.make_default_btn.clicked.connect(
             lambda: self.makeDefaultRequested.emit(self.style_combo.currentData()))
@@ -722,6 +731,9 @@ class DocumentTab(QWidget):
         self.refs.ensurePackage.connect(self._ensure_package_line)
         self.refs.importFileRequested.connect(self.import_reference_file)
         self.refs.styleChosen.connect(self.set_bib_style)
+        self.refs.citeModeChosen.connect(self._set_cite_mode)
+        self.refs.cite_mode_combo.setCurrentIndex(
+            max(0, self.refs.cite_mode_combo.findData(model.cite_mode)))
         self.refs.makeDefaultRequested.connect(self._make_default_style)
         self.refs.importLibraryRequested.connect(self.import_zotero_library)
         self.refs.zoteroSearchRequested.connect(self.search_zotero)
@@ -818,6 +830,12 @@ class DocumentTab(QWidget):
             cur.insertText(new)
             cur.endEditBlock()
         self.status_label.setText(f"  format: {latex.bib_style(style_id)['label']}")
+        self.contentChanged.emit()
+        if self.auto_check.isChecked():
+            self._source_timer.start(self.AUTO_DELAY_MS)
+
+    def _set_cite_mode(self, mode: str):
+        self.model.cite_mode = mode
         self.contentChanged.emit()
         if self.auto_check.isChecked():
             self._source_timer.start(self.AUTO_DELAY_MS)
@@ -1062,7 +1080,8 @@ class DocumentTab(QWidget):
         t0 = time.time()
         style_id = self.bib_style_id()
         recs = self.host.document_references()
-        build_src, bib_notes, info = latex.prepare_build_source(self.source(), recs, style_id)
+        build_src, bib_notes, info = latex.prepare_build_source(
+            self.source(), recs, style_id, self.model.cite_mode)
         latex.prepare_workdir(self.workdir, build_src)
         # references.bib from the stored items (used by the BibTeX formats)
         (self.workdir / "references.bib").write_text(

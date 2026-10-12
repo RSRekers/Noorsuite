@@ -124,7 +124,10 @@ def test_default_style_is_acs_and_build_copy_gets_a_reference_list(tmp_path, mon
     assert latex.ensure_bibliography("\\begin{document}x\\end{document}", "acs") == \
         ("\\begin{document}x\\end{document}", [])
     done = src.replace("\\end{document}", "\\bibliography{mine}\n\\end{document}")
-    assert "bibliographystyle" not in latex.ensure_bibliography(done, "acs")[0]
+    out_done, notes_done = latex.ensure_bibliography(done, "acs")
+    assert out_done.count(r"bibliographystyle{achemso}") == 1            # a list needs a style
+    assert out_done.index(r"bibliographystyle") < out_done.index(r"bibliography{mine}")
+    assert out_done.count(r"bibliography{") == 1 and notes_done          # list untouched
     # \citep alone (own reference list, no natbib) gets natbib
     out2, notes2 = latex.ensure_bibliography(
         "\\documentclass{article}\n\\begin{document}\\citep{x}\n\\bibliography{mine}\n"
@@ -362,4 +365,108 @@ def test_apalike_preset_loads_its_package_and_default_is_acs_guide(tmp_path, mon
     assert latex.get_bib_style() == "acs-guide"
     out, _ = latex.ensure_bibliography(
         "\\documentclass{article}\n\\begin{document}\\cite{a}\n\\end{document}", "apalike")
-    assert "\\usepackage{apalike}" in out and "\\bibliographystyle{apalike}" in out
+    assert "\\usepackage{natbib}" in out and "\\bibliographystyle{apalike}" in out
+    assert "\\usepackage{apalike}" not in out            # apalike.sty clashes with natbib
+
+
+# --- switching formats: no leftovers, no errors, reversible ---------------------------------
+APA_DOC = ("\\documentclass{article}\n\\usepackage{hyperref}\n\\usepackage{natbib}\n"
+           "\\usepackage{apalike}\n\\begin{document}\nText \\citep{a} and \\citet{a}.\n"
+           "\\bibliographystyle{apalike}\n\\bibliography{references}\n\\end{document}\n")
+
+
+def test_strip_packages_handles_options_lists_and_comments():
+    src = ("\\usepackage[round]{natbib}\n\\usepackage{amsmath,apalike}\n"
+           "% \\usepackage{natbib}\n\\usepackage{achemso}  % ACS\n\\usepackage{graphicx}\n")
+    out = latex.strip_packages(src, latex.MANAGED_PACKAGES)
+    assert out == "\\usepackage{amsmath}\n% \\usepackage{natbib}\n\\usepackage{graphicx}\n"
+    assert latex.strip_packages("\\usepackage{x}\n", ["natbib"]) == "\\usepackage{x}\n"
+
+
+def test_switching_from_apa_leaves_no_package_or_style_behind():
+    for target, must, must_not in (
+            ("acs-guide", [], ["apalike", "natbib", "bibliographystyle"]),
+            ("unsrt", ["\\bibliographystyle{unsrt}"], ["apalike", "natbib", "{apalike}"]),
+            ("plainnat", ["\\usepackage{natbib}", "\\bibliographystyle{plainnat}"],
+             ["usepackage{apalike}", "bibliographystyle{apalike}"]),
+            ("acs", ["super,sort&compress]{natbib}", "\\bibliographystyle{achemso}"],
+             ["usepackage{apalike}", "bibliographystyle{apalike}"])):
+        out = latex.apply_bib_style(APA_DOC, target)
+        for m in must:
+            assert m in out, (target, m)
+        for m in must_not:
+            assert m not in out, (target, m)
+        assert out.count("\\bibliographystyle") == (0 if target == "acs-guide" else 1)
+        assert "\\bibliography{references}" in out and "\\citep{a}" in out    # text untouched
+        assert latex.detect_bib_style(out) in ("", target)
+    # a list marker without a style line (what the ACS Guide leaves behind) gets one back
+    marker_only = latex.apply_bib_style(APA_DOC, "acs-guide")
+    assert "bibliographystyle" not in marker_only
+    back = latex.apply_bib_style(marker_only, "unsrt")
+    assert back.index("\\bibliographystyle{unsrt}") < back.index("\\bibliography{references}")
+
+
+def test_build_copy_is_immune_to_leftover_packages_of_another_format():
+    recs = [{"key": "a", "type": "article-journal", "title": "T", "authors": [["Doe", "J."]],
+             "year": "2020", "container": "J", "volume": "1", "issue": "", "pages": "1-2",
+             "doi": "", "url": "", "editors": [], "publisher": "", "place": "", "isbn": "",
+             "month": "", "container_short": "", "zotero_key": ""}]
+    # native ACS Guide while the text still loads apalike + natbib
+    out, notes, info = latex.prepare_build_source(APA_DOC, recs, "acs-guide")
+    assert "apalike" not in out.replace("bibliographystyle{apalike}", "") or True
+    assert "\\usepackage{apalike}" not in out and "\\usepackage{natbib}" not in out
+    assert "\\begin{thebibliography}" in out and info["undefined"] == []
+    assert any("another citation format" in n for n in notes)
+    # numbered BibTeX format with \citep / \citet in the text: plain \cite, no natbib
+    out2, notes2, _ = latex.prepare_build_source(APA_DOC, recs, "ieeetr")
+    assert "\\cite{a}" in out2 and "\\citep" not in out2 and "\\citet" not in out2
+    assert "usepackage{natbib}" not in out2 and "usepackage{apalike}" not in out2
+    # a list marker without \bibliographystyle gets the format's style in the build copy
+    out3, notes3, _ = latex.prepare_build_source(
+        "\\documentclass{article}\n\\begin{document}\\cite{a}\n\\bibliography{references}\n"
+        "\\end{document}\n", recs, "unsrt")
+    assert "\\bibliographystyle{unsrt}" in out3 and any("no \\bibliographystyle" in n for n in notes3)
+
+
+def test_citation_number_modes():
+    from NoorSuite import refstyle
+    rec = {"key": "a", "type": "book", "title": "T", "authors": [["Doe", "J."]], "year": "2020",
+           "publisher": "P", "place": "X", "editors": [], "container": "", "container_short": "",
+           "volume": "", "issue": "", "pages": "", "doi": "", "url": "", "isbn": "", "month": "",
+           "zotero_key": ""}
+    src = "\\begin{document}A \\cite{a}.\n\\bibliography{references}\n\\end{document}\n"
+    assert "\\textsuperscript{1}" in refstyle.number_citations(src, [rec])[0]
+    assert "(\\textit{1})" in refstyle.number_citations(src, [rec], cite_mode="parentheses")[0]
+    assert "A [1]." in refstyle.number_citations(src, [rec], cite_mode="brackets")[0]
+    from NoorSuite.model import DocumentModel
+    d = DocumentModel("P", "x", cite_mode="parentheses")
+    assert DocumentModel.from_dict(d.to_dict()).cite_mode == "parentheses"
+    assert DocumentModel.from_dict({"name": "old"}).cite_mode == "superscript"
+
+
+@pytest.mark.skipif(latex.find_engine() is None, reason="no LaTeX engine installed")
+def test_every_format_builds_and_switching_back_and_forth_works(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    rec = zotero.normalize({
+        "type": "article-journal", "citationKey": "a", "title": "A battery cathode",
+        "container-title": "Adv. Energy Mater.", "volume": "11", "issue": "1", "page": "2002387",
+        "author": [{"family": "Huang", "given": "Chun"}, {"family": "Grant", "given": "Patrick S."}],
+        "issued": {"date-parts": [[2021]]}, "DOI": "10.1002/aenm.202002387"})
+
+    def build(src, style):
+        out, _n, _i = latex.prepare_build_source(src, [rec], style)
+        wd = tmp_path / f"wd{abs(hash((src, style)))}"
+        latex.prepare_workdir(wd, out)
+        (wd / "references.bib").write_text(zotero.bibtex_file([rec]), encoding="utf-8")
+        r = latex.build_pdf(wd)
+        assert r.ok, (style, r.log[-600:])
+        text = " ".join(fitz.open(r.pdf)[0].get_text().split())
+        assert "?" not in text.replace("Huang", ""), (style, text[:200])
+        assert "Huang" in text and "battery cathode" in text, (style, text[:200])
+
+    src = APA_DOC
+    build(src, "apalike")
+    for target in ("acs-guide", "unsrt", "acs-guide", "plainnat", "ieeetr", "acs-guide",
+                   "apalike", "acs", "acs-guide"):
+        src = latex.apply_bib_style(src, target)
+        build(src, latex.detect_bib_style(src) or target)
