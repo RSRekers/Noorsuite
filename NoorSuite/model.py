@@ -903,6 +903,7 @@ class ProjectModel:
         self.tree: list[dict] = []          # folder/sheet organization (raw nodes)
         self.colormaps: list[ColorMap] = []  # project-wide colormap library
         self.documents: list[DocumentModel] = []   # LaTeX documents (optional key)
+        self.references: list[dict] = []           # bibliography records (see zotero.normalize)
         self.active_sheet_id = ""
 
     def to_dict(self) -> dict:
@@ -915,6 +916,7 @@ class ProjectModel:
             "tree": self.tree,
             "colormaps": [c.to_dict() for c in self.colormaps],
             "documents": [dm.to_dict() for dm in self.documents],
+            "references": [dict(r) for r in self.references],
         }
 
     @classmethod
@@ -933,6 +935,7 @@ class ProjectModel:
         p.tree = d.get("tree", [])
         p.colormaps = [ColorMap.from_dict(c) for c in d.get("colormaps", [])]
         p.documents = [DocumentModel.from_dict(x) for x in d.get("documents", [])]
+        p.references = [dict(r) for r in d.get("references", []) if r.get("key")]
         return p
 
     def to_json(self, indent=2) -> str:

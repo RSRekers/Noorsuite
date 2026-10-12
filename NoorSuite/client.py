@@ -24,6 +24,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_DOCUMENT,
                        ACTION_GET_DATA, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
+                       ACTION_LIST_REFERENCES, ACTION_REFERENCES,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_REMOVE_DATA,
@@ -469,6 +470,26 @@ class SciSuiteClient:
         if resp.get("status") != "success":
             raise KeyError(resp.get("message", f"no document matching {key!r}"))
         return resp["source"]
+
+    def push_references(self, items) -> list:
+        """Add bibliography records to the project (stored with it, so documents cite and
+        compile offline). ``items`` are Zotero / CSL-JSON dicts; returns their cite keys."""
+        from .zotero import normalize
+        records = [r for r in (normalize(i) for i in items) if r]
+        self._ipc.send({"action": ACTION_REFERENCES, "items": records})
+        return [r["key"] for r in records]
+
+    def zotero_pick(self) -> list:
+        """Open Zotero's picker (needs Zotero + Better BibTeX running, no library export),
+        store the chosen items as references, return their cite keys -- use them as
+        ``\\cite{key}``. The popup appears in Zotero and waits for the user."""
+        from .zotero import cayw_pick
+        return self.push_references(cayw_pick())
+
+    def list_references(self) -> pd.DataFrame:
+        resp = self._ipc.send({"action": ACTION_LIST_REFERENCES}) or {}
+        return pd.DataFrame(resp.get("references", []),
+                            columns=["key", "label", "zotero_key"])
 
     def figure_snippet(self, sheet, caption="", label="", width="") -> str:
         """A LaTeX ``figure`` environment that includes ``sheet`` (id or name) via

@@ -42,3 +42,79 @@ def fuzzy_score(query: str, text: str) -> float:
         last = idx + 1
     spread = (prev - first + 1) or 1
     return 1.0 + best_streak / len(q) - (spread - len(q)) / (spread + 1)
+
+
+# --------------------------------------------------------------------------- smart search
+import re as _re
+
+_QUERY_RE = _re.compile(r'(-?)(?:"([^"]+)"|(\S+))')
+_WORD_RE = _re.compile(r"\w+", _re.UNICODE)
+
+
+def parse_query(query: str):
+    """Split a search string into ``(include, exclude)`` lists of ``(scope, text)``.
+    Tokens are whitespace separated; ``"quoted phrases"`` stay together; a leading ``-``
+    excludes; ``#tag`` / ``tag:x`` restrict to tags, ``name:x`` to names, ``note:x`` to content."""
+    inc, exc = [], []
+    for neg, phrase, word in _QUERY_RE.findall(query or ""):
+        text = (phrase or word).strip()
+        scope = "any"
+        if not phrase:
+            if text.startswith("#") and len(text) > 1:
+                scope, text = "tags", text[1:]
+            else:
+                for prefix, sc in (("tag:", "tags"), ("name:", "name"), ("note:", "content")):
+                    if text.lower().startswith(prefix) and len(text) > len(prefix):
+                        scope, text = sc, text[len(prefix):]
+                        break
+        if text:
+            (exc if neg else inc).append((scope, text.lower()))
+    return inc, exc
+
+
+def _token_score(token: str, scope: str, fields, allow_subsequence=True) -> float:
+    """Best score of ``token`` over ``fields`` = ``[(kind, weight, text)]``:
+    whole word 3.0, word prefix 2.4, substring 1.5, abbreviation inside one word of a
+    name/tag 0.8 (all x field weight). Content fields never match by subsequence."""
+    best = 0.0
+    wanted = {"tags": "tags", "name": "name", "content": "content"}.get(scope)
+    for kind, weight, text in fields:
+        if wanted is not None and kind != wanted:
+            continue
+        low = (text or "").lower()
+        if not low:
+            continue
+        words = _WORD_RE.findall(low)
+        if token in words:
+            s = 3.0
+        elif any(w.startswith(token) for w in words):
+            s = 2.4
+        elif token in low:
+            s = 1.5
+        elif (allow_subsequence and kind in ("name", "tags") and len(token) >= 3
+              and any(w[0] == token[0] and fuzzy_match(token, w) for w in words)):
+            s = 0.8
+        else:
+            continue
+        best = max(best, s * weight)
+    return best
+
+
+def smart_score(query: str, fields) -> float:
+    """Specific, ranked matching for the search boxes. ``fields`` is a list of
+    ``(kind, weight, text)`` with kind ``"name"`` / ``"tags"`` / ``"content"``. Every token
+    of the query must match (AND); excluded tokens (``-word``) must not. Returns 0.0 for
+    no match, 1.0 for an empty query, else a score (higher = better)."""
+    inc, exc = parse_query(query)
+    if not inc and not exc:
+        return 1.0
+    total = 0.0
+    for scope, tok in inc:
+        s = _token_score(tok, scope, fields)
+        if s <= 0:
+            return 0.0
+        total += s
+    for scope, tok in exc:
+        if _token_score(tok, scope, fields, allow_subsequence=False) > 0:
+            return 0.0
+    return total or 1.0

@@ -30,14 +30,17 @@ ACTION_CLEAR = "clear"
 ACTION_ORGANIZE = "organize"   # name / tag / annotate / file into folders
 ACTION_DOCUMENT = "document"           # create / replace / append a LaTeX document
 ACTION_LIST_DOCUMENTS = "list_documents"
+ACTION_REFERENCES = "references"          # add / replace bibliography records
+ACTION_LIST_REFERENCES = "list_references"
 ACTION_GET_DOCUMENT = "get_document"
 
 MUTATION_ACTIONS = {ACTION_APPEND_TRACE, ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                     ACTION_ADD_TO_SHEET, ACTION_ADD_IMAGE_TO_SHEET, ACTION_REMOVE_DATA,
-                    ACTION_REMOVE_TRACE, ACTION_CLEAR, ACTION_ORGANIZE, ACTION_DOCUMENT}
+                    ACTION_REMOVE_TRACE, ACTION_CLEAR, ACTION_ORGANIZE, ACTION_DOCUMENT,
+                    ACTION_REFERENCES}
 QUERY_ACTIONS = {ACTION_LIST_DATA, ACTION_LIST_IMAGES, ACTION_LIST_TRACES,
                  ACTION_LIST_SHEETS, ACTION_GET_DATA, ACTION_GET_IMAGE,
-                 ACTION_LIST_DOCUMENTS, ACTION_GET_DOCUMENT}
+                 ACTION_LIST_DOCUMENTS, ACTION_GET_DOCUMENT, ACTION_LIST_REFERENCES}
 
 
 def frame(payload: dict) -> bytes:

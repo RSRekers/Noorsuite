@@ -538,6 +538,34 @@ title/x_label/y_label + trace labels).
   `get_document`, `figure_snippet`; mirrored in `OfflineBackend`.
 - In test files write LaTeX with raw strings (`r"\noorsheet{..}"`): `"\n"`/`"\u"` silently corrupt it.
 
+## Search, Zotero, figure panel
+
+- **Search**: `fuzzy.smart_score(query, fields)` with `fields = [(kind, weight, text)]`, kind `name` /
+  `tags` / `content`. All tokens must match (AND): whole word 3.0, word prefix 2.4, substring 1.5 (x field
+  weight); subsequence ("rspns") 0.8 only inside a single *name/tag word* with the same first letter and
+  token length >= 3 -- never over the content blob. `-x` excludes (no subsequence), `#t`/`tag:`/`name:`/
+  `note:` scope, `"phrase"`. `SciSuiteWindow._sheet_fields` builds the sheet fields; old `fuzzy_match` is
+  kept for non-search uses. Don't go back to one concatenated haystack + subsequence.
+- **Zotero** (`zotero.py`, stdlib): `cayw_pick()` = GET `http://127.0.0.1:23119/better-bibtex/cayw?
+  format=json` (blocks until the user confirms in Zotero's popup -> call it off the GUI thread; Zotero
+  core has no `/cayw` and the local `/api` answers 403 unless enabled -- `local_search` documents that).
+  `normalize()` accepts CSL-JSON *and* Zotero-JSON shapes into one record (`key`, `type`, `title`,
+  `authors` [[family, given]], `year`, `container`, ..., `zotero_key`; organisation names carry a trailing
+  `*`), `to_bibtex()` writes entries, `cite_keys()` scans `\cite*`. Records persist in
+  `ProjectModel.references` (optional key); `DocumentTab.compile` writes `references.bib` for the cited
+  keys only; `latex_build` does the same headless. IPC: `references` / `list_references`.
+- **DocumentTab side panel**: `FigurePanel` (thumbnails via `host.sheet_thumbnail` -> `sheet.export_
+  sheet_png`, cached in `~/.noorsuite/thumbs/<id>-<fingerprint>-<px>.png`; items need an explicit
+  `setSizeHint`, uniform item sizes clip icons) and `ReferencePanel`. Drops: `LatexEditor.dropEvent`
+  inserts `text/plain` and forces `CopyAction` (a Move would make the source tree delete the item);
+  `ProjectTree.mimeData` adds the figure snippets (a folder yields its sheets).
+- **Build speed**: figures are re-exported only when `sheet_fingerprint` changed (`_fig_fp` + file
+  exists); tectonic runs with `--only-cached` and retries without it on failure; the status shows
+  timings. One figure export costs ~1 s (PlotSheet + render + PDF), LaTeX ~3 s with tectonic.
+- **Themes**: `docview.THEMES` / `_stylesheet` pin editor, log, lists and preview colours (white ground,
+  black text by default; QSettings `doc/dark`). Don't rely on the app palette in the Document tab.
+- While a document tab is current the main splitter collapses the inspector (`_saved_split` restores it).
+
 ## Claude skill & offline insertion
 
 - `NoorSuite/skill/SKILL.md` is the skill (package data; `{{PYTHON}}` is substituted with

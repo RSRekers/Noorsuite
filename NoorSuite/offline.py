@@ -29,6 +29,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_DOCUMENT, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
+                       ACTION_LIST_REFERENCES, ACTION_REFERENCES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_PING,
                        ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE)
@@ -78,6 +79,7 @@ class OfflineBackend:
             ACTION_GET_IMAGE: self._get_image,
             ACTION_LIST_DOCUMENTS: self._list_documents,
             ACTION_GET_DOCUMENT: self._get_document,
+            ACTION_LIST_REFERENCES: self._list_references,
         }.get(action)
         if handler is not None:            # queries: re-read so we see other writers
             if action != ACTION_PING:
@@ -94,6 +96,7 @@ class OfflineBackend:
             ACTION_CLEAR: self._clear,
             ACTION_ORGANIZE: self._organize,
             ACTION_DOCUMENT: self._document,
+            ACTION_REFERENCES: self._references,
         }.get(action)
         if mutate is None:
             return {"status": "error", "message": f"unknown action {action!r}"}
@@ -236,6 +239,19 @@ class OfflineBackend:
         if p.get("folder"):
             self.project.tree = tree_move_sheet(self.project.tree, dm.doc_id,
                                                 split_folder_path(p["folder"]), "document")
+
+    def _references(self, p):
+        by_key = {r["key"]: r for r in self.project.references}
+        for rec in p.get("items", []):
+            if rec.get("key"):
+                by_key[rec["key"]] = rec
+        self.project.references = list(by_key.values())
+
+    def _list_references(self, p):
+        from .zotero import label
+        return {"status": "success", "references": [
+            {"key": r["key"], "label": label(r), "zotero_key": r.get("zotero_key", "")}
+            for r in self.project.references]}
 
     def _list_documents(self, p):
         return {"status": "success", "documents": [

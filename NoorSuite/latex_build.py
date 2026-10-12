@@ -83,6 +83,10 @@ def main(argv) -> int:
     workdir = Path(tempfile.mkdtemp(prefix="noorsuite_tex_"))
     try:
         latex.prepare_workdir(workdir, dm.source)
+        from . import zotero
+        (workdir / "references.bib").write_text(
+            zotero.bibtex_file(pm.references, used=zotero.cite_keys(dm.source)),
+            encoding="utf-8")
         missing = render_figures(pm, dm, workdir)
         for key in missing:
             print(f"warning: no sheet matches \noorsheet{{{key}}}", file=sys.stderr)
@@ -90,6 +94,7 @@ def main(argv) -> int:
             if not a.folder:
                 raise SystemExit("export needs --folder")
             dest = latex.write_bundle(a.folder, dm.source, workdir / latex.FIGURES_DIR)
+            shutil.copy2(workdir / "references.bib", dest / "references.bib")
             print(f"exported {dm.name!r} -> {dest}")
             return 0
         res = latex.build_pdf(workdir)

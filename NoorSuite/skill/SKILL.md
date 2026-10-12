@@ -167,6 +167,23 @@ suite.push_document("Transport paper", r"\section{Discussion} ...", mode="append
 suite.get_document("Transport paper")                    # read the source back
 ```
 
+**Citations (Zotero)**: references live in the project, not in a hand-maintained `.bib`. The user picks
+items in Zotero's own popup (Zotero + Better BibTeX running; the plugin's *library export* is not needed):
+
+```python
+keys = suite.zotero_pick()            # opens the picker IN ZOTERO, waits for the user; returns cite keys
+suite.push_references(csl_items)      # or add CSL-JSON / Zotero-JSON dicts you already have
+suite.list_references()               # key, "Smith et al. (2020) - Title", zotero item key
+text = r"As shown before \cite{%s}." % keys[0]      # \citep / \citet need \usepackage{natbib}
+```
+
+End the document with `\bibliographystyle{unsrt}` + `\bibliography{references}` (`plain`, `unsrt`, `ieeetr`,
+`abbrv`, `alpha`; author-year: `plainnat` / `abbrvnat` with natbib, or `apalike`). `references.bib` is generated
+at build time from the stored items, only for the keys that are cited. In the GUI: **Cite (Zotero)...**
+(Ctrl+Shift+Z) in the Document tab, and the References tab (cite / link / reference-list format). Items cited
+with a key that is not in the project show up as "unknown citation(s)" in the build log. Tell the user
+when Zotero is not reachable instead of inventing references - never fabricate bibliographic data.
+
 Build a PDF without the GUI: `{{PYTHON}} -m NoorSuite latex build --project study.sciproj --doc "Transport paper" --out paper.pdf`
 (`latex export --folder DIR` writes main.tex + noorsuite.sty + figure PDFs; `latex engine` shows which
 engine is used - tectonic / latexmk / xelatex / pdflatex). If no engine is installed, say so; the document

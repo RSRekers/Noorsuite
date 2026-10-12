@@ -253,3 +253,124 @@ def test_document_tab_builds_and_double_click_opens_sheet(win):
     assert [d.name for d in pm.documents] == ["Paper"]
     assert {"type": "document", "doc_id": dm.doc_id} in pm.tree
     tab._source_timer.stop()
+
+
+def _doc_win(win, n_sheets=2, **doc_kw):
+    """A window with ``n_sheets`` plotted sheets and an open document that references them."""
+    from NoorSuite import latex
+    ids = []
+    win.handle_incoming_ipc({"action": "append_dataframe", "name": "d",
+                             "columns": {"x": [1., 2., 3.], "y": [1., 4., 9.]},
+                             "column_order": ["x", "y"]})
+    for i in range(n_sheets):
+        win.handle_incoming_ipc({
+            "action": "add_to_sheet", "data_name": "d", "x_col": "x", "y_cols": ["y"],
+            "sheet": "__new__", "subplot_index": 0,
+            "organize": {"name": f"Fig {i}", "tags": ["iv" if i == 0 else "xrd"]}})
+        ids.append(next(reversed(win.sheets.values())).sheet_id)
+    src = latex.article_template("T").replace(
+        r"\noorsheet{sheet-id}",
+        "\n".join(latex.figure_snippet(i, f"Fig {n}", "Cap.") for n, i in enumerate(ids)))
+    dm = win.create_new_document("Paper", src, None)
+    tab = win._open_document_tab(dm.doc_id)
+    tab.auto_check.setChecked(False)
+    win.show()
+    QApplication.processEvents()
+    return ids, dm, tab
+
+
+def test_document_theme_is_explicit_and_white_by_default(win):
+    ids, dm, tab = _doc_win(win, 1)
+    ss = tab.styleSheet()
+    assert "#ffffff" in ss and "#000000" in ss                       # white ground, black text
+    tab.dark_act.setChecked(True)
+    assert "#1b1b1b" in tab.styleSheet() and "#f2f2f2" in tab.styleSheet()
+    tab.dark_act.setChecked(False)
+    assert "background: #ffffff; color: #000000" in tab.styleSheet()
+
+
+def test_figure_panel_search_snippets_and_tree_drag_payload(win):
+    from PyQt6.QtCore import Qt as _Qt
+    ids, dm, tab = _doc_win(win, 3)
+    fp = tab.figures
+    assert fp.list.count() == 4                                      # 3 figures + the default sheet
+    fp.search.setText("#xrd")                                         # tag scope
+    visible = [fp.list.item(i).text() for i in range(fp.list.count()) if not fp.list.item(i).isHidden()]
+    assert visible == ["Fig 1", "Fig 2"]
+    fp.search.setText("fig 0 -xrd")
+    assert [fp.list.item(i).text() for i in range(fp.list.count()) if not fp.list.item(i).isHidden()] == ["Fig 0"]
+    fp.search.setText("")
+    item = fp.list.item(0)
+    snip = fp.snippets_for([item])
+    assert f"\\noorsheet{{{item.data(_Qt.ItemDataRole.UserRole)}}}" in snip
+    got = []
+    fp.insertRequested.connect(got.append)
+    fp.list.itemDoubleClicked.emit(item)
+    assert got and "\\begin{figure}" in got[0]
+    before = tab.source()
+    tab.insert_text(snip)
+    assert len(tab.source()) > len(before) and snip.strip() in tab.source()
+
+    # dragging tree items (a sheet, or a folder of sheets) carries the figures as text
+    tree = win.tree
+    sheet_items = []
+
+    def walk(it):
+        if it.data(0, 0x100 + 1) == "sheet":
+            sheet_items.append(it)
+        for i in range(it.childCount()):
+            walk(it.child(i))
+    for i in range(tree.topLevelItemCount()):
+        walk(tree.topLevelItem(i))
+    md = tree.mimeData([sheet_items[0]])
+    assert md.hasText() and "\\noorsheet{" in md.text() and md.text().count("\\begin{figure}") == 1
+    md = tree.mimeData(sheet_items)
+    assert md.text().count("\\begin{figure}") == len(sheet_items)
+
+
+def test_zotero_pick_stores_references_and_inserts_cite(win, monkeypatch):
+    from NoorSuite import zotero
+    ids, dm, tab = _doc_win(win, 1)
+    raw = [{"type": "article-journal", "citationKey": "doe2021test", "title": "A test",
+            "author": [{"family": "Doe", "given": "J."}], "issued": {"date-parts": [[2021]]}}]
+    monkeypatch.setattr(zotero, "cayw_pick", lambda *a, **k: raw)
+    tab.editor.moveCursor(tab.editor.textCursor().MoveOperation.End)
+    tab.pick_from_zotero(insert=True)
+    assert _wait(lambda: "doe2021test" in win.references, timeout=10)
+    QApplication.processEvents()
+    assert "\\cite{doe2021test}" in tab.source()
+    assert tab.refs.list.count() == 1
+    assert win._project_model().references[0]["key"] == "doe2021test"
+    tab.refs.list.selectAll()
+    got = []
+    tab.refs.insertRequested.connect(got.append)
+    tab.refs._cite("citep")
+    assert got == ["\\citep{doe2021test}"]
+    assert "\\usepackage{natbib}" in tab.source()                     # added automatically
+    tab.refs.style_combo.setCurrentIndex(5)                            # plainnat
+    tab.refs._insert_bibliography()
+    assert got[-1] == "\\bibliographystyle{plainnat}\n\\bibliography{references}"
+
+
+def test_second_compile_reuses_unchanged_figures(win):
+    from NoorSuite import latex
+    if latex.find_engine() is None:
+        pytest.skip("no LaTeX engine installed")
+    ids, dm, tab = _doc_win(win, 2)
+
+    def build():
+        tab.compile(force=True)
+        assert _wait(lambda: not tab._building and tab._pdf, 300), tab.log.toPlainText()[-600:]
+        QApplication.processEvents()
+        return tab.status_label.text()
+
+    first = build()
+    assert "2 new / 0 cached" in first, first
+    tab._pdf = ""
+    second = build()
+    assert "0 new / 2 cached" in second, second
+    # change one sheet -> only that figure is re-exported
+    win.sheets[ids[0]].subplots[0].title = "changed"
+    tab._pdf = ""
+    third = build()
+    assert "1 new / 1 cached" in third, third

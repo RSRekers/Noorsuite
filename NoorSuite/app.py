@@ -36,9 +36,11 @@ from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
                       ColormapPanel, FigureDialog, FigureStyleWidget, ImageDialog,
                       LegendDialog, TextDialog, TraceStyleDialog, TraceStyleWidget)
 from . import latex
+from .zotero import label as zotero_label
 from .docview import DocumentTab
-from .fuzzy import fuzzy_match
+from .fuzzy import fuzzy_match, smart_score
 from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_DOCUMENT,
+                  ACTION_REFERENCES,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
                   ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
@@ -49,7 +51,7 @@ from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
                     aggregate_series, append_notes, apply_sheet_annotations,
                     common_label, copy_subplot_style, duplicate_sheet_model, make_image_ref, merge_tags, resolve_sidecar_names,
                     split_folder_path, split_into_repeats)
-from .sheet import PlotSheet, export_sheet_pdf
+from .sheet import PlotSheet, export_sheet_pdf, export_sheet_png
 from .widgets import CollapsibleSection
 
 APP_NAME = "NOORSUITE"
@@ -229,6 +231,27 @@ class ProjectTree(QTreeWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.itemClicked.connect(self._on_activate)
         self.itemDoubleClicked.connect(self._on_activate)
+
+    def mimeData(self, items):
+        """Besides Qt's own payload, offer ``text/plain``: the LaTeX ``figure`` environment of
+        every dragged sheet (a dragged folder yields its sheets) -- so dropping onto a
+        document's source inserts the figures."""
+        data = super().mimeData(items)
+        snippets = []
+
+        def walk(it):
+            kind = it.data(0, ITEM_TYPE_ROLE)
+            if kind == TYPE_SHEET:
+                sid = it.data(0, ITEM_ID_ROLE)
+                snippets.append(latex.figure_snippet(sid, it.text(0), it.text(0)))
+            elif kind == TYPE_FOLDER:
+                for i in range(it.childCount()):
+                    walk(it.child(i))
+        for it in items:
+            walk(it)
+        if snippets:
+            data.setText("\n".join(snippets))
+        return data
 
     def _on_activate(self, item, _column):
         # Don't switch tabs while the user is building a multi-selection.
@@ -768,6 +791,7 @@ class SciSuiteWindow(QMainWindow):
         self.open_tabs: dict[str, PlotSheet] = {}
         self.documents: dict[str, DocumentModel] = {}   # LaTeX documents
         self.doc_tabs: dict[str, DocumentTab] = {}
+        self.references: dict[str, dict] = {}    # cite key -> bibliography record
         self._last_sheet_id = None               # last PlotSheet that was current
         self.colormaps: list[ColorMap] = []      # project-wide colormap library
         self._ipc_data_full: dict = {}           # full column data for client get_data()
@@ -814,6 +838,8 @@ class SciSuiteWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 7)
         splitter.setStretchFactor(2, 3)
+        self._main_splitter = splitter
+        self._saved_split = None          # panel sizes to restore after a document tab
         self.setCentralWidget(splitter)
         self._init_actions()
 
@@ -876,7 +902,8 @@ class SciSuiteWindow(QMainWindow):
         tl.setContentsMargins(6, 2, 6, 6)
         tl.addWidget(QLabel("Project (folders & sheets)"))
         self.tree_search = QLineEdit()
-        self.tree_search.setPlaceholderText("Fuzzy search sheets (name, tags, titles, data)...")
+        self.tree_search.setPlaceholderText(
+            'Search sheets / documents: words, "phrase", #tag, -exclude ...')
         self.tree_search.setClearButtonEnabled(True)
         self.tree_search.textChanged.connect(self._filter_project_tree)
         tl.addWidget(self.tree_search)
@@ -1587,6 +1614,20 @@ class SciSuiteWindow(QMainWindow):
         return next(iter(self.sheets.values()), None)
 
     def on_sheet_tab_changed(self, _index):
+        # A document wants the width: collapse the inspector and shrink the data panel
+        # while its tab is current, put the panels back for sheets.
+        w = self.tab_widget.currentWidget()
+        sp = getattr(self, "_main_splitter", None)
+        if sp is not None:
+            if isinstance(w, DocumentTab):
+                total = sp.width()
+                if total > 400 and sum(sp.sizes()) > 0:       # laid out and visible
+                    if self._saved_split is None:
+                        self._saved_split = sp.sizes()
+                    sp.setSizes([int(total * 0.18), total - int(total * 0.18), 0])
+            elif isinstance(w, PlotSheet) and self._saved_split is not None:
+                sp.setSizes(self._saved_split)
+                self._saved_split = None
         if self.current_sheet():
             self._sync_grid_spinners()
             self.sync_active_subplot_inspector()
@@ -2234,6 +2275,28 @@ class SciSuiteWindow(QMainWindow):
     def document_sheets(self) -> list:
         return list(self.sheets.values())
 
+    def document_references(self) -> list:
+        return list(self.references.values())
+
+    def add_references(self, records) -> list:
+        """Store bibliography records (already normalized); returns their keys."""
+        keys = []
+        for rec in records:
+            if rec.get("key"):
+                self.references[rec["key"]] = dict(rec)
+                keys.append(rec["key"])
+        for tab in self.doc_tabs.values():
+            tab.references_changed()
+        self._refresh_ipc_snapshot()
+        return keys
+
+    def remove_references(self, keys):
+        for k in keys:
+            self.references.pop(k, None)
+        for tab in self.doc_tabs.values():
+            tab.references_changed()
+        self._refresh_ipc_snapshot()
+
     def sheet_fingerprint(self, sheet_id) -> str:
         """Hash of everything that determines how a sheet looks: its model and the data it
         plots -- so documents only recompile when a referenced figure really changed."""
@@ -2259,6 +2322,28 @@ class SciSuiteWindow(QMainWindow):
         """Render a sheet as a vector PDF at its own figure size (``_DOC_FIG_CM`` when the
         sheet has none), on a throw-away copy so open tabs / zoom are untouched."""
         export_sheet_pdf(self.sheets[sheet_id], self.repository, self.images, path)
+
+    def sheet_thumbnail(self, sheet_id, px=360):
+        """QPixmap preview of a sheet, cached on disk by the sheet's fingerprint."""
+        from PyQt6.QtGui import QPixmap
+        sm = self.sheets.get(sheet_id)
+        if sm is None:
+            return None
+        cache = Path(os.path.expanduser("~")) / ".noorsuite" / "thumbs"
+        cache.mkdir(parents=True, exist_ok=True)
+        path = cache / f"{sheet_id}-{self.sheet_fingerprint(sheet_id)[:16]}-{px}.png"
+        if not path.is_file():
+            try:
+                export_sheet_png(sm, self.repository, self.images, str(path), px)
+            except Exception:
+                return None
+            for old in cache.glob(f"{sheet_id}-*-{px}.png"):      # drop stale versions
+                if old != path:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+        return QPixmap(str(path))
 
     def create_new_document(self, name=None, source=None, folder=None) -> DocumentModel:
         name = name or f"Document {len(self.documents) + 1}"
@@ -2399,6 +2484,7 @@ class SciSuiteWindow(QMainWindow):
         pm.tree = self._serialize_tree()
         pm.colormaps = list(self.colormaps)
         pm.documents = list(self.documents.values())
+        pm.references = list(self.references.values())
         cs = self.current_sheet()
         pm.active_sheet_id = cs.sheet_id if cs else next(iter(self.sheets), "")
         return pm
@@ -2410,6 +2496,7 @@ class SciSuiteWindow(QMainWindow):
         self.open_tabs.clear()
         self.documents.clear()
         self.doc_tabs.clear()
+        self.references = {r["key"]: dict(r) for r in pm.references}
         self.colormaps = list(pm.colormaps)
         while self.tab_widget.count():
             self.tab_widget.removeTab(0)
@@ -2595,6 +2682,29 @@ class SciSuiteWindow(QMainWindow):
         event.accept()
 
     # ---------------------------------------------------------------- IPC intake
+    def _sheet_fields(self, sm: SheetModel) -> list:
+        """Search fields of a sheet: name and tags weigh most; notes, subplot titles, axis
+        labels, trace labels and referenced data names are weaker "content"."""
+        return [("name", 1.0, sm.name), ("tags", 0.9, " ".join(sm.tags)),
+                ("content", 0.4, " ".join(
+                    p for p in (sm.notes, *self._sheet_haystack_parts(sm)) if p))]
+
+    def _sheet_haystack_parts(self, sm: SheetModel) -> list:
+        parts, seen = [], set()
+        for sub in sm.subplots:
+            parts += [sub.title, sub.x_label, sub.y_label]
+            for t in sub.traces:
+                parts.append(t.label or t.y_col)
+                obj = self.repository.get(t.data_id)
+                if obj and obj.id not in seen:
+                    seen.add(obj.id)
+                    parts.append(obj.name)
+            if sub.image is not None:
+                img = self.images.get(sub.image.data_id)
+                if img is not None:
+                    parts.append(img.name)
+        return parts
+
     def _sheet_haystack(self, sm: SheetModel) -> str:
         parts = [sm.name, " ".join(sm.tags), sm.notes]
         seen = set()
@@ -2617,9 +2727,12 @@ class SciSuiteWindow(QMainWindow):
         for i in range(self.data_list.count()):
             item = self.data_list.item(i)
             obj = self.repository.get(item.data(Qt.ItemDataRole.UserRole))
-            hay = item.text() + " " + (" ".join(obj.tags) + " " + " ".join(obj.column_order)
-                                       + " " + getattr(obj, "notes", "") if obj else "")
-            item.setHidden(not fuzzy_match(query, hay))
+            fields = [("name", 1.0, obj.name if obj else item.text())]
+            if obj is not None:
+                fields.append(("tags", 0.9, " ".join(obj.tags)))
+                fields.append(("content", 0.4, " ".join(
+                    list(getattr(obj, "column_order", [])) + [getattr(obj, "notes", "")])))
+            item.setHidden(smart_score(query, fields) <= 0)
 
     def _filter_project_tree(self, text):
         query = text.strip()
@@ -2628,13 +2741,14 @@ class SciSuiteWindow(QMainWindow):
             child_match = any(recurse(item.child(i)) for i in range(item.childCount()))
             if item.data(0, ITEM_TYPE_ROLE) == TYPE_DOC:
                 dm = self.documents.get(item.data(0, ITEM_ID_ROLE))
-                hay = f"{item.text(0)} {dm.source[:4000]}" if dm else item.text(0)
+                fields = [("name", 1.0, item.text(0)),
+                          ("content", 0.4, dm.source[:20000] if dm else "")]
             elif item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET:
                 sm = self.sheets.get(item.data(0, ITEM_ID_ROLE))
-                hay = self._sheet_haystack(sm) if sm else item.text(0)
+                fields = self._sheet_fields(sm) if sm else [("name", 1.0, item.text(0))]
             else:
-                hay = item.text(0)
-            visible = fuzzy_match(query, hay) or child_match
+                fields = [("name", 1.0, item.text(0))]
+            visible = smart_score(query, fields) > 0 or child_match
             item.setHidden(bool(query) and not visible)
             if visible and query:
                 item.setExpanded(True)
@@ -2700,7 +2814,11 @@ class SciSuiteWindow(QMainWindow):
             "duplicate_name": name_counts[sm.name] > 1,
             "folder": folders.get(sm.sheet_id, ""),
         } for sm in self.sheets.values()]
-        self.ipc.snapshot = {"documents": [
+        self.ipc.snapshot = {"references": [
+                                 {"key": k, "label": zotero_label(r),
+                                  "zotero_key": r.get("zotero_key", "")}
+                                 for k, r in self.references.items()],
+                             "documents": [
                                  {"id": d.doc_id, "name": d.name, "chars": len(d.source)}
                                  for d in self.documents.values()],
                              "document_full": {
@@ -2741,6 +2859,8 @@ class SciSuiteWindow(QMainWindow):
             self._handle_organize(payload)
         elif action == ACTION_DOCUMENT:
             self._handle_document(payload)
+        elif action == ACTION_REFERENCES:
+            self.add_references(payload.get("items", []))
 
     # ---- organize: names / tags / notes / folders (IPC) ----------------------
     def _sheet_tree_item(self, sheet_id):

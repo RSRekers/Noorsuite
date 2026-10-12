@@ -174,13 +174,18 @@ def engine_commands(engine: str, tex: str, outdir: str) -> list:
     """The command line(s) that turn ``tex`` into ``<outdir>/main.pdf`` with ``engine``."""
     base = Path(engine).stem.lower()
     if base == "tectonic":
-        return [[engine, "-X", "compile", "--outdir", outdir, tex]]
+        # --only-cached: no network round trips for the package bundle (build_pdf retries
+        # without it when a package is not cached yet)
+        return [[engine, "-X", "compile", "--only-cached", "--outdir", outdir, tex]]
     if base == "latexmk":
         return [[engine, "-pdf", "-interaction=nonstopmode", "-halt-on-error",
                  f"-outdir={outdir}", tex]]
     one = [engine, "-interaction=nonstopmode", "-halt-on-error",
            f"-output-directory={outdir}", tex]
-    return [one, one]            # twice: cross-references / table of contents
+    bibtex = shutil.which("bibtex")
+    if bibtex:                   # latex, bibtex, latex, latex: citations + cross-references
+        return [one, [bibtex, f"{outdir}/{Path(tex).stem}"], one, one]
+    return [one, one]
 
 
 # --------------------------------------------------------------------------- build
@@ -216,17 +221,24 @@ def build_pdf(workdir, engine=None, timeout=300) -> BuildResult:
     out.mkdir(exist_ok=True)
     t0, log = time.time(), []
     flags = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
-    for cmd in engine_commands(engine, "main.tex", "out"):
+    commands = engine_commands(engine, "main.tex", "out")
+    for cmd in commands:
+        is_bibtex = Path(cmd[0]).stem.lower() == "bibtex"
         try:
             res = subprocess.run(cmd, cwd=wd, capture_output=True, text=True, timeout=timeout,
                                  encoding="utf-8", errors="replace", **flags)
+            if res.returncode != 0 and "--only-cached" in cmd:
+                cmd = [c for c in cmd if c != "--only-cached"]       # package not cached yet
+                res = subprocess.run(cmd, cwd=wd, capture_output=True, text=True,
+                                     timeout=timeout, encoding="utf-8", errors="replace",
+                                     **flags)
         except subprocess.TimeoutExpired:
             return BuildResult(False, log="\n".join(log) + "\nLaTeX run timed out.",
                                engine=engine, seconds=time.time() - t0)
         except OSError as exc:
             return BuildResult(False, log=f"Could not run {engine}: {exc}", engine=engine)
         log.append(f"$ {' '.join(cmd)}\n{res.stdout}{res.stderr}")
-        if res.returncode != 0:
+        if res.returncode != 0 and not is_bibtex:      # bibtex warns (exit 1) on unknown keys
             return BuildResult(False, log="\n".join(log), engine=engine,
                                seconds=time.time() - t0)
     pdf = out / "main.pdf"

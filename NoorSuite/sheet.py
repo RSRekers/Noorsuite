@@ -918,3 +918,19 @@ def export_sheet_pdf(sm, repository, images, path, default_cm=None):
                               size_in=(sm.fig_width_cm / 2.54, sm.fig_height_cm / 2.54))
     finally:
         ps.deleteLater()
+
+
+def export_sheet_png(sm, repository, images, path, width_px=360):
+    """A small PNG of a sheet (figure browser thumbnails), at the document figure size."""
+    from .latex import DEFAULT_FIG_CM
+    from .model import duplicate_sheet_model
+    sm = duplicate_sheet_model(sm)
+    if not (sm.fig_width_cm and sm.fig_height_cm):
+        sm.fig_width_cm, sm.fig_height_cm = DEFAULT_FIG_CM
+    ps = PlotSheet(sm)
+    try:
+        ps.render(repository, images)
+        w_in, h_in = sm.fig_width_cm / 2.54, sm.fig_height_cm / 2.54
+        ps.savefig_export(path, "png", size_in=(w_in, h_in), dpi=max(20, width_px / w_in))
+    finally:
+        ps.deleteLater()

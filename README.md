@@ -111,8 +111,27 @@ the `.tex` source on the left, the compiled PDF on the right. Figures are NoorSh
 - **Export PDF...** / **Export LaTeX folder...** (main.tex + noorsuite.sty + figure PDFs, ready for a journal,
   arXiv or Overleaf). Headless: `python -m NoorSuite latex build --project p.sciproj --doc Name --out paper.pdf`.
 - From code / Claude: `suite.push_document(name, source, mode="append")`, `suite.figure_snippet(sheet)`.
+- **Figures panel**: thumbnails of every sheet, searchable (`#tag`, `"phrase"`, `-word`); double-click, *Insert
+  selected*, or **drag** a thumbnail -- or drag a sheet / a whole folder straight from the project tree --
+  into the source to insert the figure environments.
+- **Zotero**: *Cite (Zotero)...* (Ctrl+Shift+Z) opens Zotero's picker, stores the chosen items in the project
+  and inserts `\cite{key}`. No Better BibTeX library export needed (only its picker, like the Obsidian
+  `Zoterolink` script). The *References* tab lists the project's references (cite / `\citep` / `\citet` /
+  link back to Zotero) and inserts the reference list in the style you choose (plain, unsrt, ieeetr, alpha,
+  plainnat, apalike ...). `references.bib` is generated when building.
+- The editor is **black on white** by default (toggle *Dark editor* for light-on-dark); the data panel is
+  collapsed and the inspector hidden while a document tab is current, to give it the width.
+- Builds only re-export the figures that changed; the status bar shows "figures N new / M cached".
 - Needs a LaTeX engine: [tectonic](https://tectonic-typesetting.github.io) (`conda install -c conda-forge
   tectonic`), MiKTeX or TeX Live -- found automatically, or set `$NOORSUITE_LATEX`.
+
+## Searching
+
+The search boxes (data pool, project tree, figure list) are word based: **every word must match**, as a
+whole word, a word prefix or a substring; names and tags count more than notes. Operators: `"exact
+phrase"`, `-exclude`, `#tag`, `tag:x`, `name:x`, `note:x`. Abbreviations (`rspns` for *Response*) only match
+inside a name or tag word, never across the long content text -- which is what used to let short queries
+match almost everything.
 
 ## Custom tick labels
 
