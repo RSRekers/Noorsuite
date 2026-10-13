@@ -129,7 +129,45 @@ keyword one \sep keyword two
     },
 }
 
-ORDER = ["article", "acs", "rsc", "elsevier"]
+TEMPLATES["beamer"] = {
+    "label": "Beamer presentation (16:10)",
+    "class": "beamer",
+    "two_column": False,
+    "beamer": True,
+    "widths": [("Full slide width", 14.0, False), ("Two thirds", 9.5, False),
+               ("Half a slide", 6.9, False)],
+    "word": {"font": "Arial", "pt": 11, "margin_cm": 2.0, "line": 1.15},
+    "preamble": r"""\documentclass[aspectratio=1610,11pt,t]{beamer}
+\usepackage{graphicx}
+\usetheme{default}
+\usepackage{noorsuite}   % \noorsheet{...}: NoorSuite sheets as figures
+@EXTRA@""",
+    "front": r"""\title{@TITLE@}
+\author{@AUTHORS@}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+""",
+    "tail": "\\end{document}\n",
+    "default_body": r"""\begin{frame}{Outline}
+  \begin{itemize}
+    \item First point
+    \item Second point
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{A figure}
+  \centering
+  \noorsheet[width=0.8\textwidth]{sheet-id}
+\end{frame}
+""",
+    "known": {"graphicx", "noorsuite", "hyperref"},
+}
+ORDER = ["article", "acs", "rsc", "elsevier", "beamer"]
 
 
 # ------------------------------------------------------------------ user templates
@@ -260,6 +298,8 @@ def detect(source: str) -> str:
         return "acs"
     if cls == "elsarticle":
         return "elsevier"
+    if cls == "beamer":
+        return "beamer"
     if re.search(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*\brsc\b[^}]*\}", code):
         return "rsc"
     return "article"
@@ -268,7 +308,7 @@ def detect(source: str) -> str:
 def has_own_citations(source: str) -> bool:
     """True when the class / package brings natbib and its own reference look (achemso,
     elsarticle, rsc.sty) -- loading natbib again with other options would clash."""
-    return detect(source) != "article"
+    return detect(source) in ("acs", "rsc", "elsevier")
 
 
 # ----------------------------------------------------------------------- parsing
@@ -364,6 +404,9 @@ def extract_parts(source: str) -> dict:
     body = re.sub(_ENV.format(n="frontmatter"), "", body, flags=re.S)
     body = re.sub(r"\\begin\{keyword\}.*?\\end\{keyword\}\s*", "", body, flags=re.S)
     body = re.sub(r"\\maketitle[ \t]*\n?", "", body)
+    # beamer: the generated title frame is re-created by the template
+    body = re.sub(r"\\begin\{frame\}(?:\[[^\]]*\])?\s*\\titlepage\s*\\end\{frame\}\s*", "", body)
+    body = re.sub(r"\\frame\{\s*\\titlepage\s*\}\s*", "", body)
     # extra preamble: packages the user added + one-line macro definitions
     old = TEMPLATES[detect(source)]["known"]
     extra = []
@@ -680,6 +723,8 @@ def build_document(template_id: str, title: str = "Title", authors=None, abstrac
             r" \and ".join(n["name"] for n in _norm_authors(authors)[0]) or "Author Name"
     for k, v in blk.items():
         front = front.replace(k, v)
+    if not body.strip() and t.get("default_body"):
+        body = t["default_body"]
     if not body.strip():
         body = ("\\section{Introduction}\nWrite your text here. Insert a figure with "
                 "\\emph{Figures} in the side panel, or by hand:\n\\noorsheet{sheet-id}\n\n"

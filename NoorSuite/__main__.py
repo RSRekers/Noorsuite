@@ -19,7 +19,10 @@ def _set_windows_app_id(app_id: str) -> None:
 
 def main(argv=None) -> int:
     argv = list(sys.argv if argv is None else argv)
-    if len(argv) > 1 and argv[1] in ("skill", "insert", "latex"):   # subcommands
+    if len(argv) > 1 and argv[1] in ("skill", "insert", "latex", "presentation"):   # subcommands
+        if argv[1] == "presentation":
+            from .pptximport import main as pres_main
+            return pres_main(argv[2:])
         if argv[1] == "latex":
             from .latex_build import main as latex_main
             return latex_main(argv[2:])

@@ -1,4 +1,6 @@
 __pycache__/
+# corporate PowerPoint templates stay local (converted themes live in ~/.noorsuite)
+*.pptx
 *.py[cod]
 *.egg-info/
 build/

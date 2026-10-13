@@ -146,6 +146,15 @@ text. Keys are data coordinates; the entries are stored as `"0=RT; 1=77 K"` (so 
 `;`). A string-labelled heatmap axis shows one tick per label by itself; the mapping only renames.
 In the GUI: Axes tab -> "X / Y tick labels" (same `value=text; value=text` syntax).
 
+### Presentations (Beamer)
+
+`suite.push_document("Talk", frames_text, template="beamer", title="...", authors=["..."])` makes a presentation
+(`template="user:<name>"` for an imported corporate PowerPoint template; `suite.list_templates()` lists them).
+Write frames: `\begin{frame}{Title} ... \end{frame}`; a figure frame is
+`\begin{frame}{Title}\centering\noorsheet[width=0.85\textwidth]{<sheet>}\end{frame}`; footer line
+`\framesource{Source: ...}`. The user imports PowerPoint templates in the GUI (*New presentation* ->
+*Import PowerPoint template...*) or `python -m NoorSuite presentation import file.pptx`.
+
 ### Author lists and Supporting Information
 
 With a layout template the author list is structured: `suite.push_document("Paper", body, template="acs",

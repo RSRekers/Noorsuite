@@ -161,6 +161,24 @@ in `plot` / `heatmap` / `show_image` / `organize_sheet`. On a categorical heatma
 that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick labels*, written as
 `0=RT; 1=77 K; 2=4 K`.
 
+## Presentations (Beamer)
+
+A presentation is a LaTeX document of class `beamer`: right-click in the project tree -> *New presentation* (plain
+Beamer 16:10, or one of your imported corporate templates). Everything of the document tab applies - live PDF
+preview (one page per slide), figure panel (a figure is inserted as a **frame** with the sheet, width options:
+slide width / two thirds / half), tables, references, F5 compile, PDF export. Edit a sheet by double-clicking it
+in the preview.
+
+**Import PowerPoint template...** (same menu, or `python -m NoorSuite presentation import file.pptx --name X`)
+converts a corporate `.pptx` into a Beamer theme: the slide master's bars, logos (SVG / EMF converted to PDF through
+Inkscape, photos cropped and compressed), static texts, the title bar with the title placeholder's size and colour,
+slide number and source line positions, bullet style, the font (Open Sans Light falls back to the TeX Live
+`OpenSans-*.ttf`), and the *title layout* as the title page (picture, logo block, title / author / date). The result
+is stored under `~/.noorsuite/presentations/<name>/` (the theme files are copied next to the document when it is
+built, so exported folders compile anywhere) and listed as a layout. In the text: `\framesource{Source: ...}`
+sets the footer line of a frame, `\imagecredit{...}` and `\titleimage{<file>}` the title-page picture credit and
+picture (the other title pictures of the template are listed in `template.json`).
+
 ## Author lists and Supporting Information
 
 *Authors...* (document toolbar) edits the author list in a table: names, affiliation keys (`1,2`), e-mail,

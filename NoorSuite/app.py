@@ -1773,10 +1773,14 @@ class SciSuiteWindow(QMainWindow):
         new_sheet_act = menu.addAction("New Sheet")
         new_doc_act = menu.addAction("New LaTeX Document")
         tpl_menu = menu.addMenu("New journal manuscript")
+        pres_menu = menu.addMenu("New presentation")
         tpl_acts = {}
         from . import templates as _tpl
         for tid, tlabel in _tpl.list_templates():
-            tpl_acts[tpl_menu.addAction(tlabel)] = tid
+            target = pres_menu if _tpl.base_of(tid) == "beamer" else tpl_menu
+            tpl_acts[target.addAction(tlabel)] = tid
+        pres_menu.addSeparator()
+        import_pptx_act = pres_menu.addAction("Import PowerPoint template...")
         tags_act = menu.addAction("Set tags...") if is_sheet else None
         rename_act = menu.addAction("Rename") if item is not None else None
         dup_act = menu.addAction("Duplicate") if item is not None else None
@@ -1796,6 +1800,8 @@ class SciSuiteWindow(QMainWindow):
             self.create_new_document()
         elif action in tpl_acts:
             self.create_new_document(template=tpl_acts[action])
+        elif action == import_pptx_act:
+            self.import_powerpoint_template()
         elif action == tags_act and is_sheet:
             self._set_sheet_tags(item)
         elif action == rename_act and item is not None:
@@ -2904,6 +2910,31 @@ class SciSuiteWindow(QMainWindow):
                     except OSError:
                         pass
         return QPixmap(str(path))
+
+    def import_powerpoint_template(self, path=None):
+        """Turn a .pptx corporate template into a Beamer theme + a *New presentation* layout."""
+        from . import pptximport
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Import PowerPoint template", "",
+                                                  "PowerPoint (*.pptx)")
+        if not path:
+            return None
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            res = pptximport.import_pptx(path)
+        except Exception as exc:                        # unreadable / unsupported file
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Import PowerPoint template", f"{path}\n\n{exc}")
+            return None
+        QApplication.restoreOverrideCursor()
+        for tab in self.doc_tabs.values():
+            tab.populate_layouts()
+        extra = ("\n\nNotes:\n" + "\n".join(res["notes"])) if res["notes"] else ""
+        QMessageBox.information(
+            self, "PowerPoint template imported",
+            f"\"{res['label']}\" is now available under New presentation "
+            f"(theme {res['theme']}).{extra}")
+        return res
 
     def create_new_document(self, name=None, source=None, folder=None,
                             template=None, open_tab=False) -> DocumentModel:

@@ -607,6 +607,24 @@ title/x_label/y_label + trace labels).
   black text by default; QSettings `doc/dark`). Don't rely on the app palette in the Document tab.
 - While a document tab is current the main splitter collapses the inspector (`_saved_split` restores it).
 
+## Presentations (`templates.py` "beamer", `pptximport.py`)
+
+- `TEMPLATES["beamer"]` (class beamer, 16:10, `t` alignment, `default_body`, `tail`); `detect` -> `"beamer"`;
+  `base_of(id) == "beamer"` separates presentation layouts from document layouts (project-tree menus, layout combo,
+  `FigurePanel.beamer_provider` -> `latex.frame_snippet` instead of a figure environment).
+  `extract_parts` drops the generated `\titlepage` frame so layout switches do not double it.
+- `pptximport.parse(path)`: geometry of master / layouts / slides (EMU -> cm), fills with theme colours resolved,
+  pictures with `srcRect` crop, static text, placeholder sizes. `import_pptx` writes
+  `~/.noorsuite/presentations/<slug>/beamertheme<slug>.sty` (TikZ overlays at absolute positions scaled
+  16 cm / slide width; background = master, frametitle = title placeholder in the bar, footline = number + source
+  line, `title page` = the layout of slide 1) + converted media + `template.json`, and a user layout
+  `~/.noorsuite/templates/<slug>.json` (base beamer). Frame bodies start at the master body placeholder's y.
+- `pptximport.support_files(source)` (called by `latex.prepare_workdir` and thus by GUI build, headless build and
+  `write_bundle`) copies the theme of every `\usetheme{name}` found in `presentations_dir()` next to `main.tex`.
+  Env overrides for tests: `NOORSUITE_PRESENTATIONS`, `NOORSUITE_TEMPLATES`.
+- Never commit corporate `.pptx` files / logos (`*.pptx` is git-ignored); the converted theme stays in the user's
+  home directory.
+
 ## Author lists and SI documents (`templates.py`, `authorsdialog.py`)
 
 - `parse_authors(source)` -> `{"authors": [{name, affils[keys], email, corresponding}], "affiliations": {key: text}}`

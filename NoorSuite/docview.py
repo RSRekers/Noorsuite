@@ -366,6 +366,7 @@ class FigurePanel(QWidget):
         lay.addLayout(wrow)
         self.width_provider = None             # set by the DocumentTab: -> [(label, cm, span)]
         self.two_column_provider = None        # -> True when the layout has two columns
+        self.beamer_provider = None            # -> True for presentations (insert frames)
         row = QHBoxLayout()
         self.insert_btn = QPushButton("Insert selected")
         self.insert_btn.setToolTip("Insert the selected figures at the cursor "
@@ -489,6 +490,9 @@ class FigurePanel(QWidget):
                                                and self.two_column_provider())
                     if self.match_check.isChecked() and hasattr(self.host, "set_sheet_width"):
                         self.host.set_sheet_width(sm.sheet_id, cm)
+                if self.beamer_provider and self.beamer_provider():
+                    out.append(latex.frame_snippet(sm.sheet_id, sm.name, width))
+                    continue
                 out.append(latex.figure_snippet(sm.sheet_id, sm.name, sm.name, width=width,
                                                 star=star))
             elif ref in by_asset:
@@ -872,6 +876,7 @@ class DocumentTab(QWidget):
         from . import templates as _tpl
         self.figures.width_provider = lambda: _tpl.figure_widths(self.current_layout())
         self.figures.two_column_provider = lambda: _tpl.get(self.current_layout())["two_column"]
+        self.figures.beamer_provider = lambda: _tpl.base_of(self.current_layout()) == "beamer"
         self.refs = ReferencePanel(host)
         self.refs.insertRequested.connect(self.insert_text)
         self.refs.pickRequested.connect(lambda ins: self.pick_from_zotero(insert=ins))
@@ -1032,8 +1037,11 @@ class DocumentTab(QWidget):
         cur = self.layout_combo.currentData()
         self.layout_combo.blockSignals(True)
         self.layout_combo.clear()
+        pres = templates.base_of(templates.detect(self.source())) == "beamer" \
+            if hasattr(self, "editor") else False
         for tid, tlabel in templates.list_templates():
-            self.layout_combo.addItem(tlabel, tid)
+            if (templates.base_of(tid) == "beamer") == pres:     # presentations vs documents
+                self.layout_combo.addItem(tlabel, tid)
         i = self.layout_combo.findData(cur)
         if i >= 0:
             self.layout_combo.setCurrentIndex(i)
@@ -1090,6 +1098,11 @@ class DocumentTab(QWidget):
         if not hasattr(self, "layout_combo") or not hasattr(self, "figures"):
             return
         lid = self.current_layout()
+        from . import templates as _t
+        pres = _t.base_of(lid) == "beamer"
+        if getattr(self, "_pres_seen", None) != pres:
+            self._pres_seen = pres
+            self.populate_layouts()
         i = self.layout_combo.findData(lid)
         if i >= 0 and i != self.layout_combo.currentIndex():
             self.layout_combo.setCurrentIndex(i)

@@ -427,6 +427,13 @@ def resolve_ref(key: str, sheets):
     return next((sm for sm in sheets if sm.name == key), None)
 
 
+def frame_snippet(sheet_id: str, name: str = "", width: str = "") -> str:
+    """A Beamer frame that shows one sheet (title = the sheet's name)."""
+    opts = f"[{width}]" if width else "[width=0.85\\textwidth]"
+    return (f"\\begin{{frame}}{{{name or 'Figure'}}}\n  \\centering\n"
+            f"  \\noorsheet{opts}{{{sheet_id}}}\n\\end{{frame}}\n")
+
+
 def figure_snippet(sheet_id: str, name: str = "", caption: str = "", label: str = "",
                    width: str = "", star: bool = False) -> str:
     """A ``figure`` environment for one sheet (what *Insert figure...* writes); ``star``
@@ -518,6 +525,12 @@ def prepare_workdir(workdir, source: str) -> Path:
     (wd / FIGURES_DIR).mkdir(parents=True, exist_ok=True)
     (wd / "main.tex").write_text(source, encoding="utf-8")
     (wd / "noorsuite.sty").write_text(STY, encoding="utf-8")
+    try:                                    # imported PowerPoint themes: sty + pictures
+        from . import pptximport
+        for rel, data in pptximport.support_files(source).items():
+            (wd / rel).write_bytes(data)
+    except OSError:
+        pass
     return wd
 
 
@@ -568,8 +581,9 @@ def write_bundle(dest, source: str, figures_dir) -> Path:
     that compiles anywhere (journal submission, arXiv, Overleaf upload)."""
     dest = Path(dest)
     prepare_workdir(dest, source)
-    for pdf in Path(figures_dir).glob("*.pdf"):
-        shutil.copy2(pdf, dest / FIGURES_DIR / pdf.name)
+    for pat in ("*.pdf", "*.png", "*.jpg"):
+        for fig in Path(figures_dir).glob(pat):
+            shutil.copy2(fig, dest / FIGURES_DIR / fig.name)
     return dest
 
 
