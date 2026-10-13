@@ -146,6 +146,17 @@ text. Keys are data coordinates; the entries are stored as `"0=RT; 1=77 K"` (so 
 `;`). A string-labelled heatmap axis shows one tick per label by itself; the mapping only renames.
 In the GUI: Axes tab -> "X / Y tick labels" (same `value=text; value=text` syntax).
 
+### Author lists and Supporting Information
+
+With a layout template the author list is structured: `suite.push_document("Paper", body, template="acs",
+title="...", authors=[{"name": "A. One", "affils": ["1"], "email": "a@b.org", "corresponding": True},
+{"name": "B. Two", "affils": ["1", "2"]}], affiliations={"1": "Univ A, City", "2": "Institute B, Town"})` - it is
+written in the layout's convention (authblk / achemso / elsarticle / RSC). Hand-written `authblk` front matter
+(`\author[1,2]{Name}`, `\affil[1]{University}`) is understood in every layout and converted when the user
+switches layout; in ACS / Elsevier classes the built copy converts it automatically (never mix `authblk` into
+those classes by hand). `suite.push_si_document("Paper")` creates "Paper - SI" (same layout and authors,
+S-numbered counters).
+
 ### Tables from data objects
 
 `suite.push_table("IV summary", "IV A3", columns=["V", ("I", "Current (mA)"), {"col": "R", "fmt": "sci",

@@ -607,7 +607,7 @@ class SciSuiteClient:
 
     # ------------------------------------------------------------- LaTeX documents
     def push_document(self, name, source, *, mode="replace", folder=None, template=None,
-                      title=None, authors=None, abstract=""):
+                      title=None, authors=None, abstract="", affiliations=None):
         """Create or update a LaTeX document stored in the project (shown in the project
         tree, opened with its live PDF preview in the GUI). ``mode="append"`` adds to the
         end of an existing one. Figures are sheets: ``\\noorsheet{<sheet id>}`` --
@@ -616,11 +616,22 @@ class SciSuiteClient:
         ``template`` = ``"acs"`` | ``"rsc"`` | ``"elsevier"`` | ``"article"`` lays the
         document out for that journal: a body-only ``source`` is wrapped (``title``,
         ``authors`` and ``abstract`` fill the front matter), a complete one is switched to the
-        template's preamble with its text kept."""
+        template's preamble with its text kept. ``authors`` are names or dicts ``{"name",
+        "affils": ["1", "2"], "email", "corresponding"}`` with ``affiliations={"1": "Univ A",
+        ...}``; the list is written in the layout's own convention."""
         return self._ipc.send({"action": ACTION_DOCUMENT, "name": name, "source": source,
                                "mode": mode, "folder": folder or "", "template": template or "",
                                "title": title or "", "authors": list(authors or []),
-                               "abstract": abstract})
+                               "abstract": abstract, "affiliations": dict(affiliations or {})})
+
+    def push_si_document(self, main, name=None, *, title=None) -> dict:
+        """Create the Supporting Information document of the paper ``main`` (a document name
+        or id): same class / preamble / macros / authors, new title, empty body skeleton,
+        figures / tables / equations / pages numbered S1, S2, ... References and sheets are
+        project-wide, so the SI can cite and show the same items."""
+        from . import templates
+        src = self.get_document(main)
+        return self.push_document(name or f"{main} - SI", templates.si_document(src, title))
 
     def list_templates(self) -> pd.DataFrame:
         """Document layouts usable as ``push_document(template=<id>)``: the built-in journal

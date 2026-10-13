@@ -31,6 +31,17 @@ def win(app, monkeypatch, tmp_path):
     w._autosave_timer.stop()
     yield w
     w.ipc.stop()
+    # release the window, its canvases and document tabs: dozens of live windows in one
+    # process exhausted native resources (silent crashes late in a full run)
+    try:
+        for tab in list(w.doc_tabs.values()):
+            tab._source_timer.stop()
+        w.close()
+        w.deleteLater()
+        from PyQt6.QtWidgets import QApplication as _QA
+        _QA.processEvents()
+    except Exception:
+        pass
 
 
 def _plot(win, **extra):

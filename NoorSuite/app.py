@@ -2906,7 +2906,7 @@ class SciSuiteWindow(QMainWindow):
         return QPixmap(str(path))
 
     def create_new_document(self, name=None, source=None, folder=None,
-                            template=None) -> DocumentModel:
+                            template=None, open_tab=False) -> DocumentModel:
         name = name or f"Document {len(self.documents) + 1}"
         dm = DocumentModel(name, source if source is not None
                            else latex.article_template(name, template_id=template))
@@ -2914,7 +2914,7 @@ class SciSuiteWindow(QMainWindow):
         parent = self._folder_item(split_folder_path(folder)) if folder \
             else self._selected_folder()
         self._add_doc_tree_item(dm, parent)
-        if source is None:
+        if source is None or open_tab:
             self._open_document_tab(dm.doc_id)
         self._refresh_ipc_snapshot()
         return dm
@@ -2966,7 +2966,8 @@ class SciSuiteWindow(QMainWindow):
             from . import templates
             text = templates.compose(text, payload["template"],
                                      payload.get("title") or key or "",
-                                     payload.get("authors"), payload.get("abstract", ""))
+                                     payload.get("authors"), payload.get("abstract", ""),
+                                     payload.get("affiliations"))
         if dm is None:
             self.create_new_document(key or "Document", text, payload.get("folder"))
             return

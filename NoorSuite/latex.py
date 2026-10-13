@@ -319,7 +319,10 @@ def prepare_build_source(source: str, records, style_id: str | None = None,
     themselves (:mod:`NoorSuite.refstyle`); BibTeX formats get ``ensure_bibliography``."""
     from . import zotero
     st = bib_style(style_id)
+    from . import templates
+    source, au_notes = templates.normalize_authors(source)
     source, pk_notes = normalize_for_style(source, style_id)
+    pk_notes = au_notes + pk_notes
     if st.get("native"):
         from . import refstyle
         src, cited, undefined, notes = refstyle.number_citations(

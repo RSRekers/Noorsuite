@@ -364,3 +364,168 @@ def test_user_layout_shows_in_new_manuscript_and_skill_push(win, tpl_dir):
                              "title": "Skill", "authors": ["A"], "abstract": "Abs."})
     d2 = next(d for d in win.documents.values() if d.name == "Skill doc")
     assert "twocolumn" in d2.source and "Skill" in d2.source
+
+
+# ------------------------------------------------------------------ author lists
+_AUTHORS = [{"name": "Anna Author", "affils": ["x"], "email": "a@b.org", "corresponding": True},
+            {"name": "Ben Writer", "affils": ["x", "y"], "email": "", "corresponding": False}]
+_AFFS = {"x": "University A, City", "y": "Institute B, Town"}
+
+
+def test_author_lists_roundtrip_through_every_layout():
+    from NoorSuite import templates as T
+    src = T.build_document("article", "T", _AUTHORS, "Abs.", "Body.", None, _AFFS)
+    assert r"\usepackage{authblk}" in src and r"\author[1,2]{Ben Writer}" in src
+    assert r"\affil[2]{Institute B, Town}" in src
+    for tid, marker in (("acs", r"\alsoaffiliation{Institute B, Town}"),
+                        ("elsevier", r"\address[2]{Institute B, Town}"),
+                        ("rsc", r"$^{2}$ Institute B, Town"), ("article", r"\affil[1]")):
+        out = T.apply_template(src, tid)
+        assert marker in out, (tid, out)
+        assert r"\usepackage{authblk}" in out if tid == "article" else \
+            r"\usepackage{authblk}" not in out
+    # structured information survives ACS -> Elsevier -> article (keys renumbered)
+    back = T.parse_authors(T.apply_template(T.apply_template(src, "acs"), "elsevier"))
+    assert [a["name"] for a in back["authors"]] == ["Anna Author", "Ben Writer"]
+    assert back["authors"][0]["email"] == "a@b.org" and back["authors"][0]["corresponding"]
+    assert set(back["affiliations"].values()) == set(_AFFS.values())
+    assert len(back["authors"][1]["affils"]) == 2
+
+
+def test_parse_authors_reads_handwritten_conventions():
+    from NoorSuite import templates as T
+    authblk = (r"\documentclass{article}\usepackage{authblk}" "\n"
+               r"\author[1,2]{Anna A.}\author[2*]{Ben B.}" "\n"
+               r"\affil[1]{Uni A}\affil[2]{Uni B}\begin{document}\end{document}")
+    p = T.parse_authors(authblk)
+    assert [a["affils"] for a in p["authors"]] == [["1", "2"], ["2"]]
+    assert p["authors"][1]["corresponding"] and p["affiliations"] == {"1": "Uni A", "2": "Uni B"}
+    acs = (r"\documentclass{achemso}" "\n" r"\author{Anna A.}\affiliation{Uni A}\email{a@b.c}" "\n"
+           r"\author{Ben B.}\affiliation[]{Uni B}\alsoaffiliation{Uni C}" "\n"
+           r"\begin{document}\end{document}")
+    p = T.parse_authors(acs)
+    assert p["authors"][0]["email"] == "a@b.c" and len(p["authors"][1]["affils"]) == 2
+    plain = r"\author{A One \and B Two}\begin{document}"
+    assert [a["name"] for a in T.parse_authors(plain)["authors"]] == ["A One", "B Two"]
+
+
+def test_build_copy_repairs_authblk_in_classes_with_own_author_commands():
+    from NoorSuite import latex
+    hand = (r"\usepackage{authblk}" "\n" r"\author[1]{Anna A.}" "\n" r"\affil[1]{Uni A}" "\n")
+    for cls, own in (("achemso", r"\affiliation{Uni A}"), ("elsarticle", r"\address[1]{Uni A}")):
+        src = (r"\documentclass{" + cls + "}\n" + hand + r"\title{T}" "\n"
+               r"\begin{document}" "\n" r"\begin{abstract}x\end{abstract}" "\nBody.\n"
+               r"\end{document}")
+        out, notes = latex.prepare_build_source(src, [], "acs-guide")[:2]
+        assert r"\usepackage{authblk}" not in out and own in out
+        assert any("authblk" in n for n in notes)
+    art = (r"\documentclass{article}" "\n" r"\usepackage{authblk}" "\n"
+           r"\author[1]{Anna}\affiliation[1]{Uni A}" "\n" r"\begin{document}\end{document}")
+    out, notes = latex.prepare_build_source(art, [], "acs-guide")[:2]
+    assert r"\affil[1]{Uni A}" in out and r"\affiliation" not in out
+    noblk = r"\documentclass{article}\author[1]{A}\affil[1]{B}" "\n" r"\begin{document}\end{document}"
+    out, _ = latex.prepare_build_source(noblk, [], "acs-guide")[:2]
+    assert r"\usepackage{authblk}" in out
+
+
+def test_authors_dialog_edits_the_front_matter(win, monkeypatch):
+    from NoorSuite import templates as T
+    from NoorSuite.authorsdialog import AuthorsDialog
+    ids, dm, tab = _doc_win(win, 1)
+    tab.set_layout("elsevier")
+    dlg_holder = {}
+
+    def fake_exec(self):
+        dlg_holder["pre"] = ([a["name"] for a in self.result_authors], self.a_table.rowCount())
+        self.a_table.setRowCount(0)
+        self._add_author({"name": "Zoe Zed", "affils": ["k"], "email": "z@z.z",
+                          "corresponding": True})
+        self._add_author({"name": "Yan Yu", "affils": ["k", "m"]})
+        self.f_table.setRowCount(0)
+        self._add_affil("k", "Lab K, Town")
+        self._add_affil("m", "Lab M, City")
+        self._accept()
+        return self.DialogCode.Accepted
+
+    monkeypatch.setattr(AuthorsDialog, "exec", fake_exec)
+    tab.edit_authors()
+    src = tab.source()
+    assert r"\author[1]{Zoe Zed\corref{cor1}}" in src and r"\ead{z@z.z}" in src
+    assert r"\author[1,2]{Yan Yu}" in src and r"\address[2]{Lab M, City}" in src
+    assert r"\cortext[cor1]{Corresponding author}" in src
+    # switching layout keeps the list
+    tab.set_layout("acs")
+    p = T.parse_authors(tab.source())
+    assert [a["name"] for a in p["authors"]] == ["Zoe Zed", "Yan Yu"]
+    assert len(p["authors"][1]["affils"]) == 2
+
+
+# ------------------------------------------------------------------ SI documents
+def _main_paper():
+    from NoorSuite import templates as T
+    body = (r"\section{Intro}" "\nSee Fig.~\\ref{f}.\n"
+            r"\begin{figure}\noorsheet{a}\caption{Main}\label{f}\end{figure}" "\n"
+            r"\bibliography{references}" "\n")
+    src = T.build_document("acs", "Charge transport in LLZO", _AUTHORS, "Main abstract.", body,
+                           [r"\newcommand{\Li}{\mathrm{Li}}"], _AFFS)
+    return src
+
+
+def test_si_document_keeps_layout_authors_and_macros_with_s_counters():
+    from NoorSuite import templates as T
+    si = T.si_document(_main_paper())
+    assert r"\documentclass[journal=jacsat,manuscript=article]{achemso}" in si
+    assert r"\newcommand{\Li}" in si and r"\author{Anna Author}" in si
+    assert r"\title{Supporting Information for: Charge transport in LLZO}" in si
+    assert "Main abstract." not in si and "Supporting information for the main text." in si
+    assert r"\section{Intro}" not in si and r"\section*{Supporting Information}" in si
+    for c in ("figure", "table", "equation", "page"):
+        assert r"\renewcommand{\the" + c + r"}{S\arabic{" + c + "}}" in si
+    assert si.rstrip().endswith(r"\end{document}") and si.count(r"\begin{document}") == 1
+    assert T.si_document(si).count(r"\renewcommand{\thefigure}") == 1      # idempotent counters
+    assert r"\title{SI}" in T.si_document(_main_paper(), "SI")
+
+
+def test_si_numbering_prefix_reaches_the_word_export():
+    from NoorSuite import docexport
+    src = (r"\renewcommand{\thefigure}{S\arabic{figure}}" "\n"
+           r"\renewcommand{\theequation}{S\arabic{equation}}" "\n"
+           r"See Fig.~\ref{f1}, \autoref{f1} and Eq.~\eqref{e1}." "\n"
+           r"\begin{figure}\caption{One}\label{f1}\end{figure}" "\n"
+           r"\begin{equation}\label{e1} a=b \end{equation}")
+    assert docexport.counter_prefixes(src) == {"figure": "S", "equation": "S"}
+    t, n, labels = docexport.equations_to_tables(src, "S")
+    assert "(S1)" in t and n == 1
+    out, _ = docexport.number_references(t, labels)
+    assert r"\caption{Figure S1. One}" in out
+    assert "See Fig.~S1, Figure S1 and Eq.~(S1)." in out
+
+
+def test_si_via_window_button_and_offline_api(win, tmp_path):
+    from NoorSuite.client import OfflineClient
+    from NoorSuite.model import ProjectModel
+    ids, dm, tab = _doc_win(win, 1)
+    tab.set_layout("acs")
+    n0 = len(win.documents)
+    tab.new_si_document()
+    assert len(win.documents) == n0 + 1
+    si = next(d for d in win.documents.values() if d.name.endswith(" - SI"))
+    assert "{achemso}" in si.source and "thefigure" in si.source
+    s = OfflineClient(tmp_path / "p.sciproj")
+    s.push_document("Paper", _main_paper())
+    s.push_si_document("Paper")
+    docs = {d.name: d for d in ProjectModel.load(tmp_path / "p.sciproj").documents}
+    assert "Paper - SI" in docs and "Supporting Information for" in docs["Paper - SI"].source
+
+
+def test_push_document_with_structured_authors_offline(tmp_path):
+    from NoorSuite.client import OfflineClient
+    from NoorSuite.model import ProjectModel
+    s = OfflineClient(tmp_path / "p.sciproj")
+    s.push_document("Paper", "Body text.", template="elsevier", title="T",
+                    authors=[{"name": "A One", "affils": ["1"], "email": "a@b.org",
+                              "corresponding": True}, {"name": "B Two", "affils": ["1", "2"]}],
+                    affiliations={"1": "Univ A", "2": "Inst B"})
+    src = ProjectModel.load(tmp_path / "p.sciproj").documents[0].source
+    assert r"\author[1]{A One\corref{cor1}}" in src and r"\ead{a@b.org}" in src
+    assert r"\author[1,2]{B Two}" in src and r"\address[2]{Inst B}" in src

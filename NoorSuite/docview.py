@@ -817,6 +817,16 @@ class DocumentTab(QWidget):
                               "compiles anywhere (journal submission, arXiv, Overleaf)")
         bundle_act.triggered.connect(self.export_bundle)
         toolbar.addAction(bundle_act)
+        authors_act = QAction("Authors...", self)
+        authors_act.setToolTip("Edit the author list: names, affiliations, e-mail, "
+                               "corresponding author (written in the layout's convention)")
+        authors_act.triggered.connect(self.edit_authors)
+        toolbar.addAction(authors_act)
+        si_act = QAction("New SI document", self)
+        si_act.setToolTip("A Supporting Information document with this paper's layout, authors "
+                          "and macros; figures / tables / equations are numbered S1, S2, ...")
+        si_act.triggered.connect(self.new_si_document)
+        toolbar.addAction(si_act)
         table_act = QAction("Insert table...", self)
         table_act.setToolTip("A table of a data object (columns, number formats, rows). It stays "
                              "live: the document holds a reference, the numbers follow the data.")
@@ -973,6 +983,49 @@ class DocumentTab(QWidget):
         self.contentChanged.emit()
         if self.auto_check.isChecked():
             self._source_timer.start(self.AUTO_DELAY_MS)
+
+    def _replace_source(self, new: str):
+        """One undoable edit of the whole text."""
+        if new == self.source():
+            return
+        cur = self.editor.textCursor()
+        cur.beginEditBlock()
+        cur.select(cur.SelectionType.Document)
+        cur.insertText(new)
+        cur.endEditBlock()
+        self.contentChanged.emit()
+        if self.auto_check.isChecked():
+            self._source_timer.start(self.AUTO_DELAY_MS)
+
+    def edit_authors(self):
+        """Author-list editor; the front matter is rewritten for the document's layout."""
+        from . import templates
+        from .authorsdialog import AuthorsDialog
+        info = templates.parse_authors(self.source())
+        dlg = AuthorsDialog(info["authors"], info["affiliations"], self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        new = templates.apply_template(self.source(), self.current_layout(),
+                                       dlg.result_authors, dlg.result_affiliations)
+        style = self.bib_style_id()
+        if style:
+            new = latex.apply_bib_style(new, style)
+        self._replace_source(new)
+        self.status_label.setText(f"  {len(dlg.result_authors)} author(s), "
+                                  f"{len(dlg.result_affiliations)} affiliation(s)")
+
+    def new_si_document(self):
+        """Create the Supporting Information document of this paper and open it."""
+        from . import templates
+        try:
+            src = templates.si_document(self.source())
+        except ValueError as exc:
+            QMessageBox.warning(self, "New SI document", str(exc))
+            return
+        dm = self.host.create_new_document(f"{self.model.name} - SI", src, open_tab=True)
+        dm.layout = self.model.layout
+        dm.bib_style, dm.cite_mode = self.model.bib_style, self.model.cite_mode
+        self.status_label.setText(f"  created \"{dm.name}\"")
 
     def populate_layouts(self):
         from . import templates

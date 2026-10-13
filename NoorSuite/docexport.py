@@ -122,13 +122,26 @@ _TOKEN = re.compile(
     r"|\\label\s*\{(?P<label>[^{}]*)\}")
 
 
+_PREFIX_RE = re.compile(
+    r"\\renewcommand\s*\{\\the(figure|table|equation)\}\s*\{([A-Za-z]*)\\arabic\{")
+
+
+def counter_prefixes(src: str) -> dict:
+    """``{"figure": "S", ...}`` from the Supporting-Information convention of redefining the
+    figure / table / equation counters with a letter prefix; captions, references and equation
+    numbers carry it."""
+    code = _COMMENT.sub("", src)
+    return {m.group(1): m.group(2) for m in _PREFIX_RE.finditer(code)}
+
+
 def number_references(src: str, equation_labels: dict | None = None) -> tuple[str, dict]:
     """Number figures / tables / sections exactly as LaTeX would and resolve ``\\ref``,
     ``\\autoref``, ``\\cref`` and ``\\eqref`` to them. Returns ``(text, {label: text})``."""
     code = _COMMENT.sub("", src)
     labels: dict = {}
+    pre = counter_prefixes(src)
     for k, n in (equation_labels or {}).items():          # numbered by equations_to_tables
-        labels[k] = ("Equation", str(n))
+        labels[k] = ("Equation", pre.get("equation", "") + str(n))
     sec = [0, 0, 0]
     fig = tab = eq = 0
     cur = None                                   # ("figure", n) while inside an environment
@@ -157,11 +170,11 @@ def number_references(src: str, equation_labels: dict | None = None) -> tuple[st
             cur = None
         elif m.group(0).startswith("\\caption"):
             if cur is not None:
-                inserts.append((m.end(), f"{cur[0]} {cur[1]}. "))
+                inserts.append((m.end(), f"{cur[0]} {pre.get(cur[0].lower(), '')}{cur[1]}. "))
         elif m.group("label") is not None:
             key = m.group("label").strip()
             if cur is not None:
-                labels[key] = (cur[0], str(cur[1]))
+                labels[key] = (cur[0], pre.get(cur[0].lower(), "") + str(cur[1]))
             elif last_sec:
                 labels[key] = ("Section", last_sec)
     # caption prefixes (insert from the back so positions stay valid; map back via code==src
@@ -171,7 +184,7 @@ def number_references(src: str, equation_labels: dict | None = None) -> tuple[st
         for pos, text in sorted(inserts, reverse=True):
             out = out[:pos] + text + out[pos:]
     else:
-        out = _prefix_captions(src)
+        out = _prefix_captions(src, pre)
 
     def ref(m):
         cmd, key = m.group(1), m.group(2).strip()
@@ -189,7 +202,7 @@ def number_references(src: str, equation_labels: dict | None = None) -> tuple[st
     return out, {k: f"{v[0]} {v[1]}" for k, v in labels.items()}
 
 
-def _prefix_captions(src: str) -> str:
+def _prefix_captions(src: str, pre: dict | None = None) -> str:
     """Caption prefixes when the text has comments: redo the scan on the commented source."""
     out, fig, tab, cur, pos = [], 0, 0, None, 0
     for m in re.finditer(r"\\begin\{(figure\*?|table\*?)\}|\\end\{(figure\*?|table\*?)\}"
@@ -208,7 +221,7 @@ def _prefix_captions(src: str) -> str:
             cur = None
         elif cur is not None:
             out.append(src[pos:m.end()])
-            out.append(f"{cur[0]} {cur[1]}. ")
+            out.append(f"{cur[0]} {(pre or {}).get(cur[0].lower(), '')}{cur[1]}. ")
             pos = m.end()
     out.append(src[pos:])
     return "".join(out)
@@ -256,7 +269,7 @@ def _split_top(text: str, sep: str) -> list:
     return parts
 
 
-def equations_to_tables(src: str) -> tuple[str, int, dict]:
+def equations_to_tables(src: str, prefix: str = "") -> tuple[str, int, dict]:
     r"""Numbered ``equation`` / ``align`` / ``gather`` / ``eqnarray`` environments as borderless
     tables: an empty marker cell on the left, the math in the middle, ``(n)`` on the right.
     ``equation`` / ``gather`` rows have one middle cell; ``align`` / ``eqnarray`` rows are split at
@@ -279,7 +292,7 @@ def equations_to_tables(src: str) -> tuple[str, int, dict]:
             number = ""
             if numbered:
                 n += 1
-                number = f"({n})"
+                number = f"({prefix}{n})"
                 for k in keys:
                     labels[k.strip()] = n
             cell = lambda t: f"$\\displaystyle {' '.join(t.split())}$" if t.strip() else ""  # noqa
@@ -398,7 +411,8 @@ def prepare_office_source(source: str, records: list, cite_mode: str, sheets, as
             notes.append(f"figure file {key}: {exc}")
     text, missing = swap_figures(text, files)
     text = bibliography_to_paragraphs(text)
-    text, _n_eq, eq_labels = equations_to_tables(text)
+    text, _n_eq, eq_labels = equations_to_tables(
+        text, counter_prefixes(text).get("equation", ""))
     text, _labels = number_references(text, eq_labels)
     text = re.sub(r"\\usepackage(\[[^\]]*\])?\{noorsuite\}", "", text)
     return text, notes, missing

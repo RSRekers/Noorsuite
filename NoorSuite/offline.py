@@ -236,7 +236,8 @@ class OfflineBackend:
         if p.get("template"):
             from . import templates
             text = templates.compose(text, p["template"], p.get("title") or key or "",
-                                     p.get("authors"), p.get("abstract", ""))
+                                     p.get("authors"), p.get("abstract", ""),
+                                     p.get("affiliations"))
         if dm is None:
             dm = DocumentModel(key or "Document", text)
             self.project.documents.append(dm)

@@ -607,6 +607,20 @@ title/x_label/y_label + trace labels).
   black text by default; QSettings `doc/dark`). Don't rely on the app palette in the Document tab.
 - While a document tab is current the main splitter collapses the inspector (`_saved_split` restores it).
 
+## Author lists and SI documents (`templates.py`, `authorsdialog.py`)
+
+- `parse_authors(source)` -> `{"authors": [{name, affils[keys], email, corresponding}], "affiliations": {key: text}}`
+  from authblk / elsarticle / achemso / plain `\and` front matter (only text before the first section /
+  abstract / `\maketitle`). `render_author_block(tid, authors, affiliations)` -> placeholder texts
+  (`@AUTHORBLOCK@`, `@ACSAUTHORS@`, `@ELSAUTHORS@`, `@RSCAFFIL@`, `@AUTHORS@`) + preamble lines; keys are renumbered
+  1..n by first use. `extract_parts` returns `author_info` / `affiliations`; `apply_template(source, tid,
+  authors=None, affiliations=None)` keeps them across layouts. `authblk` is added only for the article base.
+- `normalize_authors(source)` (called first in `latex.prepare_build_source`): converts authblk in achemso /
+  elsarticle to native commands, `\affiliation` -> `\affil` next to authblk, adds authblk for `\author[..]`.
+- `si_document(source, title)`: surgery on the main text (title, abstract, body replaced; preamble verbatim; S
+  counters via `\renewcommand{\thefigure}{S\arabic{figure}}` ...). `docexport.counter_prefixes` reads those
+  renewcommands so Word captions / refs / equation numbers carry the `S`.
+
 ## Data tables (`tables.py`, `tabledialog.py`)
 
 - `TableModel` (`ProjectModel.tables`, optional key): `data_id`, `columns` [{col, header, fmt, digits, align,

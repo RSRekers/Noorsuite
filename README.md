@@ -161,6 +161,22 @@ in `plot` / `heatmap` / `show_image` / `organize_sheet`. On a categorical heatma
 that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick labels*, written as
 `0=RT; 1=77 K; 2=4 K`.
 
+## Author lists and Supporting Information
+
+*Authors...* (document toolbar) edits the author list in a table: names, affiliation keys (`1,2`), e-mail,
+*corresponding*; affiliations are a second table. The front matter is written in the convention of the document's
+layout - `authblk` (`\author[1,2]{..}` + `\affil[1]{..}`) in the plain article, `\author{}` + `\affiliation{}` /
+`\alsoaffiliation{}` / `\email{}` for ACS, `\author[1]{..}` + `\address[1]{..}` + `\ead{}` for Elsevier, names with
+superscripts plus affiliation lines for RSC - and the list survives layout switches. Hand-written author blocks are read
+in all of these conventions. A build copy repairs the common mistakes (the text is never changed): `authblk` together
+with achemso / elsarticle is converted to the class's own commands, `\affiliation[..]` next to authblk is used as
+`\affil`, `\author[..]` without authblk gets the package.
+
+*New SI document* (document toolbar; `suite.push_si_document("Paper")`) creates the Supporting Information of a paper:
+same class, preamble, macros, title block and authors, the title "Supporting Information for: ...", an empty body
+skeleton, and figure / table / equation / page counters prefixed with `S` (Figure S1, (S1), page S1). References and
+sheets are project-wide, so the SI cites and shows the same items; the Word export keeps the `S` numbers.
+
 ## Tables from data
 
 *Insert table...* (document toolbar) builds a table of a data object: tick and order the columns, give each a

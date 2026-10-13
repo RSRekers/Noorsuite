@@ -32,7 +32,7 @@ TEMPLATES = {
 \usepackage{noorsuite}   % \noorsheet{...}: NoorSuite sheets as figures
 @EXTRA@""",
         "front": r"""\title{@TITLE@}
-\author{@AUTHORS@}
+@AUTHORBLOCK@
 \date{\today}
 
 \begin{document}
@@ -89,6 +89,7 @@ TEMPLATES = {
   \begin{@twocolumnfalse}
   \noindent\LARGE{\textbf{@TITLE@}} \\
   \noindent\large{@AUTHORS@} \\
+  @RSCAFFIL@
   \noindent\normalsize{@ABSTRACT@}
   \end{@twocolumnfalse}
 ]
@@ -328,13 +329,16 @@ def extract_parts(source: str) -> dict:
     end = list(re.finditer(r"\\end\{document\}", rest))
     body = rest[:end[-1].start()] if end else rest
     # front matter commands live in the preamble (article / achemso) or in the body
-    body, found_b = _take_commands(body, ["title", "author", "affiliation", "email", "address",
-                                          "date", "tnoteref"])
-    pre_clean, found_p = _take_commands(pre, ["title", "author", "affiliation", "email",
-                                              "address", "date"])
+    info = parse_authors(source)
+    names = ["title", "author", "affiliation", "alsoaffiliation", "affil", "email", "ead",
+             "cortext", "address", "date", "tnoteref"]
+    body, found_b = _take_commands(body, names)
+    pre_clean, found_p = _take_commands(pre, names)
     title = (found_p["title"] or found_b["title"] or [""])[0]
-    authors = [re.sub(r"\\thanks\{[^}]*\}", "", a).strip()
-               for a in (found_p["author"] + found_b["author"]) if a.strip()]
+    authors = [a["name"] for a in info["authors"]] or \
+        [re.sub(r"\\thanks\{[^}]*\}", "", a).strip()
+         for a in (found_p["author"] + found_b["author"]) if a.strip()]
+    affiliations = dict(info["affiliations"])
     # abstract: environment (article / achemso / elsarticle)
     am = re.search(_ENV.format(n="abstract"), body, re.S)
     abstract = am.group(1).strip() if am else ""
@@ -350,7 +354,11 @@ def extract_parts(source: str) -> dict:
         s = re.search(r"\\normalsize\{(.*?)\}\s*$", block.strip(), re.S)
         title = title or (t.group(1).strip() if t else "")
         if a and not authors:
-            authors = [a.group(1).strip()]
+            authors = [_clean_name(x) for x in re.split(r"\s+and\s+|,\s*", a.group(1)) if x.strip()]
+            info = {"authors": [{"name": n, "affils": [], "email": "", "corresponding": False}
+                                for n in authors], "affiliations": {}}
+        for k, t in re.findall(r"\\footnotesize\{\$\^\{([^}]*)\}\$\s*(.*?)\}", block):
+            affiliations.setdefault(k.strip(), " ".join(t.split()))
         abstract = abstract or (s.group(1).strip() if s else "")
         body = body[:tc.start()] + body[tc.end():]
     body = re.sub(_ENV.format(n="frontmatter"), "", body, flags=re.S)
@@ -364,14 +372,219 @@ def extract_parts(source: str) -> dict:
         pm = re.match(r"\\usepackage(?:\[[^\]]*\])?\{([^}]*)\}", s)
         if pm:
             names = {n.strip() for n in pm.group(1).split(",")}
-            if names <= old or names & {"natbib", "achemso", "apalike", "apacite"}:
+            if names <= old or names & {"natbib", "achemso", "apalike", "apacite", "authblk"}:
                 continue
             extra.append(s)
         elif re.match(r"\\(newcommand|renewcommand|DeclareMathOperator|providecommand|def)\b", s) \
                 and _balanced(s, s.find("{")) is not None and s.count("{") == s.count("}"):
             extra.append(s)
+    if info["authors"] and affiliations and not info["affiliations"]:
+        # RSC block: superscript keys on the names are the link
+        for a in info["authors"]:
+            a["affils"] = [k for k in affiliations if k in (a.get("keys") or [])]
+        info = {"authors": info["authors"], "affiliations": affiliations}
     return {"title": title, "authors": authors, "abstract": abstract,
-            "body": body.strip("\n"), "extra": extra}
+            "body": body.strip("\n"), "extra": extra, "author_info": info["authors"],
+            "affiliations": affiliations or info["affiliations"]}
+
+
+# ----------------------------------------------------------------- author lists
+_AUTHOR_CMDS = ("author", "affil", "affiliation", "alsoaffiliation", "address", "email",
+                "ead", "cortext", "thanks")
+_AUTH_TOKEN = re.compile(r"\\(" + "|".join(sorted(_AUTHOR_CMDS, key=len, reverse=True)) +
+                         r")\*?\s*(\[[^\]]*\])?\s*(?=\{)")
+
+
+def _clean_name(text: str) -> str:
+    text = re.sub(r"\\(?:thanks|corref|tnoteref|fnref)\s*(?:\[[^\]]*\])?\{[^}]*\}", "", text)
+    text = re.sub(r"\$\^\{?[^}$]*\}?\$|\\textsuperscript\{[^}]*\}", "", text)
+    return " ".join(text.split())
+
+
+def _front_text(source: str) -> str:
+    """The part of a document where title / author commands live (before the first section,
+    abstract or end of ``frontmatter``)."""
+    stops = [m.start() for m in (re.search(p, source) for p in (
+        r"\\begin\{abstract\}", r"\\section\b", r"\\end\{frontmatter\}", r"\\maketitle")) if m]
+    return source[:min(stops)] if stops else source
+
+
+def parse_authors(source: str) -> dict:
+    r"""``{"authors": [{name, affils[keys], email, corresponding}], "affiliations": {key: text}}``
+    read from the front matter of a document in *any* convention: authblk
+    (``\author[1,2]{..}`` + ``\affil[1]{..}``), elsarticle (``\author[1]{..}`` + ``\address[1]{..}`` /
+    ``\affiliation[1]{..}``), achemso (``\author{..}`` followed by ``\affiliation{..}`` /
+    ``\alsoaffiliation{..}`` / ``\email{..}``) and plain ``\author{A \and B}``."""
+    text = _COMMENT_STRIP.sub("", _front_text(source))
+    authors, affils, cur, auto, pos = [], {}, None, 0, 0
+    for m in _AUTH_TOKEN.finditer(text):
+        if m.start() < pos:
+            continue
+        grp = _balanced(text, m.end())
+        if grp is None:
+            continue
+        pos = grp[1]
+        cmd, opt, arg = m.group(1), (m.group(2) or "")[1:-1].strip(), grp[0].strip()
+        if cmd == "author":
+            names = [_clean_name(p) for p in re.split(r"\s*\\and\s*", arg)] \
+                if r"\and" in arg else [_clean_name(arg)]
+            for nm in names:
+                if not nm:
+                    continue
+                keys = [k.strip().rstrip("*") for k in opt.split(",") if k.strip().rstrip("*")]
+                cur = {"name": nm, "affils": keys, "email": "", "corresponding": "*" in opt}
+                em = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", arg)
+                if em:                                    # 	hanks{Corresponding author: ...}
+                    cur["email"], cur["corresponding"] = em.group(0), True
+                authors.append(cur)
+        elif cmd in ("affil", "address", "affiliation", "alsoaffiliation"):
+            body = re.sub(r"organization=\{?([^,}]*)\}?", r"\1", arg)
+            if opt and opt.strip("*"):
+                affils[opt.strip()] = " ".join(body.split())
+            elif cur is not None:                         # achemso: belongs to the last author
+                auto += 1
+                key = f"a{auto}"
+                affils[key] = " ".join(body.split())
+                cur["affils"].append(key)
+            else:
+                auto += 1
+                affils[f"a{auto}"] = " ".join(body.split())
+        elif cmd in ("email", "ead") and cur is not None:
+            cur["email"] = arg
+            cur["corresponding"] = True
+    return {"authors": authors, "affiliations": affils}
+
+
+_COMMENT_STRIP = re.compile(r"(?<!\\)%.*")
+
+
+def _norm_authors(authors, affiliations=None):
+    """Author entries as dicts + the affiliation map, with affiliation keys renumbered
+    1..n in order of first use (what every convention prints)."""
+    items = []
+    for a in authors or []:
+        if isinstance(a, dict):
+            d = {"name": str(a.get("name", "")).strip(), "affils": [str(k) for k in
+                                                                    a.get("affils", [])],
+                 "email": str(a.get("email", "")).strip(),
+                 "corresponding": bool(a.get("corresponding"))}
+            if d["name"]:
+                items.append(d)
+        else:
+            for nm in _split_authors([a]):
+                items.append({"name": nm, "affils": [], "email": "", "corresponding": False})
+    old = dict(affiliations or {})
+    order = []
+    for it in items:
+        it["affils"] = [k for k in it["affils"] if k in old]
+        for k in it["affils"]:
+            if k not in order:
+                order.append(k)
+    ren = {k: str(i + 1) for i, k in enumerate(order)}
+    for it in items:
+        it["affils"] = [ren[k] for k in it["affils"]]
+    return items, {ren[k]: old[k] for k in order}
+
+
+def render_author_block(tid: str, authors, affiliations=None) -> dict:
+    """Placeholder texts for a template's front matter + preamble lines the block needs."""
+    items, aff = _norm_authors(authors, affiliations)
+    names = [i["name"] for i in items] or ["Author Name"]
+    extra = []
+    sup = lambda ks: (r"$^{" + ",".join(ks) + "}$") if ks else ""          # noqa: E731
+    # --- plain / article
+    if aff:
+        lines = []
+        for it in items:
+            k = ",".join(it["affils"])
+            thanks = (f"\\thanks{{Corresponding author: {it['email']}}}"
+                      if it["corresponding"] and it["email"] else "")
+            lines.append(f"\\author[{k}]{{{it['name']}{thanks}}}" if k
+                         else f"\\author{{{it['name']}{thanks}}}")
+        lines += [f"\\affil[{k}]{{{t}}}" for k, t in aff.items()]
+        article = "\n".join(lines)
+        if tid == "article":
+            extra.append(r"\usepackage{authblk}")
+    else:
+        article = r"\author{" + r" \and ".join(names) + "}"
+    # --- achemso
+    acs = []
+    for i, it in enumerate(items or [{"name": names[0], "affils": [], "email": ""}]):
+        acs.append(f"\\author{{{it['name']}}}")
+        keys = it["affils"]
+        if keys:
+            acs.append(f"\\affiliation{{{aff[keys[0]]}}}")
+            acs += [f"\\alsoaffiliation{{{aff[k]}}}" for k in keys[1:]]
+        else:
+            acs.append(r"\affiliation{Institution, City, Country}")
+        if it.get("email") or i == 0:
+            acs.append(f"\\email{{{it.get('email') or 'author@example.org'}}}")
+    # --- elsarticle
+    els = []
+    for it in items or [{"name": names[0], "affils": [], "email": "", "corresponding": False}]:
+        k = ",".join(it["affils"])
+        mark = r"\corref{cor1}" if it.get("corresponding") else ""
+        els.append(f"\\author[{k}]{{{it['name']}{mark}}}" if k else f"\\author{{{it['name']}{mark}}}")
+        if it.get("email"):
+            els.append(f"\\ead{{{it['email']}}}")
+    if aff:
+        els += [f"\\address[{k}]{{{t}}}" for k, t in aff.items()]
+    else:
+        els.append(r"\address{Institution, City, Country}")
+    if any(i.get("corresponding") for i in items):
+        els.append(r"\cortext[cor1]{Corresponding author}")
+    # --- rsc: names with superscript keys + affiliation lines
+    rsc_names = " and ".join(i["name"] + sup(i["affils"]) for i in items) or names[0]
+    rsc_aff = "\n  ".join(f"\\noindent\\footnotesize{{$^{{{k}}}$ {t}}} \\\\"
+                          for k, t in aff.items())
+    plain = (r" \and " if tid == "article" else " and ").join(names)
+    return {"@AUTHORBLOCK@": article, "@AUTHORS@": rsc_names if tid == "rsc" else plain,
+            "@ACSAUTHORS@": "\n".join(acs), "@ELSAUTHORS@": "\n".join(els),
+            "@RSCAFFIL@": rsc_aff, "_extra": extra}
+
+
+def normalize_authors(source: str):
+    r"""Build-copy fixes for author lists: ``authblk`` together with a class that has its own
+    author handling (achemso, elsarticle) is converted to that class's syntax; ``\affiliation``
+    next to authblk becomes ``\affil``; ``\author[1]{..}`` without authblk gets it.
+    Returns ``(source, notes)``; the user's text is never changed."""
+    code = _COMMENT_STRIP.sub("", source)
+    tid = detect(source)
+    has_ab = bool(re.search(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*\bauthblk\b", code))
+    notes = []
+    if has_ab and tid in ("acs", "elsevier"):
+        info = parse_authors(source)
+        if not info["authors"]:
+            return source, notes
+        block = render_author_block(tid, info["authors"], info["affiliations"])
+        text = re.sub(r"^[ \t]*\\usepackage(?:\[[^\]]*\])?\{authblk\}[ \t]*\n?", "", source,
+                      flags=re.M)
+        front_end = len(_front_text(text))
+        head, rest = text[:front_end], text[front_end:]
+        head, _ = _take_commands(head, list(_AUTHOR_CMDS))
+        key = "@ACSAUTHORS@" if tid == "acs" else "@ELSAUTHORS@"
+        m = re.search(r"\\title\s*(?:\[[^\]]*\])?\s*(?=\{)", head)
+        if m and _balanced(head, m.end()):
+            at = _balanced(head, m.end())[1]
+        else:
+            b = re.search(r"\\begin\{document\}", head)
+            at = b.start() if b else len(head)
+        head = head[:at] + "\n" + block[key] + "\n" + head[at:]
+        notes.append("authblk does not work with this class: the author list was converted to "
+                     "the class's own author / affiliation commands in the built copy")
+        return head + rest, notes
+    if has_ab and re.search(r"\\affiliation\b", code) and not re.search(r"\\affil\b", code):
+        notes.append(r"\affiliation is not an authblk command: used as \affil in the built copy")
+        return re.sub(r"\\affiliation(?=\s*[\[{])", lambda m: r"\affil", source), notes
+    if tid == "article" and not has_ab and re.search(r"\\author\s*\[", code):
+        b = re.search(r"\\begin\{document\}", source)
+        if b:
+            notes.append(r"\author[..] needs authblk: added \usepackage{authblk} to the built copy")
+            src = source[:b.start()] + "\\usepackage{authblk}\n" + source[b.start():]
+            if re.search(r"\\affiliation\b", code) and not re.search(r"\\affil\b", code):
+                src = re.sub(r"\\affiliation(?=\s*[\[{])", lambda m: r"\affil", src)
+            return src, notes
+    return source, notes
 
 
 # ------------------------------------------------------------------------ building
@@ -393,14 +606,22 @@ def _authors_for(tid: str, authors: list) -> dict:
 
 
 def build_document(template_id: str, title: str = "Title", authors=None, abstract: str = "",
-                   body: str = "", extra=None) -> str:
+                   body: str = "", extra=None, affiliations=None) -> str:
     t = get(template_id)
     tid = base_of(template_id)
+    blk = render_author_block(tid, list(authors or []), affiliations)
+    extra = list(extra or [])
+    for line in blk.pop("_extra", []):
+        if line not in extra and not any("authblk" in e for e in extra):
+            extra.append(line)
     extra_txt = ("\n" + "\n".join(extra)) if extra else ""
     pre = t["preamble"].replace("@EXTRA@", extra_txt.lstrip("\n"))
     front = t["front"].replace("@TITLE@", title or "Title")
     front = front.replace("@ABSTRACT@", abstract or "Abstract.")
-    for k, v in _authors_for(tid, list(authors or [])).items():
+    if "@AUTHORBLOCK@" not in t["front"]:       # older saved layouts: \author{@AUTHORS@}
+        blk["@AUTHORS@"] = blk["@AUTHORS@"] if tid != "article" else \
+            r" \and ".join(n["name"] for n in _norm_authors(authors)[0]) or "Author Name"
+    for k, v in blk.items():
         front = front.replace(k, v)
     if not body.strip():
         body = ("\\section{Introduction}\nWrite your text here. Insert a figure with "
@@ -429,7 +650,7 @@ def _fix_envs_for(tid: str, body: str) -> str:
     return body
 
 
-def apply_template(source: str, template_id: str) -> str:
+def apply_template(source: str, template_id: str, authors=None, affiliations=None) -> str:
     """The document's text in another layout: preamble and front matter are regenerated from
     title / authors / abstract, the body (text, figures, bibliography) is kept."""
     if template_id not in TEMPLATES and not (is_user(template_id)
@@ -437,17 +658,21 @@ def apply_template(source: str, template_id: str) -> str:
         return source
     parts = extract_parts(source)
     body = _fix_envs_for(base_of(template_id), parts["body"])
-    return build_document(template_id, parts["title"] or "Title", parts["authors"],
-                          parts["abstract"], body, parts["extra"])
+    if authors is None:
+        authors = parts["author_info"] or parts["authors"]
+        affiliations = parts["affiliations"] if affiliations is None else affiliations
+    return build_document(template_id, parts["title"] or "Title", authors,
+                          parts["abstract"], body, parts["extra"], affiliations)
 
 
 def compose(source: str, template_id: str, title: str = "", authors=None,
-            abstract: str = "") -> str:
+            abstract: str = "", affiliations=None) -> str:
     """For ``push_document(template=...)``: a complete source text in ``template_id`` from
     either a full document (switched) or just body text (wrapped)."""
     if r"\documentclass" in source:
-        return apply_template(source, template_id)
-    return build_document(template_id, title or "Title", authors, abstract, source)
+        return apply_template(source, template_id, authors, affiliations)
+    return build_document(template_id, title or "Title", authors, abstract, source,
+                          None, affiliations)
 
 
 # ------------------------------------------------------------------ Word look
@@ -508,3 +733,56 @@ def write_reference_docx(template_id: str, out_path, default_docx) -> bool:
                 data = xml.encode("utf-8")
             dst.writestr(item, data)
     return Path(out_path).is_file()
+
+
+# ----------------------------------------------------------- Supporting Information
+SI_COUNTERS = [r"\renewcommand{\thefigure}{S\arabic{figure}}",
+               r"\renewcommand{\thetable}{S\arabic{table}}",
+               r"\renewcommand{\theequation}{S\arabic{equation}}",
+               r"\renewcommand{\thepage}{S\arabic{page}}"]
+SI_BODY = (r"\section*{Supporting Information}" "\n"
+           "This document contains additional data and figures supporting the main text.\n\n"
+           r"\section{Additional data}" "\n\n" r"\section{Additional figures}" "\n\n")
+
+
+def si_document(source: str, title: str | None = None) -> str:
+    r"""A Supporting-Information document derived from ``source`` (the main paper): same class,
+    preamble, macros, title block and authors, a new title / abstract, an empty body skeleton
+    and the counters of figures, tables, equations and pages prefixed with ``S``
+    (``Figure S1``, ``(S1)``). References and figures are project-wide, so the SI can cite
+    and show the same items."""
+    m = re.search(r"\\begin\{document\}", source)
+    if not m:
+        raise ValueError("the document has no \\begin{document}")
+    text = source
+    # title
+    t = re.search(r"\\title\s*(\[[^\]]*\])?\s*(?=\{)", text)
+    if t:
+        g = _balanced(text, t.end())
+        if g:
+            new = title or "Supporting Information for: " + " ".join(g[0].split())
+            text = text[:t.end()] + "{" + new + "}" + text[g[1]:]
+    # abstract
+    text = re.sub(_ENV.format(n="abstract"),
+                  lambda mm: "\\begin{abstract}\nSupporting information for the main text.\n"
+                             "\\end{abstract}", text, count=1, flags=re.S)
+    b = re.search(r"\\begin\{document\}", text)
+    cuts = [b.end()]
+    for pat in (r"\\end\{abstract\}", r"\\end\{frontmatter\}", r"\\maketitle",
+                r"\\end\{@twocolumnfalse\}\s*\]"):
+        mm = re.search(pat, text[b.end():])
+        if mm:
+            cuts.append(b.end() + mm.end())
+    start = max(cuts)
+    ends = list(re.finditer(r"\\end\{document\}", text))
+    end = ends[-1].start() if ends else len(text)
+    text = text[:start] + "\n\n" + SI_BODY + text[end:]
+    if not ends:
+        text += "\\end{document}\n"
+    b = re.search(r"\\begin\{document\}", text)
+    have = set(re.findall(r"\\renewcommand\{\\the(figure|table|equation|page)\}", text[:b.start()]))
+    add = [c for c in SI_COUNTERS
+           if re.search(r"\\the(\w+)\}", c).group(1) not in have]
+    if add:
+        text = text[:b.start()] + "\n".join(add) + "\n" + text[b.start():]
+    return text
