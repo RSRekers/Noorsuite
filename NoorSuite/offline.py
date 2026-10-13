@@ -29,7 +29,8 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_GET_DATA,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_DOCUMENT, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
-                       ACTION_LIST_REFERENCES, ACTION_REFERENCES,
+                       ACTION_LIST_REFERENCES, ACTION_REFERENCES, ACTION_ASSET,
+                       ACTION_LIST_ASSETS,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_PING,
                        ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE)
@@ -78,6 +79,7 @@ class OfflineBackend:
             ACTION_GET_DATA: self._get_data,
             ACTION_GET_IMAGE: self._get_image,
             ACTION_LIST_DOCUMENTS: self._list_documents,
+            ACTION_LIST_ASSETS: self._list_assets,
             ACTION_GET_DOCUMENT: self._get_document,
             ACTION_LIST_REFERENCES: self._list_references,
         }.get(action)
@@ -97,6 +99,7 @@ class OfflineBackend:
             ACTION_ORGANIZE: self._organize,
             ACTION_DOCUMENT: self._document,
             ACTION_REFERENCES: self._references,
+            ACTION_ASSET: self._asset,
         }.get(action)
         if mutate is None:
             return {"status": "error", "message": f"unknown action {action!r}"}
@@ -274,8 +277,26 @@ class OfflineBackend:
             return {"status": "error", "message": f"no document matching {p.get('key')!r}"}
         return {"status": "success", "id": dm.doc_id, "name": dm.name, "source": dm.source}
 
+    def _asset(self, p):
+        from .model import AssetModel
+        name, ext = p.get("name") or "Figure", p.get("ext") or "svg"
+        cur = next((a for a in self.project.assets if name in (a.name, a.asset_id)), None)
+        if cur is not None:
+            if cur.data != p.get("data", b""):
+                cur.data, cur.ext = bytes(p.get("data", b"")), ext
+                cur.version += 1
+            return {"status": "success", "id": cur.asset_id}
+        a = AssetModel(name, ext, p.get("data", b""))
+        self.project.assets.append(a)
+        return {"status": "success", "id": a.asset_id}
+
+    def _list_assets(self, p):
+        return {"status": "success", "assets": [
+            {"id": a.asset_id, "name": a.name, "ext": a.ext, "version": a.version,
+             "bytes": len(a.data)} for a in self.project.assets]}
+
     def _apply_organize(self, sm: SheetModel, org: dict) -> None:
-        apply_sheet_annotations(sm, org)
+        apply_sheet_annotations(sm, org, self.project.assets)
         if org.get("folder"):
             self.project.tree = tree_move_sheet(self.project.tree, sm.sheet_id,
                                                 split_folder_path(org["folder"]))

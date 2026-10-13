@@ -20,7 +20,8 @@ from pathlib import Path
 
 import numpy as np
 from matplotlib import rcParams
-from PyQt6.QtCore import QByteArray, QMimeData, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (QByteArray, QFileSystemWatcher, QMimeData, Qt, QTimer,
+                          pyqtSignal)
 from PyQt6.QtGui import QAction, QDrag, QIcon, QImage, QKeySequence
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog,
                              QDialogButtonBox, QFileDialog, QHBoxLayout,
@@ -36,16 +37,17 @@ from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
                       ColormapPanel, FigureDialog, FigureStyleWidget, ImageDialog,
                       LegendDialog, ShapeDialog, ShapeStyleWidget, TextDialog,
                       TraceStyleDialog, TraceStyleWidget)
+from . import assets as assets_mod
 from . import latex
 from .zotero import label as zotero_label
 from .docview import DocumentTab
 from .fuzzy import fuzzy_match, smart_score
-from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_DOCUMENT,
-                  ACTION_REFERENCES,
+from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_ASSET,
+                  ACTION_DOCUMENT, ACTION_REFERENCES,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
                   ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
-from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
+from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
                     REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
                     SPLIT_LAYOUTS, ColorMap, DataObject, DocumentModel, ImageObject, ImageRef,
                     ProjectModel, SHAPE_KIND_LABELS, SHAPE_KINDS, ShapeRef, SheetModel,
@@ -792,6 +794,10 @@ class SciSuiteWindow(QMainWindow):
         self.sheets: dict[str, SheetModel] = {}
         self.open_tabs: dict[str, PlotSheet] = {}
         self.documents: dict[str, DocumentModel] = {}   # LaTeX documents
+        self.assets: dict[str, AssetModel] = {}         # imported SVG / PNG / PDF figures
+        self._asset_watch = QFileSystemWatcher(self)    # working files open in an editor
+        self._asset_watch.fileChanged.connect(self._asset_file_changed)
+        self._asset_paths: dict[str, str] = {}          # working file -> asset id
         self.doc_tabs: dict[str, DocumentTab] = {}
         self.references: dict[str, dict] = {}    # cite key -> bibliography record
         self._last_sheet_id = None               # last PlotSheet that was current
@@ -1001,8 +1007,15 @@ class SciSuiteWindow(QMainWindow):
             "of them; double-click one on the plot (or select it here) to edit it.")
         add_menu = QMenu(self.add_object_btn)
         for kind, label in zip(SHAPE_KINDS, SHAPE_KIND_LABELS):
+            if kind == "picture":
+                continue
             add_menu.addAction(label).triggered.connect(
                 lambda _=False, k=kind: self._add_shape(k))
+        add_menu.addSeparator()
+        add_menu.addAction("Picture / SVG from file...").triggered.connect(
+            lambda: self._add_picture(None))
+        self._pic_menu = add_menu.addMenu("Picture from project figures")
+        self._pic_menu.aboutToShow.connect(self._fill_picture_menu)
         self.add_object_btn.setMenu(add_menu)
         add_row.addWidget(self.add_object_btn)
         self.dup_object_btn = QPushButton("Duplicate object")
@@ -1606,6 +1619,7 @@ class SciSuiteWindow(QMainWindow):
         if sm is None:
             return None
         ps = PlotSheet(sm)
+        ps.assets = self.assets
         ps.active_subplot_changed.connect(self.on_subplot_selection_changed)
         ps.element_double_clicked.connect(self.open_element_editor)
         ps.element_right_clicked.connect(self._on_canvas_right_click)
@@ -2111,6 +2125,34 @@ class SciSuiteWindow(QMainWindow):
         self.render_current_sheet()
         self._refresh_ipc_snapshot()
 
+    def _fill_picture_menu(self):
+        self._pic_menu.clear()
+        if not self.assets:
+            self._pic_menu.addAction("(no figure files yet)").setEnabled(False)
+        for a in self.assets.values():
+            self._pic_menu.addAction(f"{a.name}  (.{a.ext})").triggered.connect(
+                lambda _=False, i=a.asset_id: self._add_picture(i))
+
+    def _add_picture(self, asset_id=None):
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        if asset_id is None:
+            got = self.import_assets_dialog()
+            if not got:
+                return
+            asset_id = got[0].asset_id
+        sub = sm.get_active_subplot()
+        sh = make_shape("picture", self._default_shape_geometry(sub, "rect"))
+        sh.asset_id = asset_id
+        sh.fill = False
+        sh.layer_pos = len(sub.traces)
+        sub.shapes.append(sh)
+        self._sync_subplot_trace_list(keep_selection=False)
+        self.subplot_traces.item(sub.stack().index(sh)).setSelected(True)
+        self.render_current_sheet()
+        self._refresh_ipc_snapshot()
+
     def _duplicate_selected_shapes(self):
         sm = self._active_sheet_model()
         if sm is None:
@@ -2460,6 +2502,130 @@ class SciSuiteWindow(QMainWindow):
             ps.render(self.repository, self.images)
         self._notify_documents()
 
+    # --------------------------------------------------------------- figure files
+    def document_assets(self) -> list:
+        return list(self.assets.values())
+
+    def asset_fingerprint(self, asset_id) -> str:
+        a = self.assets.get(asset_id)
+        return assets_mod.fingerprint(a) if a is not None else ""
+
+    def import_asset(self, path=None, *, name=None, data=None, ext=None):
+        """Store a figure file in the project (``path``, or raw ``data`` + ``ext``); a file
+        of the same name replaces the earlier one. Returns the :class:`AssetModel`."""
+        if data is None:
+            p = Path(path)
+            data, ext, name = p.read_bytes(), assets_mod.guess_ext(p), name or p.stem
+        ext = "jpg" if ext in ("jpeg", "JPG", "JPEG") else str(ext or "svg").lower()
+        if ext not in ("svg", "pdf", "png", "jpg"):
+            raise ValueError(f"unsupported figure format .{ext}")
+        name = name or "Figure"
+        cur = next((a for a in self.assets.values() if a.name == name), None)
+        if cur is not None:
+            if cur.data != bytes(data):
+                cur.data, cur.ext = bytes(data), ext
+                cur.version += 1
+                self._asset_changed(cur.asset_id)
+            return cur
+        a = AssetModel(name, ext, data)
+        self.assets[a.asset_id] = a
+        self._refresh_ipc_snapshot()
+        for tab in self.doc_tabs.values():
+            tab.figures.refresh()
+        return a
+
+    def import_assets_dialog(self) -> list:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add figure files", "",
+            "Figures (*.svg *.pdf *.png *.jpg *.jpeg);;All files (*)")
+        out = []
+        for p in paths:
+            try:
+                out.append(self.import_asset(p))
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "Add figure", f"{p}\n\n{exc}")
+        return out
+
+    def edit_asset(self, asset_id) -> bool:
+        """Open the asset's working file in Inkscape (SVG) / the default program; saving there
+        reloads it here (documents and plot pictures update)."""
+        a = self.assets.get(asset_id)
+        if a is None:
+            return False
+        path = str(assets_mod.materialize(a))
+        if path not in self._asset_paths:
+            self._asset_paths[path] = a.asset_id
+        if path not in self._asset_watch.files():
+            self._asset_watch.addPath(path)
+        if not assets_mod.open_in_editor(path):
+            QMessageBox.warning(self, "Edit figure",
+                                f"Could not start an editor for {path}.\nInstall Inkscape or set "
+                                f"{{\"inkscape\": \"<path>\"}} in ~/.noorsuite/config.json.")
+            return False
+        self.statusBar().showMessage(
+            f"Editing \"{a.name}\" - save in the editor and it updates here.", 8000)
+        return True
+
+    def _asset_file_changed(self, path):
+        QTimer.singleShot(400, lambda p=path: self._reload_asset_file(p))
+
+    def _reload_asset_file(self, path):
+        aid = self._asset_paths.get(path)
+        a = self.assets.get(aid) if aid else None
+        if a is None:
+            return
+        if path not in self._asset_watch.files() and os.path.exists(path):
+            self._asset_watch.addPath(path)          # editors replace the file when saving
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            return
+        if data and data != a.data:
+            a.data = data
+            a.version += 1
+            self._asset_changed(aid)
+
+    def _asset_changed(self, asset_id):
+        """A figure file changed: re-render plots that show it, refresh documents."""
+        a = self.assets.get(asset_id)
+        for sid, ps in self.open_tabs.items():
+            sm = self.sheets.get(sid)
+            if sm is not None and any(sh.kind == "picture" and sh.asset_id == asset_id
+                                      for sub in sm.subplots for sh in sub.shapes):
+                ps.render(self.repository, self.images)
+        self._notify_documents()
+        for tab in self.doc_tabs.values():
+            tab.figures.refresh()
+        self._refresh_ipc_snapshot()
+        if a is not None:
+            self.statusBar().showMessage(f"Figure \"{a.name}\" reloaded (version {a.version})",
+                                         5000)
+
+    def remove_asset(self, asset_id):
+        self.assets.pop(asset_id, None)
+        self._asset_paths = {p: i for p, i in self._asset_paths.items() if i != asset_id}
+        self._refresh_open_sheets()
+        for tab in self.doc_tabs.values():
+            tab.figures.refresh()
+        self._refresh_ipc_snapshot()
+
+    def asset_thumbnail(self, asset_id, px=360):
+        from PyQt6.QtGui import QImage, QPixmap
+        a = self.assets.get(asset_id)
+        if a is None:
+            return None
+        arr = assets_mod.raster(a, px)
+        if arr is None:
+            return None
+        arr = np.ascontiguousarray(arr)
+        img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 4,
+                     QImage.Format.Format_RGBA8888).copy()
+        return QPixmap.fromImage(img)
+
+    def export_asset(self, asset_id, out_dir, stem=None):
+        a = self.assets.get(asset_id)
+        return assets_mod.export_for_latex(a, out_dir, stem) if a is not None else None
+
     # ------------------------------------------------------------ LaTeX documents
     def _notify_documents(self):
         for tab in list(self.doc_tabs.values()):
@@ -2508,6 +2674,10 @@ class SciSuiteWindow(QMainWindow):
         if sm is None:
             return ""
         h = hashlib.md5(json.dumps(sm.to_dict(), sort_keys=True, default=str).encode())
+        for sub in sm.subplots:
+            for sh in sub.shapes:
+                if sh.kind == "picture":
+                    h.update(self.asset_fingerprint(sh.asset_id).encode())
         ids = {t.data_id for sub in sm.subplots for t in sub.traces}
         ids |= {sub.image.data_id for sub in sm.subplots if sub.image is not None}
         for oid in sorted(ids):
@@ -2525,7 +2695,8 @@ class SciSuiteWindow(QMainWindow):
     def export_sheet_pdf(self, sheet_id, path):
         """Render a sheet as a vector PDF at its own figure size (``_DOC_FIG_CM`` when the
         sheet has none), on a throw-away copy so open tabs / zoom are untouched."""
-        export_sheet_pdf(self.sheets[sheet_id], self.repository, self.images, path)
+        export_sheet_pdf(self.sheets[sheet_id], self.repository, self.images, path,
+                         assets=self.assets)
 
     def sheet_thumbnail(self, sheet_id, px=360):
         """QPixmap preview of a sheet, cached on disk by the sheet's fingerprint."""
@@ -2538,7 +2709,8 @@ class SciSuiteWindow(QMainWindow):
         path = cache / f"{sheet_id}-{self.sheet_fingerprint(sheet_id)[:16]}-{px}.png"
         if not path.is_file():
             try:
-                export_sheet_png(sm, self.repository, self.images, str(path), px)
+                export_sheet_png(sm, self.repository, self.images, str(path), px,
+                                 assets=self.assets)
             except Exception:
                 return None
             for old in cache.glob(f"{sheet_id}-*-{px}.png"):      # drop stale versions
@@ -2688,6 +2860,7 @@ class SciSuiteWindow(QMainWindow):
         pm.tree = self._serialize_tree()
         pm.colormaps = list(self.colormaps)
         pm.documents = list(self.documents.values())
+        pm.assets = list(self.assets.values())
         pm.references = list(self.references.values())
         cs = self.current_sheet()
         pm.active_sheet_id = cs.sheet_id if cs else next(iter(self.sheets), "")
@@ -2699,6 +2872,9 @@ class SciSuiteWindow(QMainWindow):
         self.sheets.clear()
         self.open_tabs.clear()
         self.documents.clear()
+        self.assets.clear()
+        for a in pm.assets:
+            self.assets[a.asset_id] = a
         self.doc_tabs.clear()
         self.references = {r["key"]: dict(r) for r in pm.references}
         self.colormaps = list(pm.colormaps)
@@ -3018,7 +3194,11 @@ class SciSuiteWindow(QMainWindow):
             "duplicate_name": name_counts[sm.name] > 1,
             "folder": folders.get(sm.sheet_id, ""),
         } for sm in self.sheets.values()]
-        self.ipc.snapshot = {"references": [
+        self.ipc.snapshot = {"assets": [
+                                 {"id": a.asset_id, "name": a.name, "ext": a.ext,
+                                  "version": a.version, "bytes": len(a.data)}
+                                 for a in self.assets.values()],
+                             "references": [
                                  {"key": k, "label": zotero_label(r),
                                   "zotero_key": r.get("zotero_key", "")}
                                  for k, r in self.references.items()],
@@ -3065,6 +3245,12 @@ class SciSuiteWindow(QMainWindow):
             self._handle_document(payload)
         elif action == ACTION_REFERENCES:
             self.add_references(payload.get("items", []))
+        elif action == ACTION_ASSET:
+            try:
+                self.import_asset(name=payload.get("name"), data=payload.get("data", b""),
+                                  ext=payload.get("ext"))
+            except ValueError as exc:
+                self.statusBar().showMessage(f"asset: {exc}", 8000)
 
     # ---- organize: names / tags / notes / folders (IPC) ----------------------
     def _sheet_tree_item(self, sheet_id):
@@ -3089,7 +3275,7 @@ class SciSuiteWindow(QMainWindow):
         return parent
 
     def _apply_sheet_organize(self, sm, org: dict):
-        apply_sheet_annotations(sm, org)
+        apply_sheet_annotations(sm, org, list(self.assets.values()))
         item = self._sheet_tree_item(sm.sheet_id)
         if item is not None:
             self.tree.blockSignals(True)

@@ -47,6 +47,18 @@ STY = r"""\NeedsTeXFormat{LaTeX2e}
     {\href{noorsuite://sheet/#2}{\includegraphics[#1]{noorsuite-figures/#2.pdf}}}%
     {\fbox{\texttt{missing NoorSuite sheet \detokenize{#2}}}}%
   \endgroup}
+% \noorfile[includegraphics options]{asset-id-or-name}: an imported SVG / PDF / PNG / JPG
+\newcommand{\noorfile}[2][]{%
+  \begingroup
+  \hypersetup{pdfborder={0 0 0},colorlinks=false}%
+  \IfFileExists{noorsuite-figures/asset-#2.pdf}%
+    {\href{noorsuite://sheet/asset:#2}{\includegraphics[#1]{noorsuite-figures/asset-#2.pdf}}}%
+    {\IfFileExists{noorsuite-figures/asset-#2.png}%
+      {\href{noorsuite://sheet/asset:#2}{\includegraphics[#1]{noorsuite-figures/asset-#2.png}}}%
+      {\IfFileExists{noorsuite-figures/asset-#2.jpg}%
+        {\href{noorsuite://sheet/asset:#2}{\includegraphics[#1]{noorsuite-figures/asset-#2.jpg}}}%
+        {\fbox{\texttt{missing NoorSuite file \detokenize{#2}}}}}}%
+  \endgroup}
 \endinput
 """
 
@@ -349,6 +361,43 @@ def figure_refs(source: str) -> list:
                 seen.add(key)
                 out.append(key)
     return out
+
+
+_ASSET_RE = re.compile(r"\\noorfile\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
+
+
+def asset_refs(source: str) -> list:
+    """Every distinct ``\\noorfile`` key in ``source`` (comments ignored), in order."""
+    seen, out = set(), []
+    for line in source.splitlines():
+        for m in _ASSET_RE.finditer(_COMMENT_RE.sub("", line)):
+            key = m.group(1).strip()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
+
+
+def resolve_asset(key: str, assets):
+    """The asset (``asset_id`` / ``name``) a ``\\noorfile`` key refers to: id, else name
+    slug, else exact name; ``None`` if there is none."""
+    assets = list(assets)
+    for a in assets:
+        if a.asset_id == key:
+            return a
+    for a in assets:
+        if slug(a.name) == slug(key) and slug(key):
+            return a
+    return next((a for a in assets if a.name == key), None)
+
+
+def asset_snippet(asset_id: str, name: str = "", caption: str = "", width: str = "") -> str:
+    """A ``figure`` environment for an imported figure file."""
+    opts = "[" + (width or "width=0.8" + chr(92) + "linewidth") + "]"
+    note = f"%  {name}" if name else ""
+    return (f"\\begin{{figure}}[htbp]\n  \\centering\n  \\noorfile{opts}{{{asset_id}}}{note}\n"
+            f"  \\caption{{{caption or name or 'Caption.'}}}\n"
+            f"  \\label{{fig:{slug(name) or asset_id}}}\n\\end{{figure}}\n")
 
 
 def resolve_ref(key: str, sheets):

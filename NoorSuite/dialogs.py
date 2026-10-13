@@ -1390,6 +1390,17 @@ class ShapeStyleWidget(QWidget):
         self.fontsize_spin.valueChanged.connect(self._push)
         form.addRow("Font size:", self.fontsize_spin)
 
+        self.asset_label = QLabel("")
+        form.addRow("Figure:", self.asset_label)
+        self.edit_asset_btn = QPushButton("Edit in Inkscape / default editor")
+        self.edit_asset_btn.setToolTip(
+            "Opens the figure in its editor; save there and it reloads here and in documents.")
+        self.edit_asset_btn.clicked.connect(self._edit_asset)
+        form.addRow("", self.edit_asset_btn)
+        self.keep_check = QCheckBox("Keep the figure's aspect ratio")
+        self.keep_check.toggled.connect(self._push)
+        form.addRow("", self.keep_check)
+
         self.edge_btn = ColorButton(color="#d62728", label="Outline / text colour")
         self.edge_btn.colorChanged.connect(lambda *_: self._push())
         form.addRow("Outline:", self.edge_btn)
@@ -1486,6 +1497,10 @@ class ShapeStyleWidget(QWidget):
     # -- host / colormaps ----------------------------------------------------------
     def set_host(self, host):
         self._host = host
+
+    def _edit_asset(self):
+        if self._ref is not None and self._host is not None:
+            self._host.edit_asset(self._ref.asset_id)
 
     def _colormap_names(self) -> list:
         if self._host is not None:
@@ -1619,12 +1634,17 @@ class ShapeStyleWidget(QWidget):
                 "text": ("x0", "y0")}.get(kind, ("x0", "x1", "y0", "y1"))
         for k, e in self.geom_edits.items():
             self._set_row_visible(e, k in geom)
+        pic = kind == "picture"
+        self._set_row_visible(self.asset_label, pic)
+        self._set_row_visible(self.edit_asset_btn, pic)
+        self.keep_check.setVisible(pic)
+        self._set_row_visible(self.edge_btn, not pic)
+        self._set_row_visible(self.style_combo, not pic and kind != "text")
+        self._set_row_visible(self.width_spin, not pic and kind != "text")
         self._set_row_visible(self.angle_spin, kind in ("rect", "ellipse", "text"))
         self._set_row_visible(self.text_edit, kind == "text")
         self._set_row_visible(self.fontsize_spin, kind == "text")
         self._set_row_visible(self.arrow_combo, kind == "arrow")
-        self._set_row_visible(self.style_combo, kind != "text")
-        self._set_row_visible(self.width_spin, kind != "text")
         self.fill_check.setVisible(filled_kind)
         filled = filled_kind and self.fill_check.isChecked()
         self._set_row_visible(self.fill_mode_combo, filled)
@@ -1655,6 +1675,12 @@ class ShapeStyleWidget(QWidget):
             self.angle_spin.setValue(float(ref.angle))
             self.text_edit.setText(ref.text)
             self.fontsize_spin.setValue(float(ref.fontsize))
+            self.keep_check.setChecked(bool(ref.keep_aspect))
+            asset = None
+            if self._host is not None and hasattr(self._host, "assets"):
+                asset = self._host.assets.get(ref.asset_id)
+            self.asset_label.setText(f"{asset.name} (.{asset.ext}, v{asset.version})"
+                                     if asset is not None else "(missing figure)")
             self.edge_btn.setColor(ref.edge_color)
             self.width_spin.setValue(float(ref.line_width))
             self.style_combo.setCurrentIndex(
@@ -1694,6 +1720,7 @@ class ShapeStyleWidget(QWidget):
                 pass
         r.angle = self.angle_spin.value()
         r.text = self.text_edit.text()
+        r.keep_aspect = self.keep_check.isChecked()
         r.fontsize = self.fontsize_spin.value()
         r.edge_color = self.edge_btn.color()
         r.line_width = self.width_spin.value()

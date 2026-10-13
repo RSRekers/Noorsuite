@@ -607,6 +607,28 @@ title/x_label/y_label + trace labels).
   black text by default; QSettings `doc/dark`). Don't rely on the app palette in the Document tab.
 - While a document tab is current the main splitter collapses the inspector (`_saved_split` restores it).
 
+## Objects (shapes) and imported figures
+
+- `model.ShapeRef` (kinds `rect ellipse line arrow xspan yspan text picture`) lives in
+  `SubplotModel.shapes`; **traces and shapes share one stack**: `SubplotModel.stack()` interleaves them
+  (a shape sits above `layer_pos` traces), `set_stack()` adopts a reordered list, `remove_trace()` keeps
+  shapes in place. The GUI layer list's `UserRole` is the index into `stack()` -- never into `traces`.
+  `render` draws traces first with `zorder = 2 + 0.01*stack_index`, then shapes (limits frozen first, so
+  objects never rescale the axes); artist -> `ShapeRef` in `artist_map`, hit test kind `"shape"`.
+- Gradients: `model.gradient_rgba(stops, mode, ...)` (pure numpy; stops `[pos, "#hex", alpha]`) -> RGBA
+  image clipped to the shape's outline patch (so rotation/ellipse/bands work); `fill_alpha` multiplies the
+  stops' own opacity. Text goes through a mathtext check (a stray `$` must not kill the canvas).
+- Objects come in through the `organize` payload (`shapes`, `clear_shapes`; `apply_sheet_annotations`, one
+  implementation for GUI and offline). Client: `add_shape`, `clear_shapes`.
+- `AssetModel` (`ProjectModel.assets`, base64 in the JSON) = imported SVG/PDF/PNG/JPG; `assets.py` finds
+  Inkscape, writes the working file `~/.noorsuite/assets/<slug>-<id>.<ext>`, converts (`export_for_latex`:
+  SVG -> PDF via Inkscape CLI, QtSvg fallback) and rasterises (`raster`, cached by fingerprint).
+  `SciSuiteWindow.edit_asset` opens it and watches the file (`QFileSystemWatcher`, editors replace files
+  so the path is re-added); `_asset_changed` re-renders pictures + notifies documents.
+- LaTeX: `\noorfile[opts]{key}` -> `noorsuite-figures/asset-<key>.{pdf,png,jpg}` with link
+  `noorsuite://sheet/asset:<key>`; the editor / preview emit `asset:<key>` which `DocumentTab._open_ref`
+  routes to `host.edit_asset`. IPC: `ACTION_ASSET`, `ACTION_LIST_ASSETS`; client `push_asset`, `list_assets`.
+
 ## Claude skill & offline insertion
 
 - `NoorSuite/skill/SKILL.md` is the skill (package data; `{{PYTHON}}` is substituted with

@@ -102,8 +102,107 @@ def test_render_draws_gradient_and_hit_test_reports_shape(app_qt):
     assert ax.get_ylim()[1] < 20
 
 
+from tests.test_gui_features import app, win  # noqa: E402,F401  (window fixtures)
+
+
 @pytest.fixture(scope="module")
 def app_qt():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtWidgets import QApplication
     return QApplication.instance() or QApplication([])
+
+
+# ------------------------------------------------------------------ imported figure files
+_SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">'
+        b'<rect width="40" height="20" fill="#2060d0"/><circle cx="20" cy="10" r="8" '
+        b'fill="#ffd000"/></svg>')
+_SVG2 = _SVG.replace(b"#ffd000", b"#00c000")
+
+
+def test_asset_roundtrip_in_project_and_offline_picture(tmp_path):
+    import pandas as pd
+    from NoorSuite.client import OfflineClient
+    from NoorSuite.model import ProjectModel
+    suite = OfflineClient(tmp_path / "p.sciproj")
+    suite.push_dataframe(pd.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]}), name="d")
+    suite.plot("d", "x", "y", new_sheet=True, title="Fig")
+    suite.push_asset(_SVG, name="logo", ext="svg")
+    suite.add_shape("Fig", "picture", asset="logo", x0=1, x1=1.5, y0=1, y1=1.5)
+    pm = ProjectModel.load(tmp_path / "p.sciproj")
+    assert [a.name for a in pm.assets] == ["logo"] and pm.assets[0].data == _SVG
+    pic = pm.sheets[0].subplots[0].shapes[0]
+    assert pic.kind == "picture" and pic.asset_id == pm.assets[0].asset_id
+    # pushing the same name again replaces the bytes and bumps the version
+    suite.push_asset(_SVG2, name="logo", ext="svg")
+    pm = ProjectModel.load(tmp_path / "p.sciproj")
+    assert pm.assets[0].data == _SVG2 and pm.assets[0].version == 2
+    assert list(suite.list_assets()["name"]) == ["logo"]
+    with pytest.raises(ValueError):
+        suite.add_shape("Fig", "picture")                 # no asset given
+    with pytest.raises(ValueError):
+        suite.push_asset(b"x", ext="exe")
+
+
+def test_picture_shape_renders_and_svg_rasterises(app_qt):
+    from NoorSuite import assets
+    from NoorSuite.model import AssetModel, DataObject, SheetModel
+    from NoorSuite.sheet import PlotSheet
+    a = AssetModel("logo", "svg", _SVG)
+    arr = assets.raster(a, 200)
+    assert arr is not None and arr.shape[2] == 4 and max(arr.shape[:2]) <= 200
+    assert arr.shape[1] > arr.shape[0]                    # 40x20 -> wider than tall
+    d = DataObject("d", {"x": np.arange(5.0), "y": np.arange(5.0)})
+    sm = SheetModel("s")
+    sub = sm.subplots[0]
+    sub.traces = [TraceRef(d.id, "x", "y")]
+    pic = make_shape("picture", {"x0": 1, "x1": 3, "y0": 1, "y1": 3})
+    pic.asset_id = a.asset_id
+    sub.shapes = [pic]
+    ps = PlotSheet(sm)
+    ps.assets = {a.asset_id: a}
+    ps.render({d.id: d})
+    ps.canvas.draw()
+    assert len(ps._axes[0].get_images()) == 1
+    # a picture is hit-testable like any object
+    assert any(v is pic for v in ps.artist_map.values())
+
+
+def test_latex_references_to_figure_files():
+    from NoorSuite import latex
+    from NoorSuite.model import AssetModel
+    src = r"\noorfile[width=5cm]{my-logo} text \noorfile{b} % \noorfile{ignored}"
+    assert latex.asset_refs(src) == ["my-logo", "b"]
+    a = AssetModel("My Logo", "svg", b"")
+    assert latex.resolve_asset("my-logo", [a]) is a
+    assert latex.resolve_asset(a.asset_id, [a]) is a
+    assert r"\noorfile[width=0.8" in latex.asset_snippet(a.asset_id, "My Logo")
+    assert r"\newcommand{\noorfile}" in latex.STY
+
+
+def test_window_imports_edits_and_reloads_figure(win, tmp_path):
+    from NoorSuite import assets
+    from NoorSuite.model import ProjectModel
+    svg = tmp_path / "logo.svg"
+    svg.write_bytes(_SVG)
+    a = win.import_asset(str(svg))
+    assert a.name == "logo" and a.ext == "svg" and a.version == 1
+    win.handle_incoming_ipc({"action": "append_dataframe", "name": "d",
+                             "columns": {"x": [1., 2.], "y": [1., 2.]},
+                             "column_order": ["x", "y"]})
+    win.handle_incoming_ipc({"action": "add_to_sheet", "data_name": "d", "x_col": "x",
+                             "y_cols": ["y"], "sheet": "__new__", "subplot_index": 0})
+    sm = next(reversed(win.sheets.values()))
+    win._open_sheet_tab(sm.sheet_id)
+    win._add_picture(a.asset_id)
+    fp1 = win.sheet_fingerprint(sm.sheet_id)
+    # simulate the editor: it saves a new version of the working file
+    work = assets.materialize(a)
+    win._asset_paths[str(work)] = a.asset_id
+    work.write_bytes(_SVG2)
+    win._reload_asset_file(str(work))
+    assert a.version == 2 and a.data == _SVG2
+    assert win.sheet_fingerprint(sm.sheet_id) != fp1      # documents / thumbnails refresh
+    # saved with the project and restored
+    p = tmp_path / "proj.sciproj"
+    win._project_model().save(p)
+    assert ProjectModel.load(p).assets[0].data == _SVG2

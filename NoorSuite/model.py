@@ -707,9 +707,9 @@ class ImageRef:
 # Shapes: lines, arrows, rectangles, ellipses, text and highlight bands drawn on a subplot.
 # They share ONE z-ordered stack with the traces (SubplotModel.stack()).
 # ---------------------------------------------------------------------------
-SHAPE_KINDS = ["rect", "ellipse", "line", "arrow", "xspan", "yspan", "text"]
+SHAPE_KINDS = ["rect", "ellipse", "line", "arrow", "xspan", "yspan", "text", "picture"]
 SHAPE_KIND_LABELS = ["Rectangle", "Ellipse", "Line", "Arrow", "Vertical band (x range)",
-                     "Horizontal band (y range)", "Text"]
+                     "Horizontal band (y range)", "Text", "Picture / SVG"]
 SHAPE_COORDS = ["data", "axes"]
 SHAPE_COORD_LABELS = ["Data coordinates", "Axes fraction (0-1)"]
 FILL_MODES = ["solid", "linear", "radial"]
@@ -792,7 +792,8 @@ class ShapeRef:
     _FIELDS = ("kind", "name", "enabled", "coords", "x0", "y0", "x1", "y1", "angle",
                "edge_color", "line_width", "line_style", "alpha", "fill", "fill_color",
                "fill_alpha", "fill_mode", "grad_stops", "grad_angle", "grad_cx", "grad_cy",
-               "grad_radius", "grad_reverse", "text", "fontsize", "arrow_head", "layer_pos")
+               "grad_radius", "grad_reverse", "text", "fontsize", "arrow_head", "asset_id",
+               "keep_aspect", "layer_pos")
     # everything settable through a style / geometry payload (all but the kind)
     STYLE_FIELDS = tuple(f for f in _FIELDS if f not in ("kind", "layer_pos"))
 
@@ -818,6 +819,8 @@ class ShapeRef:
         self.text = "Text"
         self.fontsize = 10.0
         self.arrow_head = "->"            # matplotlib arrowstyle
+        self.asset_id = ""                # kind "picture": the project asset to show
+        self.keep_aspect = True           # picture: fit inside the box without distortion
         self.layer_pos = 10 ** 6          # "above everything" until the stack is rebuilt
 
     @property
@@ -825,6 +828,8 @@ class ShapeRef:
         if self.name:
             return self.name
         base = dict(zip(SHAPE_KINDS, SHAPE_KIND_LABELS)).get(self.kind, self.kind)
+        if self.kind == "picture" and self.asset_id:
+            return f"Picture {self.asset_id}"
         return f"{base}: {self.text[:24]}" if self.kind == "text" else base
 
     @property
@@ -1088,6 +1093,31 @@ class SheetModel:
         return sh
 
 
+class AssetModel:
+    """An imported figure file (SVG / PDF / PNG / JPG) stored inside the project. Used by
+    LaTeX documents (``\\noorfile{<id>}``) and as a picture object on a subplot.
+    ``version`` counts external edits (Inkscape round trips)."""
+
+    def __init__(self, name="Figure", ext="svg", data=b"", asset_id=None, version=1):
+        self.asset_id = asset_id or _new_id()
+        self.name = name
+        self.ext = ext
+        self.data = bytes(data)
+        self.version = int(version)
+
+    def to_dict(self) -> dict:
+        import base64
+        return {"asset_id": self.asset_id, "name": self.name, "ext": self.ext,
+                "version": self.version, "data": base64.b64encode(self.data).decode("ascii")}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AssetModel":
+        import base64
+        return cls(d.get("name", "Figure"), d.get("ext", "svg"),
+                   base64.b64decode(d.get("data", "") or b""), d.get("asset_id"),
+                   d.get("version", 1))
+
+
 class DocumentModel:
     """A LaTeX document stored in the project: ``source`` is the ``.tex`` text; figures are
     sheets referenced with ``\noorsheet{<sheet id>}`` (see :mod:`NoorSuite.latex`)."""
@@ -1125,6 +1155,7 @@ class ProjectModel:
         self.colormaps: list[ColorMap] = []  # project-wide colormap library
         self.documents: list[DocumentModel] = []   # LaTeX documents (optional key)
         self.references: list[dict] = []           # bibliography records (see zotero.normalize)
+        self.assets: list[AssetModel] = []         # imported SVG / PDF / PNG / JPG figures
         self.active_sheet_id = ""
 
     def to_dict(self) -> dict:
@@ -1138,6 +1169,7 @@ class ProjectModel:
             "colormaps": [c.to_dict() for c in self.colormaps],
             "documents": [dm.to_dict() for dm in self.documents],
             "references": [dict(r) for r in self.references],
+            "assets": [a.to_dict() for a in self.assets],
         }
 
     @classmethod
@@ -1157,6 +1189,7 @@ class ProjectModel:
         p.colormaps = [ColorMap.from_dict(c) for c in d.get("colormaps", [])]
         p.documents = [DocumentModel.from_dict(x) for x in d.get("documents", [])]
         p.references = [dict(r) for r in d.get("references", []) if r.get("key")]
+        p.assets = [AssetModel.from_dict(x) for x in d.get("assets", [])]
         return p
 
     def to_json(self, indent=2) -> str:
@@ -1260,7 +1293,7 @@ def split_folder_path(path) -> list:
     return [p.strip() for p in str(path or "").replace("\\", "/").split("/") if p.strip()]
 
 
-def apply_sheet_annotations(sm, payload: dict) -> None:
+def apply_sheet_annotations(sm, payload: dict, assets=None) -> None:
     """Apply an ``organize`` payload's sheet fields: ``name``, ``tags`` (merged in),
     ``notes`` (appended unless ``replace_notes``), ``subplots`` ({index: {title, x_label,
     y_label}}) and ``grid`` ([rows, cols])."""
@@ -1290,6 +1323,12 @@ def apply_sheet_annotations(sm, payload: dict) -> None:
         sub = sm.subplots[i]
         sh = make_shape(spec.get("kind", "rect"), spec.get("geometry"), spec.get("style"))
         sh.name = spec.get("name") or sh.name
+        if spec.get("asset"):                           # a picture: asset by id or name
+            key = spec["asset"]
+            hit = next((a for a in (assets or []) if key in (a.asset_id, a.name)), None)
+            sh.asset_id = hit.asset_id if hit is not None else str(key)
+            sh.kind = "picture"
+            sh.fill = False
         sh.layer_pos = 0 if spec.get("position") == "back" else len(sub.traces)
         if spec.get("position") == "back":
             sub.shapes.insert(0, sh)

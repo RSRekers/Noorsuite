@@ -52,6 +52,7 @@ def render_figures(pm, dm, workdir) -> list:
     _APP = QApplication.instance() or QApplication([])   # keep it alive
     repo = {o.id: o for o in pm.data_objects}
     imgs = {i.id: i for i in pm.images}
+    assets = {a.asset_id: a for a in pm.assets}
     figures = Path(workdir) / latex.FIGURES_DIR
     figures.mkdir(parents=True, exist_ok=True)
     missing = []
@@ -60,7 +61,13 @@ def render_figures(pm, dm, workdir) -> list:
         if sm is None or not re.fullmatch(r"[A-Za-z0-9._-]+", key):
             missing.append(key)
             continue
-        export_sheet_pdf(sm, repo, imgs, str(figures / f"{key}.pdf"))
+        export_sheet_pdf(sm, repo, imgs, str(figures / f"{key}.pdf"), assets=assets)
+    from . import assets as assets_mod
+    for key in latex.asset_refs(dm.source):                # imported figure files
+        a = latex.resolve_asset(key, pm.assets)
+        if a is None or not re.fullmatch(r"[A-Za-z0-9._-]+", key) or \
+                assets_mod.export_for_latex(a, figures, f"asset-{key}") is None:
+            missing.append(key)
     return missing
 
 
@@ -97,7 +104,7 @@ def main(argv) -> int:
             zotero.bibtex_file(pm.references, used=info["cited"]), encoding="utf-8")
         missing = render_figures(pm, dm, workdir)
         for key in missing:
-            print(f"warning: no sheet matches \noorsheet{{{key}}}", file=sys.stderr)
+            print(f"warning: no figure matches {{{key}}}", file=sys.stderr)
         if a.command == "export":
             if not a.folder:
                 raise SystemExit("export needs --folder")

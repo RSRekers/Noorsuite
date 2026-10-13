@@ -408,6 +408,8 @@ class PlotSheet(QWidget):
         self.artist_map = {}
         self._axes = []
         self._text_targets = []
+        if getattr(self, "assets", None) is None:
+            self.assets = {}
         self._image_axes = {}
         self._image_geom = {}
 
@@ -754,6 +756,10 @@ class PlotSheet(QWidget):
         lw = max(0.0, float(sh.line_width))
         l, b, r, t = sh.bounds()
 
+        if sh.kind == "picture":
+            self._draw_picture(ax, sh, tf, z)
+            return
+
         if sh.kind == "text":
             label = str(sh.text)
             if "$" in label:        # a half-typed $...$ must not break the whole canvas
@@ -826,6 +832,57 @@ class PlotSheet(QWidget):
             im.set_transform(trans)
             im.set_clip_path(patch)
             ax.add_artist(im)
+
+    def _draw_picture(self, ax, sh, tf, z):
+        """An imported figure (SVG / PNG / ...) placed in a box. SVG is rasterised at high
+        resolution (it stays vector in LaTeX documents)."""
+        from matplotlib.image import AxesImage
+        from . import assets as assets_mod
+        asset = self.assets.get(sh.asset_id)
+        if asset is None:
+            return
+        arr = assets_mod.raster(asset)
+        if arr is None:
+            return
+        l, b, r, t = sh.bounds()
+        ratio = arr.shape[1] / max(1, arr.shape[0])
+        if sh.alpha < 1.0:
+            arr = arr.copy()
+            arr[..., 3] = (arr[..., 3] * float(sh.alpha)).astype(arr.dtype)
+
+        class _Fitted(AxesImage):
+            """Re-fits itself into the box at draw time, so the aspect ratio survives
+            layout changes (window resize, tight_layout)."""
+
+            def draw(self_, renderer):                      # noqa: N805
+                if sh.keep_aspect:
+                    try:
+                        (px0, py0), (px1, py1) = tf.transform([(l, b), (r, t)])
+                        w, h = abs(px1 - px0), abs(py1 - py0)
+                        if w > 0 and h > 0:
+                            if w / h > ratio:
+                                nw, nh = h * ratio, h
+                            else:
+                                nw, nh = w, w / ratio
+                            cx, cy = (px0 + px1) / 2.0, (py0 + py1) / 2.0
+                            inv = tf.inverted()
+                            (x0, y0), (x1, y1) = inv.transform(
+                                [(cx - nw / 2, cy - nh / 2), (cx + nw / 2, cy + nh / 2)])
+                            self_.set_extent((min(x0, x1), max(x0, x1),
+                                              min(y0, y1), max(y0, y1)))
+                    except Exception:
+                        pass
+                super().draw(renderer)
+
+        xl, yl = ax.get_xlim(), ax.get_ylim()
+        im = _Fitted(ax, origin="upper", interpolation="antialiased",
+                     extent=(l, r, b, t), zorder=z)
+        im.set_data(arr)
+        im.set_transform(tf)
+        ax.add_artist(im)
+        ax.set_xlim(xl)
+        ax.set_ylim(yl)
+        self.artist_map[im] = sh
 
     def _draw_error_overlay(self, ax, tref, x, y, yerr):
         """Error-bar whiskers on top of whatever :meth:`_draw_trace` already drew --
@@ -1006,7 +1063,7 @@ def _contains(artist, event) -> bool:
         return False
 
 
-def export_sheet_pdf(sm, repository, images, path, default_cm=None):
+def export_sheet_pdf(sm, repository, images, path, default_cm=None, assets=None):
     """Render a sheet model as a vector PDF at its own figure size (``latex.DEFAULT_FIG_CM``
     when it has none), on a throw-away copy -- open tabs / zoom are untouched. Needs a
     ``QApplication``; works offscreen."""
@@ -1017,6 +1074,7 @@ def export_sheet_pdf(sm, repository, images, path, default_cm=None):
     if not (sm.fig_width_cm and sm.fig_height_cm):
         sm.fig_width_cm, sm.fig_height_cm = default_cm or DEFAULT_FIG_CM
     ps = PlotSheet(sm)
+    ps.assets = assets or {}
     try:
         ps.render(repository, images)
         with matplotlib.rc_context({"pdf.fonttype": 42}):          # real, embeddable text
@@ -1026,7 +1084,7 @@ def export_sheet_pdf(sm, repository, images, path, default_cm=None):
         ps.deleteLater()
 
 
-def export_sheet_png(sm, repository, images, path, width_px=360):
+def export_sheet_png(sm, repository, images, path, width_px=360, assets=None):
     """A small PNG of a sheet (figure browser thumbnails), at the document figure size."""
     from .latex import DEFAULT_FIG_CM
     from .model import duplicate_sheet_model
@@ -1034,6 +1092,7 @@ def export_sheet_png(sm, repository, images, path, width_px=360):
     if not (sm.fig_width_cm and sm.fig_height_cm):
         sm.fig_width_cm, sm.fig_height_cm = DEFAULT_FIG_CM
     ps = PlotSheet(sm)
+    ps.assets = assets or {}
     try:
         ps.render(repository, images)
         w_in, h_in = sm.fig_width_cm / 2.54, sm.fig_height_cm / 2.54

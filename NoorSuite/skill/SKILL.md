@@ -146,6 +146,33 @@ text. Keys are data coordinates; the entries are stored as `"0=RT; 1=77 K"` (so 
 `;`). A string-labelled heatmap axis shows one tick per label by itself; the mapping only renames.
 In the GUI: Axes tab -> "X / Y tick labels" (same `value=text; value=text` syntax).
 
+### Highlights, arrows, text and pictures on a plot
+
+`add_shape(sheet, kind, ...)` draws an object on a subplot of an existing sheet. Objects share one
+back-to-front layer list with the traces in the GUI (move to back / front, per-object edit dialog):
+
+```python
+sid = "IV curve"                                     # sheet id or name
+suite.add_shape(sid, "xspan", x0=0.8, x1=1.2, fill="#ffcc00", fill_alpha=0.25,
+                name="Switching window", position="back")          # highlight band behind the data
+suite.add_shape(sid, "rect", x0=0, x1=1, y0=0, y1=5, edge_color="#000000",
+                fill="linear", colors=["#ffffff", "#d62728"], gradient_angle=90)  # gradient fill
+suite.add_shape(sid, "ellipse", x0=2, x1=3, y0=1, y1=2, fill="radial",
+                stops=[(0, "#ffffff", 0.0), (0.5, "#4477aa", 0.6), (1, "#4477aa", 1.0)])  # (pos, colour, opacity)
+suite.add_shape(sid, "arrow", x0=1, y0=3, x1=2, y1=1.5, edge_color="#000000", arrow_head="-|>")
+suite.add_shape(sid, "text", x0=2.5, y0=4, text="set", fontsize=9)
+suite.add_shape(sid, "rect", coords="axes", x0=0.05, x1=0.3, y0=0.7, y1=0.95, cmap="viridis", fill_alpha=0.8)      # cmap=<matplotlib name> -> gradient through 5 key colours
+suite.clear_shapes(sid)                              # remove all objects of a subplot
+```
+
+Kinds: `rect`, `ellipse`, `line`, `arrow`, `xspan` (vertical band), `yspan` (horizontal band), `text`,
+`picture`. Coordinates are data units; `coords="axes"` = 0..1 of the panel. `fill` is a colour, or
+`"linear"` / `"radial"` with `colors=[...]` (evenly spaced key colours), `stops=[(pos, colour, opacity)]`
+or `cmap=`. Pictures: `suite.push_asset("logo.svg", name="logo")` (file path, or bytes + `ext=`), then
+`suite.add_shape(sid, "picture", asset="logo", x0=.., x1=.., y0=.., y1=..)`; in a LaTeX document the same
+file is `\noorfile[width=6cm]{logo}` (SVG stays vector; the user double-clicks it in the preview to
+edit it in Inkscape and it reloads on save).
+
 ### LaTeX articles with live figures
 
 The project can hold LaTeX documents. Figures are *sheets*: `\noorsheet{<sheet id>}` includes a sheet

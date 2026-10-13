@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboB
 from . import latex, zotero
 from .fuzzy import smart_score
 
-_NOOR_LINE_RE = re.compile(r"\\noorsheet\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
+_NOOR_LINE_RE = re.compile(r"\\(noorsheet|noorfile)\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
 
 # Explicit high-contrast colours (the app theme must not decide readability): a white page
 # with black text by default, or light text on a dark ground.
@@ -123,7 +123,8 @@ class LatexEditor(QPlainTextEdit):
         line, col = cursor.block().text(), cursor.positionInBlock()
         for m in _NOOR_LINE_RE.finditer(line):
             if m.start() <= col <= m.end():
-                self.sheetRequested.emit(m.group(1).strip())
+                key = m.group(2).strip()
+                self.sheetRequested.emit(("asset:" + key) if m.group(1) == "noorfile" else key)
                 return
         super().mouseDoubleClickEvent(event)
 
@@ -360,6 +361,20 @@ class FigurePanel(QWidget):
         refresh.clicked.connect(self.refresh)
         row.addWidget(refresh)
         lay.addLayout(row)
+        row2 = QHBoxLayout()
+        add_file = QPushButton("Add figure file...")
+        add_file.setToolTip("Import an SVG, PDF, PNG or JPG into the project. SVGs open in "
+                            "Inkscape on double-click in the preview / \"Edit\".")
+        add_file.clicked.connect(self._add_files)
+        row2.addWidget(add_file)
+        self.edit_btn = QPushButton("Edit file")
+        self.edit_btn.setToolTip("Open the selected imported figure in Inkscape / its editor")
+        self.edit_btn.clicked.connect(self._edit_selected)
+        row2.addWidget(self.edit_btn)
+        self.remove_btn = QPushButton("Remove file")
+        self.remove_btn.clicked.connect(self._remove_selected)
+        row2.addWidget(self.remove_btn)
+        lay.addLayout(row2)
         self._pending: list = []
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._next_thumbnail)
@@ -381,6 +396,15 @@ class FigurePanel(QWidget):
             self.list.addItem(item)
             if sm.sheet_id in sel:
                 item.setSelected(True)
+        for a in self.host.document_assets():
+            item = QListWidgetItem(QIcon(), f"{a.name} (.{a.ext})")
+            item.setData(Qt.ItemDataRole.UserRole, "asset:" + a.asset_id)
+            item.setSizeHint(QSize(160, 140))
+            item.setToolTip(f"imported figure file: {a.name}.{a.ext}\nid: {a.asset_id}\n"
+                            f"version {a.version}")
+            self.list.addItem(item)
+            if "asset:" + a.asset_id in sel:
+                item.setSelected(True)
         self._pending = list(range(self.list.count()))
         self._filter(self.search.text())
         self._timer.start(15)
@@ -392,7 +416,9 @@ class FigurePanel(QWidget):
             item = self.list.item(i)
             if item is None or item.isHidden():
                 continue
-            pix = self.host.sheet_thumbnail(item.data(Qt.ItemDataRole.UserRole))
+            ref = item.data(Qt.ItemDataRole.UserRole)
+            pix = (self.host.asset_thumbnail(ref[6:]) if str(ref).startswith("asset:")
+                   else self.host.sheet_thumbnail(ref))
             if pix is not None and not pix.isNull():
                 item.setIcon(QIcon(pix))
             return
@@ -400,11 +426,17 @@ class FigurePanel(QWidget):
 
     def _filter(self, text):
         by_id = {sm.sheet_id: sm for sm in self.host.document_sheets()}
+        by_asset = {"asset:" + a.asset_id: a for a in self.host.document_assets()}
         for i in range(self.list.count()):
             item = self.list.item(i)
-            sm = by_id.get(item.data(Qt.ItemDataRole.UserRole))
+            ref = item.data(Qt.ItemDataRole.UserRole)
+            sm = by_id.get(ref)
             fields = [("name", 1.0, sm.name), ("tags", 0.9, " ".join(sm.tags)),
                       ("content", 0.4, sm.notes + " " + sm.sheet_id)] if sm else []
+            if ref in by_asset:
+                a = by_asset[ref]
+                fields = [("name", 1.0, a.name), ("tags", 0.9, a.ext),
+                          ("content", 0.4, a.asset_id)]
             item.setHidden(bool(text.strip()) and smart_score(text, fields) <= 0)
         self._pending = [i for i in range(self.list.count())
                          if not self.list.item(i).isHidden() and self.list.item(i).icon().isNull()]
@@ -413,12 +445,41 @@ class FigurePanel(QWidget):
 
     def snippets_for(self, items) -> str:
         by_id = {sm.sheet_id: sm for sm in self.host.document_sheets()}
+        by_asset = {"asset:" + a.asset_id: a for a in self.host.document_assets()}
         out = []
         for it in items:
-            sm = by_id.get(it.data(Qt.ItemDataRole.UserRole))
+            ref = it.data(Qt.ItemDataRole.UserRole)
+            sm = by_id.get(ref)
             if sm is not None:
                 out.append(latex.figure_snippet(sm.sheet_id, sm.name, sm.name))
+            elif ref in by_asset:
+                a = by_asset[ref]
+                out.append(latex.asset_snippet(a.asset_id, a.name, a.name))
         return "\n".join(out)
+
+    # -- imported figure files -------------------------------------------------------
+    def _add_files(self):
+        self.host.import_assets_dialog()
+        self.refresh()
+
+    def _selected_assets(self) -> list:
+        return [str(it.data(Qt.ItemDataRole.UserRole))[6:] for it in self.list.selectedItems()
+                if str(it.data(Qt.ItemDataRole.UserRole)).startswith("asset:")]
+
+    def _edit_selected(self):
+        for aid in self._selected_assets():
+            self.host.edit_asset(aid)
+
+    def _remove_selected(self):
+        ids = self._selected_assets()
+        if ids and QMessageBox.question(
+                self, "Remove figure file",
+                f"Remove {len(ids)} imported figure file(s) from the project? Documents and "
+                "plot pictures that use them will show a missing-figure box.") \
+                == QMessageBox.StandardButton.Yes:
+            for aid in ids:
+                self.host.remove_asset(aid)
+            self.refresh()
 
 
 class ReferencePanel(QWidget):
@@ -895,7 +956,21 @@ class DocumentTab(QWidget):
         sheets = self.host.document_sheets()
         return {k: latex.resolve_ref(k, sheets) for k in latex.figure_refs(self.source())}
 
+    def referenced_assets(self) -> dict:
+        """{key: asset or None} for every ``\\noorfile`` key in the text."""
+        assets = self.host.document_assets()
+        return {k: latex.resolve_asset(k, assets) for k in latex.asset_refs(self.source())}
+
     def _open_ref(self, key: str):
+        if key.startswith("asset:"):
+            a = latex.resolve_asset(key[6:], self.host.document_assets())
+            if a is None:
+                QMessageBox.information(self, "Unknown figure file",
+                                        f"There is no imported figure matching \"{key[6:]}\".")
+            else:
+                self.status_label.setText(f"  opening \"{a.name}\" in its editor ...")
+                self.host.edit_asset(a.asset_id)
+            return
         sm = latex.resolve_ref(key, self.host.document_sheets())
         if sm is None:
             QMessageBox.information(self, "Unknown sheet",
@@ -909,7 +984,8 @@ class DocumentTab(QWidget):
         if not self.auto_check.isChecked():
             return
         fp = self._fingerprint()
-        if fp != self._last_fp and any(self.referenced_sheets().values()):
+        if fp != self._last_fp and (any(self.referenced_sheets().values())
+                                    or any(self.referenced_assets().values())):
             self._source_timer.start(self.AUTO_DELAY_MS)
 
     def references_changed(self):
@@ -921,6 +997,8 @@ class DocumentTab(QWidget):
         parts = [self.source()]
         for key, sm in sorted(self.referenced_sheets().items()):
             parts.append(f"{key}:{self.host.sheet_fingerprint(sm.sheet_id) if sm else '-'}")
+        for key, a in sorted(self.referenced_assets().items()):
+            parts.append(f"asset:{key}:{self.host.asset_fingerprint(a.asset_id) if a else '-'}")
         used = set(zotero.cite_keys(self.source()))
         parts += [json.dumps(r, sort_keys=True) for r in self.host.document_references()
                   if r["key"] in used]
@@ -1081,6 +1159,26 @@ class DocumentTab(QWidget):
             except Exception as exc:                       # keep building the rest
                 missing.append(key)
                 self.log.appendPlainText(f"[figure {key}] export failed: {exc}")
+        for key, a in self.referenced_assets().items():          # imported figure files
+            if a is None or not re.fullmatch(r"[A-Za-z0-9._-]+", key):
+                missing.append(key)
+                continue
+            fp = self.host.asset_fingerprint(a.asset_id)
+            marker = f"asset:{key}"
+            if self._fig_fp.get(marker) == fp and any(
+                    (figures / f"asset-{key}{e}").is_file() for e in (".pdf", ".png", ".jpg")):
+                cached += 1
+                continue
+            try:
+                out = self.host.export_asset(a.asset_id, figures, f"asset-{key}")
+            except Exception as exc:
+                out = None
+                self.log.appendPlainText(f"[figure file {key}] export failed: {exc}")
+            if out is None:
+                missing.append(key)
+            else:
+                self._fig_fp[marker] = fp
+                exported += 1
         return missing, exported, cached
 
     def compile(self, force=False):

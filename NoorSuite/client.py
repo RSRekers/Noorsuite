@@ -24,7 +24,8 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_DOCUMENT,
                        ACTION_GET_DATA, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
-                       ACTION_LIST_REFERENCES, ACTION_REFERENCES,
+                       ACTION_LIST_REFERENCES, ACTION_REFERENCES, ACTION_ASSET,
+                       ACTION_LIST_ASSETS,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_REMOVE_DATA,
@@ -99,14 +100,15 @@ def _organize_payload(title, tags, notes, folder, subplot, subplot_title, x_labe
             "folder": folder or "", "subplots": {int(subplot): sub} if sub else {}}
 
 
-_SHAPE_KINDS = ("rect", "ellipse", "line", "arrow", "xspan", "yspan", "text")
+_SHAPE_KINDS = ("rect", "ellipse", "line", "arrow", "xspan", "yspan", "text", "picture")
 _SHAPE_ALIASES = {"rectangle": "rect", "box": "rect", "circle": "ellipse", "oval": "ellipse",
                   "hband": "yspan", "vband": "xspan", "span_x": "xspan", "span_y": "yspan",
-                  "label": "text", "annotation": "text"}
+                  "label": "text", "annotation": "text", "image": "picture",
+                  "svg": "picture", "figure": "picture"}
 
 
 def _shape_spec(kind, subplot, x0, x1, y0, y1, text, coords, position, name, fill, colors,
-                stops, cmap, gradient_angle, center, radius, style) -> dict:
+                stops, cmap, gradient_angle, center, radius, style, asset=None) -> dict:
     """One ``shapes`` entry of an organize payload (see ``model.apply_sheet_annotations``)."""
     kind = _SHAPE_ALIASES.get(str(kind).lower(), str(kind).lower())
     if kind not in _SHAPE_KINDS:
@@ -144,8 +146,14 @@ def _shape_spec(kind, subplot, x0, x1, y0, y1, text, coords, position, name, fil
         st["grad_radius"] = radius
     if "rotation" in st:
         st["angle"] = st.pop("rotation")
-    return {"subplot": int(subplot), "kind": kind, "geometry": geom, "style": st,
+    spec = {"subplot": int(subplot), "kind": kind, "geometry": geom, "style": st,
             "position": position, "name": name or ""}
+    if asset:
+        spec["asset"] = asset
+        spec["kind"] = "picture"
+    elif kind == "picture":
+        raise ValueError("a picture needs asset=<name or id of a pushed figure file>")
+    return spec
 
 
 class SciSuiteClient:
@@ -477,7 +485,7 @@ class SciSuiteClient:
     def add_shape(self, sheet, kind="rect", *, subplot=0, x0=None, x1=None, y0=None, y1=None,
                   text=None, coords="data", position="front", name=None, fill=None,
                   colors=None, stops=None, cmap=None, gradient_angle=None, center=None,
-                  radius=None, **style):
+                  radius=None, asset=None, **style):
         """Draw an object on a subplot of an existing sheet (by id or name).
 
         ``kind``: ``rect`` | ``ellipse`` | ``line`` | ``arrow`` | ``xspan`` (vertical band,
@@ -490,11 +498,38 @@ class SciSuiteClient:
         ``stops=[(0, "#fff", 1.0), (0.6, "#f00", 0.5), (1, "#00f", 0.0)]`` (position, colour,
         opacity) or ``cmap="viridis"``; ``gradient_angle`` (deg) / ``center=(0.5, 0.5)`` /
         ``radius``. Other styles: ``edge_color``, ``line_width``, ``line_style``,
-        ``alpha``, ``fill_alpha``, ``rotation``, ``fontsize``, ``arrow_head``."""
+        ``alpha``, ``fill_alpha``, ``rotation``, ``fontsize``, ``arrow_head``.
+
+        A picture: ``add_shape(sheet, "picture", asset="logo", x0=.., x1=.., y0=.., y1=..)``
+        with a figure file pushed by :meth:`push_asset` (an SVG can then be edited in
+        Inkscape from the GUI)."""
         spec = _shape_spec(kind, subplot, x0, x1, y0, y1, text, coords, position, name, fill,
-                           colors, stops, cmap, gradient_angle, center, radius, style)
+                           colors, stops, cmap, gradient_angle, center, radius, style, asset)
         return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet", "target": sheet,
                                "shapes": [spec]})
+
+    def push_asset(self, source, name=None, *, ext=None) -> dict:
+        """Store a figure file (SVG / PDF / PNG / JPG) in the project -- a ``str`` / ``Path``
+        to a file, or ``bytes`` plus ``ext="svg"``. Re-pushing the same ``name`` replaces it.
+        Use it as ``\\noorfile{<name>}`` in a document or ``add_shape(..., asset=<name>)``."""
+        import pathlib
+        if isinstance(source, (bytes, bytearray)):
+            data, ext = bytes(source), (ext or "svg").lower().lstrip(".")
+            name = name or "figure"
+        else:
+            path = pathlib.Path(source)
+            data = path.read_bytes()
+            ext = (ext or path.suffix).lower().lstrip(".")
+            name = name or path.stem
+        ext = "jpg" if ext == "jpeg" else ext
+        if ext not in ("svg", "pdf", "png", "jpg"):
+            raise ValueError(f"unsupported figure format {ext!r} (svg, pdf, png, jpg)")
+        return self._ipc.send({"action": ACTION_ASSET, "name": name, "ext": ext, "data": data})
+
+    def list_assets(self) -> pd.DataFrame:
+        resp = self._ipc.send({"action": ACTION_LIST_ASSETS}) or {}
+        return pd.DataFrame(resp.get("assets", []),
+                            columns=["id", "name", "ext", "version", "bytes"])
 
     def clear_shapes(self, sheet, subplot=0):
         """Remove every drawn object from one subplot of a sheet."""

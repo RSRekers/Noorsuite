@@ -161,6 +161,22 @@ in `plot` / `heatmap` / `show_image` / `organize_sheet`. On a categorical heatma
 that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick labels*, written as
 `0=RT; 1=77 K; 2=4 K`.
 
+## Objects on plots and imported figures
+
+* **Objects** (rectangle, ellipse, line, arrow, highlight band, text, picture) are drawn on a subplot from
+  the layer list under the traces (*Add object*). Traces and objects form **one back-to-front stack**:
+  drag, or use *To back / Down / Up / To front* (also right-click an object on the plot). Double-click an
+  object to edit it: geometry in data or axes coordinates, outline, rotation, and a fill that is solid, a
+  **linear or radial gradient** through any number of key colours with per-colour transparency (load a
+  colormap's colours, or save yours as a colormap). From code: `suite.add_shape(...)`, see the skill.
+* **Figure files** (SVG, PDF, PNG, JPG): *Figures* panel of a document -> *Add figure file...*; they are
+  stored in the project. Insert with a click/drag (`\noorfile[width=..]{name}`); SVG is converted to a
+  vector PDF by Inkscape (or Qt as a fallback). **Double-click the figure in the PDF preview (or the
+  `\noorfile` line) to edit it in Inkscape** - saving there reloads it everywhere. The same files can be
+  placed inside a plot as a *Picture / SVG* object (rasterised at high resolution in the plot).
+* Inkscape is found via `$NOORSUITE_INKSCAPE`, `~/.noorsuite/config.json` `{"inkscape": "<path>"}`, PATH or
+  the default install folder.
+
 ## GUI shortcuts worth knowing
 
 - **Ctrl + mouse wheel** over a plot zooms the whole figure (text and lines scale with it);
