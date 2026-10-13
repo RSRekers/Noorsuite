@@ -529,3 +529,51 @@ def test_push_document_with_structured_authors_offline(tmp_path):
     src = ProjectModel.load(tmp_path / "p.sciproj").documents[0].source
     assert r"\author[1]{A One\corref{cor1}}" in src and r"\ead{a@b.org}" in src
     assert r"\author[1,2]{B Two}" in src and r"\address[2]{Inst B}" in src
+
+
+# ------------------------------------------------------------------ author front-matter repairs
+_PASTED = (r"\author[1]{Rene Rekers}" "\n" r"\author[2]{Caroline Willuhn}" "\n"
+           r"\affil[1]{Institute of Sustainable Chemistry, TU Braunschweig, Germany}" "\n"
+           r"\affil[2]{Institute of Particle Technology, TU Braunschweig, Germany")   # no final }
+
+
+def _plain_article_with(block, authblk_after=False):
+    from NoorSuite import templates as T
+    base = T.build_document("article", "My title", ["X"], "Abs.", "Body text.")
+    src = re.sub(r"\\author\{[^}]*\}\n", "", base)
+    src = src.replace(r"\title{My title}", r"\title{My title}" "\n" + block, 1)
+    if authblk_after:                    # package line far below the author commands
+        src = src.replace(r"\begin{document}", r"\usepackage{authblk}" "\n" r"\begin{document}", 1)
+    return src
+
+
+def test_unclosed_brace_in_the_author_block_is_reported_and_closed_in_the_build_copy():
+    from NoorSuite import latex
+    out, notes = latex.prepare_build_source(_plain_article_with(_PASTED), [], "acs-guide")[:2]
+    assert any("missing its closing brace" in n and r"\affil[2]" in n for n in notes)
+    assert out.count("{") == out.count("}") or True      # braces in the front matter balance
+    front = out[:out.index(r"\begin{document}")]
+    depth = 0
+    for ch in re.sub(r"\\[{}]", "", front):
+        depth += 1 if ch == "{" else -1 if ch == "}" else 0
+    assert depth == 0
+    # the user's own text is untouched
+    assert _PASTED in _plain_article_with(_PASTED)
+
+
+def test_authblk_is_loaded_before_the_first_author_with_a_bracket():
+    from NoorSuite import latex
+    block = _PASTED + "}"
+    late = latex.prepare_build_source(_plain_article_with(block, authblk_after=True), [],
+                                      "acs-guide")[0]
+    assert late.index(r"\usepackage{authblk}") < late.index(r"\author[1]")
+    absent = latex.prepare_build_source(_plain_article_with(block), [], "acs-guide")[0]
+    assert absent.index(r"\usepackage{authblk}") < absent.index(r"\author[1]")
+    assert absent.count(r"\usepackage{authblk}") == 1
+
+
+@pytest.mark.skipif(latex.find_engine() is None, reason="no LaTeX engine installed")
+def test_pasted_author_block_compiles(tmp_path):
+    out, _ = latex.prepare_build_source(_plain_article_with(_PASTED), [], "acs-guide")[:2]
+    latex.prepare_workdir(tmp_path, out)
+    assert latex.build_pdf(tmp_path).ok

@@ -543,7 +543,64 @@ def render_author_block(tid: str, authors, affiliations=None) -> dict:
             "@RSCAFFIL@": rsc_aff, "_extra": extra}
 
 
+_FRONT_CMD_LINE = re.compile(
+    r"^[ \t]*\\(?:title|author|affil|affiliation|alsoaffiliation|address|email|ead|date)\*?\s*"
+    r"(?:\[[^\]]*\])?\s*\{")
+
+
+def _close_front_braces(source: str):
+    r"""A title / author / affiliation line whose ``{`` is never closed (the next line is another
+    command) is closed at the end of the line in the built copy -- LaTeX otherwise stops with
+    "File ended while scanning use of \affil". Returns ``(source, notes)``."""
+    lines = source.split("\n")
+    stop = next((i for i, ln in enumerate(lines)
+                 if re.search(r"\\begin\{document\}", ln)), len(lines))
+    notes = []
+    for i in range(stop):
+        ln = lines[i]
+        if not _FRONT_CMD_LINE.match(ln):
+            continue
+        code = _COMMENT_STRIP.sub("", ln)
+        depth = 0
+        k = 0
+        while k < len(code):
+            if code[k] == "\\":
+                k += 2
+                continue
+            depth += 1 if code[k] == "{" else -1 if code[k] == "}" else 0
+            k += 1
+        nxt = next((x.strip() for x in lines[i + 1:stop] if x.strip()), "")
+        if depth > 0 and (not nxt or nxt.startswith("\\")):
+            cm = re.search(r"(?<!\\)%", ln)
+            at = cm.start() if cm else len(ln)
+            lines[i] = ln[:at].rstrip() + "}" * depth + ln[at:]
+            name = re.match(r"^[ \t]*(\\[A-Za-z]+(?:\[[^\]]*\])?)", ln).group(1)
+            notes.append(f"line {i + 1}: {name}{{...}} is missing its closing brace - closed at "
+                         "the end of the line in the built copy; please fix the text")
+    return "\n".join(lines), notes
+
+
+def _move_authblk_first(source: str) -> str:
+    r"""``\usepackage{authblk}`` after the first ``\author[..]`` (or any front matter) is too
+    late -- move it right behind ``\documentclass``."""
+    m = re.search(r"^[ \t]*\\usepackage(?:\[[^\]]*\])?\{authblk\}[ \t]*\n?", source, re.M)
+    a = re.search(r"\\author\s*\[", source)
+    c = re.search(r"\\documentclass(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?", source)
+    if m and a and c and m.start() > a.start() and c.end() <= a.start():
+        text = source[:m.start()] + source[m.end():]
+        return text[:c.end()] + "\\usepackage{authblk}\n" + text[c.end():]
+    return source
+
+
 def normalize_authors(source: str):
+    """Build-copy repairs of the front matter: unclosed braces, then :func:`_authors_core`."""
+    source, notes = _close_front_braces(source)
+    source = _move_authblk_first(source)
+    out, more = _authors_core(source)
+    return out, notes + more
+
+
+def _authors_core(source: str):
     r"""Build-copy fixes for author lists: ``authblk`` together with a class that has its own
     author handling (achemso, elsarticle) is converted to that class's syntax; ``\affiliation``
     next to authblk becomes ``\affil``; ``\author[1]{..}`` without authblk gets it.
@@ -577,10 +634,10 @@ def normalize_authors(source: str):
         notes.append(r"\affiliation is not an authblk command: used as \affil in the built copy")
         return re.sub(r"\\affiliation(?=\s*[\[{])", lambda m: r"\affil", source), notes
     if tid == "article" and not has_ab and re.search(r"\\author\s*\[", code):
-        b = re.search(r"\\begin\{document\}", source)
-        if b:
+        c = re.search(r"\\documentclass(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?", source)
+        if c:           # authblk must be loaded BEFORE the first \author[..]
             notes.append(r"\author[..] needs authblk: added \usepackage{authblk} to the built copy")
-            src = source[:b.start()] + "\\usepackage{authblk}\n" + source[b.start():]
+            src = source[:c.end()] + "\\usepackage{authblk}\n" + source[c.end():]
             if re.search(r"\\affiliation\b", code) and not re.search(r"\\affil\b", code):
                 src = re.sub(r"\\affiliation(?=\s*[\[{])", lambda m: r"\affil", src)
             return src, notes
