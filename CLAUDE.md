@@ -625,6 +625,11 @@ title/x_label/y_label + trace labels).
 - Never commit corporate `.pptx` files / logos (`*.pptx` is git-ignored); the converted theme stays in the user's
   home directory.
 
+- Public repo rule: no corporate artwork. `NoorSuite/themes/noorclean/` is the only bundled theme (text only,
+  `TEMPLATES["beamer-clean"]`, base `beamer`, detected by `\usetheme{noorclean}`); `pptximport.support_files`
+  looks in `presentations_dir()` first, then `bundled_themes_dir()`. Portable bundles: `export_bundle(theme, out)` /
+  `import_bundle(path)` (`.noortheme` zip: `bundle.json`, `layout.json`, `theme/*`).
+
 ## Author lists and SI documents (`templates.py`, `authorsdialog.py`)
 
 - `parse_authors(source)` -> `{"authors": [{name, affils[keys], email, corresponding}], "affiliations": {key: text}}`

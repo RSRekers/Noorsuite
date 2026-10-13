@@ -197,3 +197,44 @@ def test_new_presentation_from_the_window(win, pres_env):
     assert r"\usetheme{corporatetemplate}" in dm.source and "Group talk" in dm.source
     plain = win.create_new_document("Plain talk", template="beamer")
     assert r"\documentclass[aspectratio=1610,11pt,t]{beamer}" in plain.source
+
+
+# ------------------------------------------------------------------ bundled neutral theme + bundles
+def test_neutral_theme_ships_with_noorsuite_and_has_no_corporate_artwork():
+    from pathlib import Path
+    d = pptximport.bundled_themes_dir() / "noorclean"
+    assert (d / "beamerthemenoorclean.sty").is_file()
+    assert [f.name for f in d.iterdir()] == ["beamerthemenoorclean.sty"]     # text only: no logos
+    assert "beamer-clean" in dict(T.list_templates()) and T.base_of("beamer-clean") == "beamer"
+    doc = T.build_document("beamer-clean", "Talk", ["A"], "", "")
+    assert r"\usetheme{noorclean}" in doc and T.detect(doc) == "beamer-clean"
+    assert list(pptximport.support_files(doc)) == ["beamerthemenoorclean.sty"]
+
+
+@pytest.mark.skipif(latex.find_engine() is None, reason="no LaTeX engine installed")
+def test_neutral_theme_compiles_with_figures_and_a_source_line(tmp_path):
+    body = (r"\begin{frame}{Results}" "\n" r"\begin{itemize}\item One\item Two\end{itemize}" "\n"
+            r"\framesource{Source: measurement series 3}" "\n" r"\end{frame}" "\n")
+    doc = T.build_document("beamer-clean", "A talk", ["A. One"], "", body)
+    latex.prepare_workdir(tmp_path / "w", doc)
+    out = latex.build_pdf(tmp_path / "w")
+    assert out.ok, out.log[-800:]
+
+
+def test_theme_bundle_roundtrip_moves_a_template_between_machines(pres_env, tmp_path, monkeypatch):
+    res = pptximport.import_pptx(pres_env)
+    bundle = pptximport.export_bundle(res["theme"], tmp_path / "talk.noortheme")
+    assert bundle.is_file() and zipfile.is_zipfile(bundle)
+    names = zipfile.ZipFile(bundle).namelist()
+    assert "bundle.json" in names and "layout.json" in names
+    assert any(n.endswith("beamertheme" + res["theme"] + ".sty") for n in names)
+    # a second "machine": empty folders
+    monkeypatch.setenv("NOORSUITE_PRESENTATIONS", str(tmp_path / "other_pres"))
+    monkeypatch.setenv("NOORSUITE_TEMPLATES", str(tmp_path / "other_tpl"))
+    assert res["id"] not in dict(T.list_templates())
+    back = pptximport.import_bundle(bundle)
+    assert back["id"] == res["id"] and res["id"] in dict(T.list_templates())
+    doc = T.build_document(back["id"], "T", ["A"], "", "")
+    assert "beamerthemecorporatetemplate.sty" in pptximport.support_files(doc)
+    with pytest.raises(ValueError):
+        pptximport.export_bundle("does-not-exist", tmp_path / "x.noortheme")

@@ -155,6 +155,9 @@ Write frames: `\begin{frame}{Title} ... \end{frame}`; a figure frame is
 `\framesource{Source: ...}`. The user imports PowerPoint templates in the GUI (*New presentation* ->
 *Import PowerPoint template...*) or `python -m NoorSuite presentation import file.pptx`.
 
+Layouts for presentations: `"beamer"` (plain), `"beamer-clean"` (NoorSuite's neutral theme), `"user:<name>"`
+(imported corporate templates, kept in the user's home folder - never put them into a repository).
+
 ### Author lists and Supporting Information
 
 With a layout template the author list is structured: `suite.push_document("Paper", body, template="acs",

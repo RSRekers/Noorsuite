@@ -1,0 +1,88 @@
+% NoorSuite clean Beamer theme -- a neutral 16:10 design without logos or corporate artwork.
+%   top bar with the frame title, slide number at the right, a free source line at the bottom,
+%   a plain title page. Colours are defined below -- change them to taste:
+%       \definecolor{nc@bar}{HTML}{2F4B66}        (title bar)
+%       \definecolor{nc@accent}{HTML}{C8553D}     (rule, links, bullets)
+%   In the text:  \framesource{Source: ...}  sets the line at the bottom of a frame.
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{beamerthemenoorclean}[2026/10/13 NoorSuite clean Beamer theme]
+\RequirePackage{tikz}
+\usetikzlibrary{calc}
+\RequirePackage{etoolbox}
+
+\definecolor{nc@bar}{HTML}{2F4B66}
+\definecolor{nc@accent}{HTML}{C8553D}
+\definecolor{nc@text}{HTML}{1E1E1E}
+\definecolor{nc@muted}{HTML}{6B7280}
+
+\renewcommand{\familydefault}{\sfdefault}
+\setbeamertemplate{navigation symbols}{}
+\setbeamercolor{normal text}{fg=nc@text,bg=white}
+\setbeamercolor{frametitle}{fg=white}
+\setbeamercolor{structure}{fg=nc@accent}
+\setbeamercolor{itemize item}{fg=nc@accent}
+\setbeamercolor{itemize subitem}{fg=nc@accent}
+\setbeamerfont{frametitle}{size=\Large,series=\bfseries}
+\setbeamertemplate{itemize item}[circle]
+\setbeamertemplate{itemize subitem}[circle]
+\setbeamersize{text margin left=0.9cm,text margin right=0.9cm}
+\hypersetup{colorlinks=true,linkcolor=nc@accent,urlcolor=nc@accent,citecolor=nc@accent}
+
+% title bar
+\setbeamertemplate{background}{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[nc@bar] (current page.north west) rectangle ($(current page.north east)+(0,-1.3cm)$);
+    \fill[nc@accent] ($(current page.north west)+(0,-1.3cm)$) rectangle
+      ($(current page.north east)+(0,-1.36cm)$);
+  \end{tikzpicture}}
+
+\setbeamertemplate{frametitle}{%
+  \nointerlineskip
+  \vbox to 1.9cm{%
+    \begin{tikzpicture}[remember picture,overlay]
+      \node[anchor=west,inner sep=0pt,text width=\dimexpr\paperwidth-3.2cm\relax]
+        at ($(current page.north west)+(0.9cm,-0.65cm)$)
+        {\hyphenpenalty=10000\raggedright\usebeamerfont{frametitle}\usebeamercolor[fg]{frametitle}\insertframetitle};
+    \end{tikzpicture}%
+    \vss}}
+
+% footer: free source line and the slide number
+\newcommand{\framesource}[1]{\gdef\nc@source{#1}}
+\gdef\nc@source{}
+\AtBeginEnvironment{frame}{\gdef\nc@source{}}
+\setbeamertemplate{footline}{%
+  \nointerlineskip
+  \vbox to 0.9cm{\vss}%
+  \begin{tikzpicture}[remember picture,overlay]
+    \node[anchor=center,text=white,font=\bfseries\normalsize] at
+      ($(current page.north east)+(-1.0cm,-0.65cm)$) {\insertframenumber};
+    \node[anchor=south west,inner sep=0pt,text width=\dimexpr\paperwidth-2cm\relax,
+      text=nc@muted,font=\scriptsize] at ($(current page.south west)+(0.9cm,0.25cm)$)
+      {\nc@source};
+  \end{tikzpicture}}
+
+% plain title page
+\newcommand{\titleimage}[1]{\gdef\nc@titleimage{#1}}
+\gdef\nc@titleimage{}
+\setbeamertemplate{title page}{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[white] (current page.north west) rectangle (current page.south east);
+    \fill[nc@bar] (current page.north west) rectangle
+      ($(current page.north east)+(0,-0.9cm)$);
+    \fill[nc@accent] ($(current page.north west)+(0,-0.9cm)$) rectangle
+      ($(current page.north east)+(0,-0.96cm)$);
+    \ifdefempty{\nc@titleimage}{}{%
+      \node[anchor=north east,inner sep=0pt] at
+        ($(current page.north east)+(-0.9cm,-1.5cm)$)
+        {\includegraphics[height=3.2cm]{\nc@titleimage}};}
+    \node[anchor=south west,inner sep=0pt,text width=\dimexpr\paperwidth-2cm\relax,
+      text=nc@bar,font=\fontsize{24}{28}\selectfont\bfseries]
+      at ($(current page.west)+(0.9cm,0.2cm)$) {\hyphenpenalty=10000\raggedright\inserttitle};
+    \fill[nc@accent] ($(current page.west)+(0.9cm,0)$) rectangle
+      ($(current page.west)+(3.4cm,-0.07cm)$);
+    \node[anchor=north west,inner sep=0pt,text width=\dimexpr\paperwidth-2cm\relax,
+      font=\Large] at ($(current page.west)+(0.9cm,-0.45cm)$) {\insertauthor};
+    \node[anchor=north west,inner sep=0pt,text=nc@muted,font=\normalsize]
+      at ($(current page.west)+(0.9cm,-1.5cm)$) {\insertdate};
+  \end{tikzpicture}}
+\endinput

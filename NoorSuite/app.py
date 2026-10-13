@@ -2915,13 +2915,16 @@ class SciSuiteWindow(QMainWindow):
         """Turn a .pptx corporate template into a Beamer theme + a *New presentation* layout."""
         from . import pptximport
         if path is None:
-            path, _ = QFileDialog.getOpenFileName(self, "Import PowerPoint template", "",
-                                                  "PowerPoint (*.pptx)")
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Import PowerPoint template or theme bundle", "",
+                "Templates (*.pptx *.noortheme);;PowerPoint (*.pptx);;NoorSuite theme (*.noortheme)")
         if not path:
             return None
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            res = pptximport.import_pptx(path)
+            res = (pptximport.import_bundle(path)
+                   if str(path).lower().endswith(pptximport.BUNDLE_EXT)
+                   else pptximport.import_pptx(path))
         except Exception as exc:                        # unreadable / unsupported file
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Import PowerPoint template", f"{path}\n\n{exc}")

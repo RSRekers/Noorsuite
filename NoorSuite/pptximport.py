@@ -27,6 +27,11 @@ BEAMER_W_CM = 16.0
 _SCHEME = {"tx1": "dk1", "bg1": "lt1", "tx2": "dk2", "bg2": "lt2"}
 
 
+def bundled_themes_dir() -> Path:
+    """Themes that ship with NoorSuite (neutral designs, no corporate artwork)."""
+    return Path(__file__).parent / "themes"
+
+
 def presentations_dir() -> Path:
     d = os.environ.get("NOORSUITE_PRESENTATIONS")
     return Path(d) if d else Path(os.path.expanduser("~")) / ".noorsuite" / "presentations"
@@ -476,18 +481,68 @@ def support_files(source: str) -> dict:
     r"""``{relative name: bytes}`` of every imported theme a document uses (``\usetheme{x}``):
     the ``beamertheme<x>.sty`` and its pictures, to be written next to ``main.tex``."""
     out = {}
-    root = presentations_dir()
-    if not root.is_dir():
-        return out
     code = re.sub(r"(?<!\\)%.*", "", source)
     for m in re.finditer(r"\\usetheme(?:\[[^\]]*\])?\{([^}]*)\}", code):
         for name in (n.strip() for n in m.group(1).split(",")):
-            d = root / name
-            if (d / f"beamertheme{name}.sty").is_file():
-                for f in d.iterdir():
-                    if f.is_file() and f.name != "template.json":
-                        out[f.name] = f.read_bytes()
+            for root in (presentations_dir(), bundled_themes_dir()):      # user's first
+                d = root / name
+                if (d / f"beamertheme{name}.sty").is_file():
+                    for f in d.iterdir():
+                        if f.is_file() and f.name != "template.json":
+                            out[f.name] = f.read_bytes()
+                    break
     return out
+
+
+# ------------------------------------------------------------------ portable bundles
+BUNDLE_EXT = ".noortheme"
+
+
+def export_bundle(theme: str, out_path=None) -> Path:
+    """Pack an imported theme (``~/.noorsuite/presentations/<theme>/`` + its layout) into one
+    ``.noortheme`` file -- keep it outside the repository, copy it to another machine, import it
+    there with :func:`import_bundle`."""
+    from . import templates
+    d = presentations_dir() / theme
+    if not (d / f"beamertheme{theme}.sty").is_file():
+        raise ValueError(f"no imported theme {theme!r} in {presentations_dir()}")
+    layout = templates.user_dir() / f"{theme}.json"
+    meta = {}
+    if (d / "template.json").is_file():
+        meta = json.loads((d / "template.json").read_text(encoding="utf-8"))
+    out = Path(out_path or f"{theme}{BUNDLE_EXT}")
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("bundle.json", json.dumps({"format": "noortheme", "version": 1,
+                                              "theme": theme, "label": meta.get("label", theme)}))
+        if layout.is_file():
+            z.writestr("layout.json", layout.read_text(encoding="utf-8"))
+        for f in sorted(d.iterdir()):
+            if f.is_file():
+                z.write(f, f"theme/{f.name}")
+    return out
+
+
+def import_bundle(path) -> dict:
+    """Install a ``.noortheme`` file: theme files into the presentations folder and the layout
+    into the user's template folder."""
+    from . import templates
+    with zipfile.ZipFile(path) as z:
+        meta = json.loads(z.read("bundle.json").decode("utf-8"))
+        if meta.get("format") != "noortheme":
+            raise ValueError("not a NoorSuite theme bundle")
+        theme = re.sub(r"[^A-Za-z0-9_-]", "", meta["theme"])
+        dest = presentations_dir() / theme
+        dest.mkdir(parents=True, exist_ok=True)
+        for n in z.namelist():
+            if n.startswith("theme/") and not n.endswith("/"):
+                name = Path(n).name                    # no path tricks
+                (dest / name).write_bytes(z.read(n))
+        tdir = templates.user_dir()
+        tdir.mkdir(parents=True, exist_ok=True)
+        if "layout.json" in z.namelist():
+            (tdir / f"{theme}.json").write_bytes(z.read("layout.json"))
+    return {"id": f"user:{theme}", "label": meta.get("label", theme), "theme": theme,
+            "dir": str(dest), "notes": []}
 
 
 def main(argv) -> int:
@@ -495,9 +550,10 @@ def main(argv) -> int:
     ``presentation list``."""
     import argparse
     ap = argparse.ArgumentParser(prog="noorsuite presentation")
-    ap.add_argument("command", choices=["import", "list"])
+    ap.add_argument("command", choices=["import", "export", "list"])
     ap.add_argument("file", nargs="?")
     ap.add_argument("--name")
+    ap.add_argument("--out", help="export: the .noortheme file to write")
     a = ap.parse_args(argv)
     if a.command == "list":
         root = presentations_dir()
@@ -506,8 +562,18 @@ def main(argv) -> int:
                 meta = json.loads((d / "template.json").read_text(encoding="utf-8"))
                 print(f"{d.name}\t{meta.get('label', '')}")
         return 0
+    if a.command == "export":
+        if not a.file:
+            ap.error("export needs the theme name (see 'presentation list')")
+        out = export_bundle(a.file, a.out)
+        print(f"exported theme {a.file!r} -> {out}")
+        return 0
     if not a.file:
-        ap.error("import needs a .pptx file")
+        ap.error("import needs a .pptx or .noortheme file")
+    if a.file.lower().endswith(BUNDLE_EXT):
+        res = import_bundle(a.file)
+        print(f"imported {res['label']!r}: theme {res['theme']} -> {res['dir']}")
+        return 0
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtGui import QGuiApplication
     app = QGuiApplication.instance() or QGuiApplication([])           # noqa: F841 (keep alive)

@@ -167,7 +167,12 @@ TEMPLATES["beamer"] = {
 """,
     "known": {"graphicx", "noorsuite", "hyperref"},
 }
-ORDER = ["article", "acs", "rsc", "elsevier", "beamer"]
+TEMPLATES["beamer-clean"] = dict(
+    TEMPLATES["beamer"], label="Beamer - NoorSuite clean theme",
+    base="beamer",
+    preamble=TEMPLATES["beamer"]["preamble"].replace(r"\usetheme{default}", r"\usetheme{noorclean}"),
+    known={"graphicx", "noorsuite", "hyperref", "noorclean"})
+ORDER = ["article", "acs", "rsc", "elsevier", "beamer", "beamer-clean"]
 
 
 # ------------------------------------------------------------------ user templates
@@ -218,7 +223,8 @@ def base_of(template_id: str | None) -> str:
     """The built-in template a layout derives from (the id itself for built-ins)."""
     if is_user(template_id):
         return get(template_id).get("base", "article")
-    return template_id if template_id in TEMPLATES else "article"
+    return TEMPLATES[template_id].get("base", template_id) if template_id in TEMPLATES \
+        else "article"
 
 
 def _slug(text: str) -> str:
@@ -299,6 +305,8 @@ def detect(source: str) -> str:
     if cls == "elsarticle":
         return "elsevier"
     if cls == "beamer":
+        if re.search(r"\\usetheme(?:\[[^\]]*\])?\{noorclean\}", code):
+            return "beamer-clean"
         return "beamer"
     if re.search(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*\brsc\b[^}]*\}", code):
         return "rsc"

@@ -179,6 +179,15 @@ built, so exported folders compile anywhere) and listed as a layout. In the text
 sets the footer line of a frame, `\imagecredit{...}` and `\titleimage{<file>}` the title-page picture credit and
 picture (the other title pictures of the template are listed in `template.json`).
 
+**Where templates live.** Nothing corporate is part of the repository. NoorSuite ships one neutral theme
+(*Beamer - NoorSuite clean theme*, `NoorSuite/themes/noorclean/`: bar + accent rule, no logos, plain title page,
+colours editable at the top of the `.sty`). Your own layouts are files in your home folder:
+`~/.noorsuite/templates/<name>.json` (layouts for documents and presentations, saved with *Save layout...* or by the
+PowerPoint import) and `~/.noorsuite/presentations/<name>/` (the Beamer theme `.sty` and its pictures). A
+converted template is one portable file: `python -m NoorSuite presentation export <name> --out my.noortheme` and
+`... presentation import my.noortheme` (or *Import PowerPoint template...* in the GUI accepts `.pptx` and `.noortheme`).
+`*.pptx` and `*.noortheme` are git-ignored.
+
 ## Author lists and Supporting Information
 
 *Authors...* (document toolbar) edits the author list in a table: names, affiliation keys (`1,2`), e-mail,
