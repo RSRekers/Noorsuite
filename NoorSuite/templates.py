@@ -8,6 +8,8 @@ Qt), so the skill, the GUI and the headless export share it.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -129,12 +131,118 @@ keyword one \sep keyword two
 ORDER = ["article", "acs", "rsc", "elsevier"]
 
 
+# ------------------------------------------------------------------ user templates
+def user_dir() -> Path:
+    """Where the user's own layouts live (``$NOORSUITE_TEMPLATES`` or
+    ``~/.noorsuite/templates``)."""
+    d = os.environ.get("NOORSUITE_TEMPLATES")
+    return Path(d) if d else Path(os.path.expanduser("~")) / ".noorsuite" / "templates"
+
+
+def load_user_templates() -> dict:
+    """``{"user:<slug>": template dict}`` of every readable ``*.json`` in :func:`user_dir`."""
+    out = {}
+    d = user_dir()
+    if not d.is_dir():
+        return out
+    for f in sorted(d.glob("*.json")):
+        try:
+            t = json.loads(f.read_text(encoding="utf-8"))
+            if t.get("preamble") and t.get("front"):
+                t["known"] = set(t.get("known", []))
+                t["widths"] = [tuple(w) for w in t.get("widths", [])]
+                out["user:" + f.stem] = t
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def is_user(template_id) -> bool:
+    return str(template_id or "").startswith("user:")
+
+
 def list_templates() -> list:
-    return [(i, TEMPLATES[i]["label"]) for i in ORDER]
+    """``[(id, label)]``: the built-in journal layouts, then the user's own."""
+    return [(i, TEMPLATES[i]["label"]) for i in ORDER] + \
+           [(i, t["label"] + "  (my layout)") for i, t in load_user_templates().items()]
 
 
 def get(template_id: str | None) -> dict:
+    if is_user(template_id):
+        t = load_user_templates().get(template_id)
+        if t is not None:
+            return t
     return TEMPLATES.get(template_id or "article", TEMPLATES["article"])
+
+
+def base_of(template_id: str | None) -> str:
+    """The built-in template a layout derives from (the id itself for built-ins)."""
+    if is_user(template_id):
+        return get(template_id).get("base", "article")
+    return template_id if template_id in TEMPLATES else "article"
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-") or "layout"
+
+
+def _parse_widths(widths) -> list:
+    """``"8.5, 17.5"`` / ``[8.5, 17.5]`` / ``[(label, cm, span)]`` -> the widths list."""
+    if not widths:
+        return []
+    if isinstance(widths, str):
+        widths = [float(x) for x in re.split(r"[;, ]+", widths.strip()) if x]
+    out = []
+    for i, w in enumerate(widths):
+        if isinstance(w, (tuple, list)):
+            out.append((str(w[0]), float(w[1]), bool(w[2]) if len(w) > 2 else False))
+        else:
+            span = i == len(widths) - 1 and len(widths) > 1
+            name = "Double column" if span else ("Single column" if i == 0 else "1.5 column")
+            out.append((f"{name} ({float(w):g} cm)", float(w), span))
+    return out
+
+
+def make_user_template(source: str, label: str, widths=None) -> str:
+    """Store ``source``'s layout (class, packages, macros -- not its text) as a reusable
+    template; returns its id (``user:<slug>``). ``widths`` = figure widths in cm (a list or
+    ``"8.5, 17.5"``: single column first, last = double column)."""
+    m = re.search(r"\\begin\{document\}", source)
+    if not m:
+        raise ValueError("the document has no \\begin{document}")
+    base = detect(source)
+    b = TEMPLATES[base]
+    pre, _ = _take_commands(source[:m.start()],
+                            ["title", "author", "affiliation", "email", "address", "date"])
+    pre = pre.rstrip() + "\n"
+    if "{noorsuite}" not in pre:
+        pre += "\\usepackage{noorsuite}   % \\noorsheet{...}: NoorSuite sheets as figures\n"
+    known = set()
+    for pm in re.finditer(r"\\usepackage(?:\[[^\]]*\])?\{([^}]*)\}", pre):
+        known |= {n.strip() for n in pm.group(1).split(",")}
+    cls = re.search(r"\\documentclass(?:\[([^\]]*)\])?\{([^}]*)\}", pre)
+    two = b["two_column"] or bool(cls and "twocolumn" in (cls.group(1) or ""))
+    t = {"label": label.strip() or "My layout", "base": base, "class": cls.group(2) if cls else "",
+         "two_column": two, "preamble": pre + "@EXTRA@", "front": b["front"],
+         "tail": "\\end{document}\n",
+         "widths": [list(w) for w in (_parse_widths(widths) or b["widths"])],
+         "word": dict(b["word"]), "ack": b.get("ack", ""), "known": sorted(known)}
+    d = user_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    slug = _slug(t["label"])
+    (d / f"{slug}.json").write_text(json.dumps(t, indent=2), encoding="utf-8")
+    return "user:" + slug
+
+
+def delete_user_template(template_id: str) -> bool:
+    if not is_user(template_id):
+        return False
+    f = user_dir() / (template_id[5:] + ".json")
+    try:
+        f.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def figure_widths(template_id: str | None) -> list:
@@ -287,7 +395,7 @@ def _authors_for(tid: str, authors: list) -> dict:
 def build_document(template_id: str, title: str = "Title", authors=None, abstract: str = "",
                    body: str = "", extra=None) -> str:
     t = get(template_id)
-    tid = template_id if template_id in TEMPLATES else "article"
+    tid = base_of(template_id)
     extra_txt = ("\n" + "\n".join(extra)) if extra else ""
     pre = t["preamble"].replace("@EXTRA@", extra_txt.lstrip("\n"))
     front = t["front"].replace("@TITLE@", title or "Title")
@@ -300,7 +408,7 @@ def build_document(template_id: str, title: str = "Title", authors=None, abstrac
                 "\\section{Results}\n")
     text = pre.rstrip("\n") + "\n\n"
     text += front.rstrip("\n") + "\n\n" + body.strip("\n") + "\n\n"
-    text += "\\end{document}\n"
+    text += t.get("tail", "\\end{document}\n")
     return text
 
 
@@ -324,10 +432,11 @@ def _fix_envs_for(tid: str, body: str) -> str:
 def apply_template(source: str, template_id: str) -> str:
     """The document's text in another layout: preamble and front matter are regenerated from
     title / authors / abstract, the body (text, figures, bibliography) is kept."""
-    if template_id not in TEMPLATES:
+    if template_id not in TEMPLATES and not (is_user(template_id)
+                                             and template_id in load_user_templates()):
         return source
     parts = extract_parts(source)
-    body = _fix_envs_for(template_id, parts["body"])
+    body = _fix_envs_for(base_of(template_id), parts["body"])
     return build_document(template_id, parts["title"] or "Title", parts["authors"],
                           parts["abstract"], body, parts["extra"])
 

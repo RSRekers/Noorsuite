@@ -595,6 +595,12 @@ class SciSuiteClient:
                                "title": title or "", "authors": list(authors or []),
                                "abstract": abstract})
 
+    def list_templates(self) -> pd.DataFrame:
+        """Document layouts usable as ``push_document(template=<id>)``: the built-in journal
+        layouts plus the user's own saved ones (``user:<name>``)."""
+        from . import templates
+        return pd.DataFrame(templates.list_templates(), columns=["id", "label"])
+
     def list_documents(self) -> pd.DataFrame:
         resp = self._ipc.send({"action": ACTION_LIST_DOCUMENTS}) or {}
         return pd.DataFrame(resp.get("documents", []), columns=["id", "name", "chars"])

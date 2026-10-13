@@ -1240,7 +1240,7 @@ class DocumentModel:
     sheets referenced with ``\noorsheet{<sheet id>}`` (see :mod:`NoorSuite.latex`)."""
 
     def __init__(self, name="Document", source="", doc_id=None, bib_style="",
-                 cite_mode="superscript"):
+                 cite_mode="superscript", layout=""):
         self.doc_id = doc_id or _new_id()
         self.name = name
         self.source = source
@@ -1249,15 +1249,20 @@ class DocumentModel:
         self.bib_style = bib_style
         # how citation numbers appear in the text (refstyle.CITE_MODES), native formats only
         self.cite_mode = cite_mode
+        # id of a user layout ("user:<slug>") applied to this document; "" -> detected from
+        # the class / packages
+        self.layout = layout
 
     def to_dict(self) -> dict:
         return {"doc_id": self.doc_id, "name": self.name, "source": self.source,
-                "bib_style": self.bib_style, "cite_mode": self.cite_mode}
+                "bib_style": self.bib_style, "cite_mode": self.cite_mode,
+                "layout": self.layout}
 
     @classmethod
     def from_dict(cls, d: dict) -> "DocumentModel":
         return cls(d.get("name", "Document"), d.get("source", ""), d.get("doc_id"),
-                   d.get("bib_style", ""), d.get("cite_mode", "superscript"))
+                   d.get("bib_style", ""), d.get("cite_mode", "superscript"),
+                   d.get("layout", ""))
 
 
 class ProjectModel:

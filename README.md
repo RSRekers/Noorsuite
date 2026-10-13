@@ -163,6 +163,11 @@ that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick lab
 
 ## Journal layouts
 
+*My layouts*: **Save layout...** (document toolbar) keeps the open document's class, packages and macros as your own
+layout (name + figure widths in cm) in `~/.noorsuite/templates/`; it then appears in the Layout box, in *New journal
+manuscript*, in the figure-width list and as `push_document(template="user:<name>")` (`suite.list_templates()`).
+The text is never part of it; **Delete layout...** removes one.
+
 A document's *Layout* box (toolbar) re-lays it out for **ACS (`achemso`)**, **RSC (`rsc.sty`, two
 columns)**, **Elsevier (`elsarticle`)** or a plain article. Switching regenerates the preamble and front
 matter from the document's title / authors / abstract and keeps your text, figures, macros and extra
@@ -183,8 +188,8 @@ numbered ACS list (journal italic, year bold, DOI as a link), figures / tables /
 ("Figure 2. ...") and `\ref` / `\autoref` resolved, equations become native Word / ODF equations.
 Numbered equations (`\begin{equation}`) become a small borderless three-column table: empty left cell,
 the equation centred in the middle, `(n)` right-aligned - `\eqref` / `\ref` use the same numbers (Word
-only; ODT keeps the table without the alignment). `align` and `equation*` stay plain display math.
-Not carried over: numbering of `align` rows, custom macros, BibTeX-style formats other than the numbered ACS list
+only; ODT keeps the table without the alignment). `align` / `eqnarray` rows become a four-column table (number per row, split at the first `&` so the relation signs line up; `\nonumber` rows stay unnumbered), `gather` one centred row per line; `equation*` / `align*` stay plain display math.
+Not carried over: custom macros, BibTeX-style formats other than the numbered ACS list
 (the Word file always gets that list). pandoc is found via `$NOORSUITE_PANDOC`, `config.json`
 `{"pandoc": ...}`, PATH or the `noorlatex` conda env (`conda install -n noorlatex -c conda-forge pandoc`).
 

@@ -790,14 +790,22 @@ class DocumentTab(QWidget):
         from . import templates as _templates
         toolbar.addWidget(QLabel(" Layout: "))
         self.layout_combo = _NoWheelComboBox()
-        for tid, tlabel in _templates.list_templates():
-            self.layout_combo.addItem(tlabel, tid)
+        self.populate_layouts()
         self.layout_combo.setToolTip(
             "Journal layout of this document. Switching rewrites the preamble and front "
             "matter (title, authors, abstract) and keeps your text; undoable with Ctrl+Z.")
         self.layout_combo.activated.connect(
             lambda _i: self.set_layout(self.layout_combo.currentData()))
         toolbar.addWidget(self.layout_combo)
+        save_layout_act = QAction("Save layout...", self)
+        save_layout_act.setToolTip("Keep this document's class, packages and macros as your own "
+                                   "reusable layout (appears in the Layout box and in New "
+                                   "journal manuscript)")
+        save_layout_act.triggered.connect(self.save_layout)
+        toolbar.addAction(save_layout_act)
+        del_layout_act = QAction("Delete layout...", self)
+        del_layout_act.triggered.connect(self.delete_layout)
+        toolbar.addAction(del_layout_act)
         toolbar.addSeparator()
         pdf_act = QAction("Export PDF...", self)
         pdf_act.triggered.connect(self.export_pdf)
@@ -959,9 +967,64 @@ class DocumentTab(QWidget):
         if self.auto_check.isChecked():
             self._source_timer.start(self.AUTO_DELAY_MS)
 
-    def current_layout(self) -> str:
+    def populate_layouts(self):
         from . import templates
-        return templates.detect(self.source())
+        cur = self.layout_combo.currentData()
+        self.layout_combo.blockSignals(True)
+        self.layout_combo.clear()
+        for tid, tlabel in templates.list_templates():
+            self.layout_combo.addItem(tlabel, tid)
+        i = self.layout_combo.findData(cur)
+        if i >= 0:
+            self.layout_combo.setCurrentIndex(i)
+        self.layout_combo.blockSignals(False)
+
+    def current_layout(self) -> str:
+        """The layout in effect: the stored user layout while the text still has its class,
+        else the built-in layout detected from the text."""
+        from . import templates
+        det = templates.detect(self.source())
+        mine = self.model.layout
+        if mine and templates.is_user(mine) and templates.base_of(mine) == det \
+                and mine in dict(templates.list_templates()):
+            return mine
+        return det
+
+    def save_layout(self):
+        from . import templates
+        name, ok = QInputDialog.getText(self, "Save layout", "Name of the layout:")
+        if not ok or not name.strip():
+            return
+        w, ok = QInputDialog.getText(
+            self, "Figure widths",
+            "Figure widths in cm, comma separated (single column first, double column last).\n"
+            "Leave empty to keep those of the base layout:", text="")
+        if not ok:
+            return
+        try:
+            tid = templates.make_user_template(self.source(), name, w.strip() or None)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save layout", str(exc))
+            return
+        self.model.layout = tid
+        self.populate_layouts()
+        self.sync_layout_combo()
+        self.status_label.setText(f"  layout saved: {name.strip()}")
+
+    def delete_layout(self):
+        from . import templates
+        mine = [(t["label"], i) for i, t in templates.load_user_templates().items()]
+        if not mine:
+            QMessageBox.information(self, "Delete layout", "You have no saved layouts.")
+            return
+        label, ok = QInputDialog.getItem(self, "Delete layout", "Layout to delete:",
+                                         [m[0] for m in mine], 0, False)
+        if ok:
+            templates.delete_user_template(dict(mine)[label])
+            if self.model.layout == dict(mine)[label]:
+                self.model.layout = ""
+            self.populate_layouts()
+            self.sync_layout_combo()
 
     def sync_layout_combo(self):
         if not hasattr(self, "layout_combo") or not hasattr(self, "figures"):
@@ -989,6 +1052,7 @@ class DocumentTab(QWidget):
         cur.select(cur.SelectionType.Document)
         cur.insertText(new)
         cur.endEditBlock()
+        self.model.layout = template_id if templates.is_user(template_id) else ""
         self.status_label.setText(f"  layout: {templates.get(template_id)['label']}")
         self.sync_layout_combo()
         self.contentChanged.emit()

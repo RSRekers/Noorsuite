@@ -204,16 +204,35 @@ def test_offline_push_document_with_template(tmp_path):
 
 # ------------------------------------------------------------------ equation numbering
 def test_equations_become_three_column_tables_with_numbers():
-    src = (r"A \begin{equation}\label{e1} x = 1 % note" "\n" r"\nonumber\end{equation} B" "\n"
+    src = (r"A \begin{equation}\label{e1} x = 1 % note" "\n" r"\end{equation} B" "\n"
            "% \\begin{equation} hidden \\end{equation}\n"
            r"\begin{equation*} u=v \end{equation*}" "\n"
-           r"\begin{equation} y = \frac{1}{2} \end{equation}")
-    out, n = docexport.equations_to_tables(src)
-    assert n == 2
-    assert out.count(r"\begin{longtable}{p{0.08\linewidth}p{0.80\linewidth}p{0.08\linewidth}}") == 2
-    assert r" & $\displaystyle x = 1$ & (1) \\" in out
-    assert r" & $\displaystyle y = \frac{1}{2}$ & (2) \\" in out
+           r"\begin{equation} y = \frac{1}{2} \nonumber \end{equation}" "\n"
+           r"\begin{equation} z \end{equation}")
+    out, n, labels = docexport.equations_to_tables(src)
+    assert n == 2 and labels == {"e1": 1}
+    assert out.count(r"\begin{longtable}{p{0.08\linewidth}p{0.80\linewidth}p{0.08\linewidth}}") == 3
+    m = docexport._MARK
+    assert m + r" & $\displaystyle x = 1$ & (1) \\" in out
+    assert m + r" & $\displaystyle y = \frac{1}{2}$ &  \\" in out       # \nonumber
+    assert m + r" & $\displaystyle z$ & (2) \\" in out
     assert r"\label" not in out and "hidden" in out and r"\begin{equation*}" in out
+
+
+def test_align_rows_are_numbered_and_split_at_the_ampersand():
+    src = (r"\begin{align}" "\n" r"a &= b + c \label{r1} \\" "\n"
+           r"  &= d \nonumber \\" "\n"
+           r"e &= \begin{aligned} f \\ g \end{aligned} \label{r3}" "\n" r"\end{align}")
+    out, n, labels = docexport.equations_to_tables(src)
+    m = docexport._MARK
+    assert n == 2 and labels == {"r1": 1, "r3": 2}
+    assert r"p{0.08\linewidth}p{0.38\linewidth}p{0.42\linewidth}p{0.08\linewidth}" in out
+    assert m + r" & $\displaystyle a$ & $\displaystyle = b + c$ & (1) \\" in out
+    assert m + r" &  & $\displaystyle = d$ &  \\" in out
+    assert (r"$\displaystyle e$ & $\displaystyle = \begin{aligned} f \\ g \end{aligned}$ & (2)"
+            in out)
+    same, k, _ = docexport.equations_to_tables(r"\begin{align*} a &= b \end{align*}")
+    assert k == 0 and "longtable" not in same
 
 
 def test_equation_labels_resolve_in_references():
@@ -243,3 +262,105 @@ def test_docx_equation_tables_are_aligned_and_borderless(tmp_path):
     assert 'w:val="nil"' in tbl
     text = re.sub(r"<[^>]+>", " ", xml)
     assert "(1)" in text and "Energy (1)" in re.sub(r"\s+", " ", text)
+
+
+@pytest.mark.skipif(docexport.find_pandoc() is None, reason="pandoc not installed")
+def test_docx_align_block_is_a_four_column_table_with_per_row_numbers(tmp_path):
+    src = (r"\documentclass{article}\begin{document}" "\n"
+           r"Rows~\eqref{b} and~\eqref{c}." "\n"
+           r"\begin{align}" "\n" r"a &= b + c \label{b} \\" "\n"
+           r"  &= d \nonumber \\" "\n" r"e &= f \label{c}" "\n" r"\end{align}" "\n"
+           r"\end{document}")
+    out = tmp_path / "o.docx"
+    ok, log = docexport.export_office(src, [], "superscript", [], [], out, "docx",
+                                      tmp_path / "w", lambda *a: None, lambda *a: None,
+                                      docexport.find_pandoc())
+    assert ok, log
+    xml = zipfile.ZipFile(out).read("word/document.xml").decode("utf8")
+    assert xml.count("<w:tbl>") == 1 and xml.count("<w:gridCol") == 4
+    assert xml.count("<w:tr>") == 3
+    tbl = re.search(r"<w:tbl>.*</w:tbl>", xml, re.S).group(0)
+    assert 'w:jc w:val="right"' in tbl and 'w:jc w:val="left"' in tbl and 'w:val="nil"' in tbl
+    flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", xml))
+    assert "(1)" in flat and "(2)" in flat and "(3)" not in flat
+    assert "Rows (1) and (2)" in flat
+
+
+# ------------------------------------------------------------------ user layouts
+@pytest.fixture
+def tpl_dir(tmp_path, monkeypatch):
+    d = tmp_path / "templates"
+    monkeypatch.setenv("NOORSUITE_TEMPLATES", str(d))
+    return d
+
+
+def _custom_source():
+    return (r"\documentclass[10pt,a4paper,twocolumn]{article}" "\n"
+            r"\usepackage{siunitx}" "\n" r"\usepackage{booktabs}" "\n"
+            r"\usepackage{noorsuite}" "\n"
+            r"\newcommand{\Li}{\mathrm{Li}}" "\n"
+            r"\title{Old title}\author{Old Author}" "\n"
+            r"\begin{document}" "\n" r"\maketitle" "\n"
+            r"\begin{abstract}Old abstract.\end{abstract}" "\n"
+            r"\section{Old body}Text." "\n" r"\end{document}" "\n")
+
+
+def test_user_layout_is_saved_listed_applied_and_deleted(tpl_dir):
+    from NoorSuite import templates as T
+    tid = T.make_user_template(_custom_source(), "Group thesis", "8.5, 17.5")
+    assert tid == "user:group-thesis" and (tpl_dir / "group-thesis.json").is_file()
+    assert (tid, "Group thesis  (my layout)") in T.list_templates()
+    t = T.get(tid)
+    assert t["two_column"] and T.base_of(tid) == "article"
+    assert [w[1] for w in T.figure_widths(tid)] == [8.5, 17.5]
+    assert T.figure_widths(tid)[1][2] is True                   # last = double column
+    # a new document in this layout keeps the class, packages and macros, takes new front matter
+    doc = T.build_document(tid, "New title", ["A One", "B Two"], "New abstract.", "Body here.")
+    assert r"\documentclass[10pt,a4paper,twocolumn]{article}" in doc
+    assert r"\usepackage{siunitx}" in doc and r"\newcommand{\Li}" in doc
+    assert "New title" in doc and "New abstract." in doc and "Old title" not in doc
+    assert "Body here." in doc and "Old body" not in doc
+    # switching an ACS document to it, and back to a built-in, keeps text
+    acs = T.build_document("acs", "T", ["X"], "A.", "Keep this text.")
+    mine = T.apply_template(acs, tid)
+    assert "{article}" in mine and "Keep this text." in mine and r"\usepackage{siunitx}" in mine
+    assert "Keep this text." in T.apply_template(mine, "elsevier")
+    # push_document(template="user:...")
+    assert "twocolumn" in T.compose(r"\section{A}" "\nBody.", tid, "Title", ["Au"], "Abs.")
+    assert T.delete_user_template(tid) and not (tpl_dir / "group-thesis.json").exists()
+    assert tid not in dict(T.list_templates())
+
+
+def test_gui_save_apply_and_forget_layout(win, tpl_dir, monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+    ids, dm, tab = _doc_win(win, 1)
+    tab.set_source(_custom_source())
+    answers = iter([("My two-col", True), ("8.4, 17.2", True)])
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: next(answers)))
+    tab.save_layout()
+    tid = "user:my-two-col"
+    assert tab.model.layout == tid and tab.layout_combo.findData(tid) >= 0
+    assert tab.current_layout() == tid
+    labels = [tab.figures.width_combo.itemText(i) for i in range(tab.figures.width_combo.count())]
+    assert any("17.2 cm" in t for t in labels)
+    # choose a built-in, then the user layout again
+    tab.set_layout("elsevier")
+    assert tab.current_layout() == "elsevier" and tab.model.layout == ""
+    tab.set_layout(tid)
+    assert tab.model.layout == tid and "twocolumn" in tab.source()
+    # persisted with the document
+    from NoorSuite.model import DocumentModel
+    assert DocumentModel.from_dict(tab.model.to_dict()).layout == tid
+
+
+def test_user_layout_shows_in_new_manuscript_and_skill_push(win, tpl_dir):
+    from NoorSuite import templates as T
+    tid = T.make_user_template(_custom_source(), "Lab style")
+    dm = win.create_new_document("Draft", template=tid)
+    assert "twocolumn" in dm.source and "siunitx" in dm.source
+    win.handle_incoming_ipc({"action": "document", "name": "Skill doc", "mode": "replace",
+                             "source": r"\section{A}" "\nText.", "template": tid,
+                             "title": "Skill", "authors": ["A"], "abstract": "Abs."})
+    d2 = next(d for d in win.documents.values() if d.name == "Skill doc")
+    assert "twocolumn" in d2.source and "Skill" in d2.source

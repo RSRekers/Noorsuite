@@ -117,11 +117,13 @@ _TOKEN = re.compile(
     r"|\\label\s*\{(?P<label>[^{}]*)\}")
 
 
-def number_references(src: str) -> tuple[str, dict]:
+def number_references(src: str, equation_labels: dict | None = None) -> tuple[str, dict]:
     """Number figures / tables / sections exactly as LaTeX would and resolve ``\\ref``,
     ``\\autoref``, ``\\cref`` and ``\\eqref`` to them. Returns ``(text, {label: text})``."""
     code = _COMMENT.sub("", src)
     labels: dict = {}
+    for k, n in (equation_labels or {}).items():          # numbered by equations_to_tables
+        labels[k] = ("Equation", str(n))
     sec = [0, 0, 0]
     fig = tab = eq = 0
     cur = None                                   # ("figure", n) while inside an environment
@@ -207,59 +209,138 @@ def _prefix_captions(src: str) -> str:
     return "".join(out)
 
 
-_EQ_ENV = re.compile(r"\\begin\{equation\}(.*?)\\end\{equation\}", re.S)
+_EQ_ENV = re.compile(
+    r"\\begin\{(equation|align|gather|eqnarray)\}(.*?)\\end\{\1\}", re.S)
+_MARK = "\u2060"                                   # invisible marker in the empty left cell
 
 
-def equations_to_tables(src: str) -> tuple[str, int]:
-    """Numbered ``equation`` environments as a borderless three-column table -- empty left
-    cell, the equation in the middle, ``(n)`` in the right cell -- so Word shows them like
-    LaTeX does. ``equation*`` / ``\\[ \\]`` stay plain display math. Numbers follow
-    :func:`number_references`. Returns ``(text, count)``."""
+def _split_top(text: str, sep: str) -> list:
+    r"""Split ``text`` on ``sep`` (``\\`` or ``&``) where it is not inside braces or a nested
+    ``\begin{..}...\end{..}`` (e.g. ``aligned``)."""
+    parts, buf, depth, env, i = [], [], 0, 0, 0
+    while i < len(text):
+        if text.startswith("\\begin{", i):
+            env += 1
+        elif text.startswith("\\end{", i):
+            env = max(0, env - 1)
+        c = text[i]
+        if c == "\\" and sep == "\\\\" and text.startswith("\\\\", i) and not depth and not env:
+            parts.append("".join(buf))
+            buf = []
+            i += 2
+            m = re.match(r"\s*\[[^\]]*\]", text[i:])      # \\[3pt] spacing option
+            if m:
+                i += m.end()
+            continue
+        if c == "\\":
+            buf.append(text[i:i + 2])
+            i += 2
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth = max(0, depth - 1)
+        elif c == "&" and sep == "&" and not depth and not env:
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+def equations_to_tables(src: str) -> tuple[str, int, dict]:
+    r"""Numbered ``equation`` / ``align`` / ``gather`` / ``eqnarray`` environments as borderless
+    tables: an empty marker cell on the left, the math in the middle, ``(n)`` on the right.
+    ``equation`` / ``gather`` rows have one middle cell; ``align`` / ``eqnarray`` rows are split at
+    the first ``&`` into two cells (right- / left-aligned, so the relation signs line up).
+    Starred environments, ``\nonumber`` rows and ``\[ \]`` stay plain display math / unnumbered.
+    Returns ``(text, how_many_numbers, {label: number})``."""
     masked = _COMMENT.sub(lambda m: " " * len(m.group(0)), src)
-    out, pos, n = [], 0, 0
+    out, pos, n, labels = [], 0, 0, {}
     for m in _EQ_ENV.finditer(masked):
-        n += 1
-        inner = src[m.start(1):m.end(1)]
-        inner = re.sub(r"\\(?:label\s*\{[^}]*\}|nonumber|notag)", "", inner)
-        inner = " ".join(_COMMENT.sub("", inner).split())
+        kind = m.group(1)
+        inner = _COMMENT.sub("", src[m.start(2):m.end(2)])
+        rows = [r for r in _split_top(inner, "\\\\")]
+        if kind != "equation":
+            rows = [r for r in rows if r.strip()]       # trailing \\ -> empty last row
+        lines = []
+        for row in rows:
+            numbered = not re.search(r"\\(?:nonumber|notag)\b", row)
+            keys = re.findall(r"\\label\s*\{([^}]*)\}", row)
+            row = re.sub(r"\\(?:label\s*\{[^}]*\}|nonumber|notag)", "", row)
+            number = ""
+            if numbered:
+                n += 1
+                number = f"({n})"
+                for k in keys:
+                    labels[k.strip()] = n
+            cell = lambda t: f"$\\displaystyle {' '.join(t.split())}$" if t.strip() else ""  # noqa
+            if kind in ("align", "eqnarray"):
+                bits = _split_top(row, "&")
+                left, right = (bits[0], " ".join(bits[1:])) if len(bits) > 1 else ("", row)
+                lines.append(f"{_MARK} & {cell(left)} & {cell(right)} & {number} \\\\")
+            else:
+                lines.append(f"{_MARK} & {cell(row)} & {number} \\\\")
+        if kind in ("align", "eqnarray"):
+            spec = "p{0.08\\linewidth}p{0.38\\linewidth}p{0.42\\linewidth}p{0.08\\linewidth}"
+        else:
+            spec = "p{0.08\\linewidth}p{0.80\\linewidth}p{0.08\\linewidth}"
         out.append(src[pos:m.start()])
-        out.append("\\begin{longtable}{p{0.08\\linewidth}p{0.80\\linewidth}p{0.08\\linewidth}}\n"
-                   f" & $\\displaystyle {inner}$ & ({n}) \\\\\n\\end{{longtable}}")
+        out.append(f"\\begin{{longtable}}{{{spec}}}\n" + "\n".join(lines) +
+                   "\n\\end{longtable}")
         pos = m.end()
     out.append(src[pos:])
-    return "".join(out), n
+    return "".join(out), n, labels
 
 
 _TBL = re.compile(r"<w:tbl>.*?</w:tbl>", re.S)
 
 
+def _set_jc(cell: str, value: str) -> str:
+    if "<w:jc " in cell:
+        return re.sub(r'<w:jc w:val="[a-z]+"\s*/>', f'<w:jc w:val="{value}" />', cell)
+    if "<w:pPr>" in cell:
+        return cell.replace("<w:pPr>", f'<w:pPr><w:jc w:val="{value}" />', 1)
+    return cell.replace("<w:p>", f'<w:p><w:pPr><w:jc w:val="{value}" /></w:pPr>', 1)
+
+
 def style_equation_tables(docx_path) -> int:
-    """Post-process a pandoc .docx: the 3-column tables made by :func:`equations_to_tables`
-    get centred equations, right-aligned numbers and no borders. Returns how many."""
+    """Post-process a pandoc .docx: the tables made by :func:`equations_to_tables` (3 or 4
+    columns, marker in every first cell) get centred / aligned cells, right-aligned numbers,
+    vertically centred rows and no borders. Returns how many tables."""
     import zipfile
     count = 0
 
     def fix(m):
         nonlocal count
         t = m.group(0)
-        cells = re.findall(r"<w:tc>.*?</w:tc>", t, re.S)
-        if t.count("<w:gridCol") != 3 or len(cells) != 3 or "<w:tr>" not in t \
-                or t.count("<w:tr>") != 1:
+        ncol = t.count("<w:gridCol")
+        rows = re.findall(r"<w:tr>.*?</w:tr>", t, re.S)
+        if ncol not in (3, 4) or not rows:
             return t
         txt = lambda c: "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", c)).strip()  # noqa: E731
-        if txt(cells[0]) or not re.fullmatch(r"\(\d+\)", txt(cells[2])):
-            return t
-        count += 1
-        mid = cells[1].replace('<w:jc w:val="left" />', '<w:jc w:val="center" />')
-        right = cells[2].replace('<w:jc w:val="left" />', '<w:jc w:val="right" />')
-        for old, new in ((cells[1], mid), (cells[2], right)):
+        new_rows = []
+        for r in rows:
+            cells = re.findall(r"<w:tc>.*?</w:tc>", r, re.S)
+            if len(cells) != ncol or txt(cells[0]) != _MARK \
+                    or not re.fullmatch(r"(\(\d+\))?", txt(cells[-1])):
+                return t
+            aligns = ["left"] + (["center"] if ncol == 3 else ["right", "left"]) + ["right"]
+            rr = r
+            for c, a in zip(cells, aligns):
+                rr = rr.replace(c, _set_jc(c, a), 1)
+            new_rows.append((r, rr))
+        for old, new in new_rows:
             t = t.replace(old, new, 1)
+        count += 1
         t = re.sub(r"<w:tcPr\s*/>", '<w:tcPr><w:vAlign w:val="center" /></w:tcPr>', t)
         none = "".join(f'<w:{e} w:val="nil" />'
                        for e in ("top", "left", "bottom", "right", "insideH", "insideV"))
-        t = re.sub(r"(<w:tblLayout[^>]*/>)", r"\1<w:tblBorders>" + none + "</w:tblBorders>", t,
-                   count=1)
-        return t
+        return re.sub(r"(<w:tblLayout[^>]*/>)", r"\1<w:tblBorders>" + none + "</w:tblBorders>",
+                      t, count=1)
 
     try:
         zin = zipfile.ZipFile(docx_path)
@@ -312,8 +393,8 @@ def prepare_office_source(source: str, records: list, cite_mode: str, sheets, as
             notes.append(f"figure file {key}: {exc}")
     text, missing = swap_figures(text, files)
     text = bibliography_to_paragraphs(text)
-    text, _labels = number_references(text)
-    text, _n_eq = equations_to_tables(text)
+    text, _n_eq, eq_labels = equations_to_tables(text)
+    text, _labels = number_references(text, eq_labels)
     text = re.sub(r"\\usepackage(\[[^\]]*\])?\{noorsuite\}", "", text)
     return text, notes, missing
 

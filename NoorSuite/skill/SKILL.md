@@ -153,6 +153,9 @@ abstract="...")` - `template` is `"acs"` (achemso), `"rsc"`, `"elsevier"` (elsar
 Body text only gets wrapped in the template; a complete document is switched to the template's preamble
 with its text kept. The user switches layouts later with the *Layout* box of the document tab.
 
+The user can save their own layouts (document toolbar -> *Save layout...*); `suite.list_templates()` lists the ids
+(`user:<name>`) next to the built-ins - use them as `template=` too.
+
 ### Word / LibreOffice export of a document
 
 `python -m NoorSuite latex docx --doc "Paper" --out paper.docx` (or `odt`; `--project file.sciproj` to

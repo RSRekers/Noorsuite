@@ -621,6 +621,11 @@ title/x_label/y_label + trace labels).
 - `DocumentTab.set_layout` (undoable edit, then re-applies the document's bib style), `layout_combo`;
   `FigurePanel.width_combo` / `match_check` (`host.set_sheet_width`) / `figure*` for double-column widths
   in two-column templates. Word: `docexport.make_reference_docx` restyles pandoc's reference.docx.
+- User layouts: `make_user_template(source, label, widths)` writes `<user_dir>/<slug>.json`
+  (`$NOORSUITE_TEMPLATES` or `~/.noorsuite/templates`; preamble minus front-matter commands + `@EXTRA@`, the
+  base template's front matter, `tail`, widths, word look, `known` packages); ids are `user:<slug>`,
+  `get / list_templates / base_of / delete_user_template`; everything that takes a template id accepts them.
+  `DocumentModel.layout` remembers the choice (shown only while the text still has the base class).
 - Verified with tectonic: achemso, elsarticle, rsc.sty compile; `rsc.sty` loads natbib itself (do not add
   `\usepackage{natbib}` -- option clash).
 
@@ -633,7 +638,7 @@ oorfile` -> PNG
   (`sheet.export_sheet_raster` at 300 dpi, `assets.export_png`), `thebibliography` -> numbered paragraphs,
   `number_references` (figure/table/section numbers, caption prefixes, `\ref`/`\autoref`/`\eqref`).
   Callers inject `sheet_png` / `asset_png` (window host vs. headless `latex_build._office`).
-- Equations: `equations_to_tables` turns each numbered `equation` env into a pandoc `longtable` with p-columns (0.08/0.80/0.08 of the line: empty | `$\displaystyle ..$` | `(n)`), `style_equation_tables` (docx post-process of `word/document.xml`) centres / right-aligns the cells and removes borders. Numbering = order of `equation` envs outside comments, shared with `number_references` so `\eqref` matches. `align` / `equation*` are not numbered; unresolved labels print as `[label]`.
+- Equations: `equations_to_tables` turns each numbered `equation` env into a pandoc `longtable` with p-columns (0.08/0.80/0.08 of the line: empty | `$\displaystyle ..$` | `(n)`), `style_equation_tables` (docx post-process of `word/document.xml`) centres / right-aligns the cells and removes borders. Numbering = order of `equation` envs outside comments, shared with `number_references` so `\eqref` matches. `align` / `eqnarray` rows -> 4-column table (marker | left part right-aligned | right part left-aligned | number; rows split by `_split_top`, nested `aligned` stays one row), `gather` rows -> 3-column; starred envs are not numbered; unresolved labels print as `[label]`.
 
 ## Objects (shapes) and imported figures
 
