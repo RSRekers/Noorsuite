@@ -250,6 +250,19 @@ def _pdf_to_png_qt(pdf: Path, png: Path, max_px: int) -> bool:
     return (not img.isNull()) and img.save(str(png), "PNG")
 
 
+def export_png(asset, path, max_px=2400) -> bool:
+    """Write the asset as a PNG (for Word / LibreOffice export); False if unreadable."""
+    import numpy as np
+    from PyQt6.QtGui import QImage
+    arr = raster(asset, max_px)
+    if arr is None:
+        return False
+    arr = np.ascontiguousarray(arr)
+    img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 4,
+                 QImage.Format.Format_RGBA8888)
+    return img.save(str(path), "PNG")
+
+
 def guess_ext(path) -> str:
     ext = Path(path).suffix.lower().lstrip(".")
     return "jpg" if ext == "jpeg" else ext

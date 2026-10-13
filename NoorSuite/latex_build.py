@@ -71,9 +71,44 @@ def render_figures(pm, dm, workdir) -> list:
     return missing
 
 
+def _office(pm, dm, a) -> int:
+    """``latex docx|odt``: Word / LibreOffice export through pandoc."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from . import assets as assets_mod
+    from . import docexport
+    from .sheet import export_sheet_raster
+    global _APP
+    _APP = QApplication.instance() or QApplication([])
+    repo = {o.id: o for o in pm.data_objects}
+    imgs = {i.id: i for i in pm.images}
+    assets = {x.asset_id: x for x in pm.assets}
+
+    def sheet_png(sm, path):
+        export_sheet_raster(sm, repo, imgs, path, 300, assets=assets)
+
+    def asset_png(asset, path):
+        if not assets_mod.export_png(asset, path):
+            raise RuntimeError("figure file unreadable")
+
+    out = Path(a.out or (re.sub(r"[^\w.-]+", "_", dm.name) + "." + a.command))
+    work = Path(tempfile.mkdtemp(prefix="noorsuite_office_"))
+    try:
+        ok, log = docexport.export_office(
+            dm.source, pm.references, getattr(dm, "cite_mode", "superscript"), pm.sheets,
+            pm.assets, out.resolve(), a.command, work, sheet_png, asset_png)
+        if log:
+            print(log, file=sys.stderr)
+        if ok:
+            print(f"exported {dm.name!r} -> {out}")
+        return 0 if ok else 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main(argv) -> int:
     ap = argparse.ArgumentParser(prog="noorsuite latex", description=__doc__)
-    ap.add_argument("command", choices=["build", "export", "engine"])
+    ap.add_argument("command", choices=["build", "export", "engine", "docx", "odt"])
     ap.add_argument("--project", help=".sciproj file (default: the GUI session file)")
     ap.add_argument("--doc", help="document name or id (default: the first one)")
     ap.add_argument("--out", help="build: output PDF path (default: <document name>.pdf)")
@@ -87,6 +122,8 @@ def main(argv) -> int:
 
     pm = _load(a.project)
     dm = _pick_document(pm, a.doc)
+    if a.command in ("docx", "odt"):
+        return _office(pm, dm, a)
     workdir = Path(tempfile.mkdtemp(prefix="noorsuite_tex_"))
     try:
         style_id = latex.detect_bib_style(dm.source, getattr(dm, "bib_style", "")) \

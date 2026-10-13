@@ -56,7 +56,7 @@ from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, As
                     aggregate_series, append_notes, apply_sheet_annotations,
                     common_label, copy_subplot_style, duplicate_sheet_model, make_image_ref, merge_tags, resolve_sidecar_names,
                     split_folder_path, split_into_repeats)
-from .sheet import PlotSheet, export_sheet_pdf, export_sheet_png
+from .sheet import PlotSheet, export_sheet_pdf, export_sheet_png, export_sheet_raster
 from .widgets import CollapsibleSection
 
 APP_NAME = "NOORSUITE"
@@ -2797,6 +2797,10 @@ class SciSuiteWindow(QMainWindow):
         sheet has none), on a throw-away copy so open tabs / zoom are untouched."""
         export_sheet_pdf(self.sheets[sheet_id], self.repository, self.images, path,
                          assets=self.assets)
+
+    def export_sheet_raster(self, sheet, path, dpi=300):
+        """PNG of a sheet model at its figure size (Word / LibreOffice export)."""
+        export_sheet_raster(sheet, self.repository, self.images, path, dpi, assets=self.assets)
 
     def sheet_thumbnail(self, sheet_id, px=360):
         """QPixmap preview of a sheet, cached on disk by the sheet's fingerprint."""

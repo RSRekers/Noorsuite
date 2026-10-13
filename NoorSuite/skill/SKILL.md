@@ -146,6 +146,12 @@ text. Keys are data coordinates; the entries are stored as `"0=RT; 1=77 K"` (so 
 `;`). A string-labelled heatmap axis shows one tick per label by itself; the mapping only renames.
 In the GUI: Axes tab -> "X / Y tick labels" (same `value=text; value=text` syntax).
 
+### Word / LibreOffice export of a document
+
+`python -m NoorSuite latex docx --doc "Paper" --out paper.docx` (or `odt`; `--project file.sciproj` to
+use a project file instead of the GUI session). Needs pandoc (`conda install -n noorlatex -c conda-forge
+pandoc`); the user's GUI also has *Export Word...* / *Export LibreOffice...* buttons in the document tab.
+
 ### Highlights, arrows, text and pictures on a plot
 
 `add_shape(sheet, kind, ...)` draws an object on a subplot of an existing sheet. Objects share one

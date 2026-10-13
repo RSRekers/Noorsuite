@@ -758,6 +758,15 @@ class DocumentTab(QWidget):
                               "compiles anywhere (journal submission, arXiv, Overleaf)")
         bundle_act.triggered.connect(self.export_bundle)
         toolbar.addAction(bundle_act)
+        docx_act = QAction("Export Word...", self)
+        docx_act.setToolTip("Word (.docx) through pandoc: figures as 300 dpi PNGs, numbered "
+                            "references, equations as native Word equations")
+        docx_act.triggered.connect(lambda: self.export_office("docx"))
+        toolbar.addAction(docx_act)
+        odt_act = QAction("Export LibreOffice...", self)
+        odt_act.setToolTip("LibreOffice Writer (.odt) through pandoc (also opens in Word)")
+        odt_act.triggered.connect(lambda: self.export_office("odt"))
+        toolbar.addAction(odt_act)
         toolbar.addSeparator()
         self.dark_act = QAction("Dark editor", self)
         self.dark_act.setCheckable(True)
@@ -1278,6 +1287,40 @@ class DocumentTab(QWidget):
         if path:
             shutil.copyfile(self._pdf, path)
             self.status_label.setText(f"  exported {Path(path).name}")
+
+    def export_office(self, fmt: str):
+        """Word / LibreOffice document via pandoc (see :mod:`NoorSuite.docexport`)."""
+        from . import assets as assets_mod
+        from . import docexport
+        pandoc = docexport.find_pandoc()
+        if pandoc is None:
+            QMessageBox.information(self, "pandoc not found", docexport.INSTALL_HINT)
+            return
+        label = docexport.FORMATS[fmt]
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Export {label}", f"{self.model.name}.{fmt}", f"{label} (*.{fmt})")
+        if not path:
+            return
+        def asset_png(asset, dest):
+            if not assets_mod.export_png(asset, dest):
+                raise RuntimeError("figure file unreadable")
+
+        self.status_label.setText(f"  exporting {fmt} ...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            ok, log = docexport.export_office(
+                self.source(), self.host.document_references(), self.model.cite_mode,
+                self.host.document_sheets(), self.host.document_assets(), path, fmt,
+                self.workdir / "office", self.host.export_sheet_raster,
+                asset_png, pandoc)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.log.setPlainText(log)
+        if ok:
+            self.status_label.setText(f"  exported {Path(path).name}")
+        else:
+            self.status_label.setText("  export failed (see the log)")
+            QMessageBox.warning(self, "Export failed", log[-1500:] or "pandoc failed")
 
     def export_bundle(self):
         if not self._building:

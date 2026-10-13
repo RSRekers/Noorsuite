@@ -1430,6 +1430,15 @@ def export_sheet_pdf(sm, repository, images, path, default_cm=None, assets=None)
         ps.deleteLater()
 
 
+def export_sheet_raster(sm, repository, images, path, dpi=300, assets=None):
+    """A PNG of a sheet at its own figure size (``latex.DEFAULT_FIG_CM`` when unset) and
+    ``dpi`` -- what Word / LibreOffice documents embed."""
+    from .latex import DEFAULT_FIG_CM
+    w_cm = sm.fig_width_cm if (sm.fig_width_cm and sm.fig_height_cm) else DEFAULT_FIG_CM[0]
+    export_sheet_png(sm, repository, images, path, width_px=int(w_cm / 2.54 * dpi),
+                     assets=assets)
+
+
 def export_sheet_png(sm, repository, images, path, width_px=360, assets=None):
     """A small PNG of a sheet (figure browser thumbnails), at the document figure size."""
     from .latex import DEFAULT_FIG_CM

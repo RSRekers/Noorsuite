@@ -607,6 +607,17 @@ title/x_label/y_label + trace labels).
   black text by default; QSettings `doc/dark`). Don't rely on the app palette in the Document tab.
 - While a document tab is current the main splitter collapses the inspector (`_saved_split` restores it).
 
+## Word / LibreOffice export (`docexport.py`)
+
+- pandoc LaTeX -> docx/odt. `prepare_office_source`: native numbered ACS text (`prepare_build_source`
+  with `acs-guide`, so the Word file always carries that list), `
+oorsheet`/`
+oorfile` -> PNG
+  (`sheet.export_sheet_raster` at 300 dpi, `assets.export_png`), `thebibliography` -> numbered paragraphs,
+  `number_references` (figure/table/section numbers, caption prefixes, `\ref`/`\autoref`/`\eqref`).
+  Callers inject `sheet_png` / `asset_png` (window host vs. headless `latex_build._office`).
+- Equation numbers are not exported (OMML has no `	ag`); unresolved labels print as `[label]`.
+
 ## Objects (shapes) and imported figures
 
 - `model.ShapeRef` (kinds `rect ellipse line arrow xspan yspan text picture`) lives in

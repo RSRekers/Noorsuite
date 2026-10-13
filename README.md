@@ -161,6 +161,17 @@ in `plot` / `heatmap` / `show_image` / `organize_sheet`. On a categorical heatma
 that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick labels*, written as
 `0=RT; 1=77 K; 2=4 K`.
 
+## Word / LibreOffice export
+
+*Export Word...* / *Export LibreOffice...* in the document toolbar (or `python -m NoorSuite latex docx|odt
+--doc "Paper" --out paper.docx`) writes an editable `.docx` / `.odt` through pandoc: sheets and figure
+files are embedded as 300 dpi PNGs at their figure size, citations are the superscript numbers with the
+numbered ACS list (journal italic, year bold, DOI as a link), figures / tables / sections are numbered
+("Figure 2. ...") and `\ref` / `\autoref` resolved, equations become native Word / ODF equations.
+Not carried over: equation numbers, custom macros, BibTeX-style formats other than the numbered ACS list
+(the Word file always gets that list). pandoc is found via `$NOORSUITE_PANDOC`, `config.json`
+`{"pandoc": ...}`, PATH or the `noorlatex` conda env (`conda install -n noorlatex -c conda-forge pandoc`).
+
 ## Objects on plots and imported figures
 
 * **Objects** (rectangle, ellipse, line, arrow, highlight band, text, picture) are drawn on a subplot from
