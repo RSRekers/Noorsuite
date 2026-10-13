@@ -630,6 +630,23 @@ title/x_label/y_label + trace labels).
   looks in `presentations_dir()` first, then `bundled_themes_dir()`. Portable bundles: `export_bundle(theme, out)` /
   `import_bundle(path)` (`.noortheme` zip: `bundle.json`, `layout.json`, `theme/*`).
 
+## PowerPoint export and slide show (`pptxexport.py`, `docview.PresentationView`)
+
+- `pptxexport.parse_presentation(source)` -> meta + frames (title frame = one with `\titlepage`); frame bodies
+  are parsed by `_blocks` (itemize / enumerate with levels, columns, tabular, figure / center transparent,
+  `\noorsheet` / `\noorfile` / `\includegraphics` pictures with the `width=` fraction, block titles bold,
+  `\framesource`, `\note`, `\frametitle`). `plain()` maps LaTeX text + math to Unicode (Greek, super/subscripts).
+- `export_pptx` (python-pptx, optional dependency `NoorSuite[pptx]`): starts from the theme's `reference.pptx`
+  (kept at import together with the layout names in `template.json["pptx"]`: title / content / two-content /
+  title-only layout and the placeholder idx order of the title layout) or from python-pptx's default template
+  stretched to 16:10 (`_to_16_10` scales only shapes with their own xfrm). Sample slides of the reference are
+  dropped; slide-number placeholders are cloned onto every slide; unused placeholders are removed so no
+  "Click to add text" boxes remain. Callers pass `sheet_png` / `asset_png` (window host or headless).
+- Pictures are fitted into the body placeholder's rectangle; text + picture splits the area 46 / 54.
+- `PresentationView` = frameless full-screen QPdfDocument viewer (keys documented in the class);
+  `DocumentTab.present` builds first (`_ensure_built`).
+- `latex.write_bundle` writes a `README.txt` (compile + run instructions).
+
 ## Author lists and SI documents (`templates.py`, `authorsdialog.py`)
 
 - `parse_authors(source)` -> `{"authors": [{name, affils[keys], email, corresponding}], "affiliations": {key: text}}`

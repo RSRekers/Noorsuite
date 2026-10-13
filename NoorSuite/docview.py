@@ -525,6 +525,110 @@ class FigurePanel(QWidget):
             self.refresh()
 
 
+class PresentationView(QWidget):
+    """Full-screen slide show of a built presentation PDF.
+
+    Keys: Right / Down / PageDown / Space / Enter / N next, Left / Up / PageUp / Backspace / P
+    previous, Home / End first / last, B or . black screen, W or , white screen, a number + Enter
+    jumps, Esc or Q leaves. Mouse: left click next, right click previous."""
+
+    closed = pyqtSignal(int)             # the page that was showing when the show ended
+
+    def __init__(self, pdf_path: str, start: int = 0, parent=None):
+        super().__init__(parent)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self.setStyleSheet("background: black;")
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self.setMouseTracking(True)
+        self._doc = QPdfDocument(self)
+        self._doc.load(pdf_path)
+        self._page = max(0, min(start, max(0, self._doc.pageCount() - 1)))
+        self._cover = None               # None | "black" | "white"
+        self._digits = ""
+        self._cache: dict = {}
+
+    def page_count(self) -> int:
+        return self._doc.pageCount()
+
+    @property
+    def page(self) -> int:
+        return self._page
+
+    def go(self, page: int):
+        n = self.page_count()
+        if n:
+            self._page = max(0, min(int(page), n - 1))
+            self._cover = None
+            self.update()
+
+    def _image(self):
+        w, h = max(1, self.width()), max(1, self.height())
+        key = (self._page, w, h)
+        if key not in self._cache:
+            if len(self._cache) > 6:
+                self._cache.clear()
+            pts = self._doc.pagePointSize(self._page)
+            scale = min(w / max(1.0, pts.width()), h / max(1.0, pts.height()))
+            self._cache[key] = self._doc.render(
+                self._page, QSize(max(1, round(pts.width() * scale)),
+                                  max(1, round(pts.height() * scale))))
+        return self._cache[key]
+
+    def paintEvent(self, _event):
+        from PyQt6.QtGui import QColor, QPainter
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("white" if self._cover == "white" else "black"))
+        if self._cover is None and self._doc.status() == QPdfDocument.Status.Ready \
+                and self.page_count():
+            img = self._image()
+            p.drawImage((self.width() - img.width()) // 2, (self.height() - img.height()) // 2,
+                        img)
+        p.end()
+
+    def keyPressEvent(self, e):
+        k, t = e.key(), e.text().lower()
+        K = Qt.Key
+        if t.isdigit():                              # type a slide number, then Enter
+            self._digits += t
+            return
+        if k in (K.Key_Return, K.Key_Enter) and self._digits:
+            self.go(int(self._digits) - 1)
+            self._digits = ""
+            return
+        self._digits = ""
+        if k == K.Key_Escape or t == "q":
+            self.close()
+        elif k in (K.Key_Right, K.Key_Down, K.Key_PageDown, K.Key_Space, K.Key_Return,
+                   K.Key_Enter) or t == "n":
+            self.go(self._page + 1)
+        elif k in (K.Key_Left, K.Key_Up, K.Key_PageUp, K.Key_Backspace) or t == "p":
+            self.go(self._page - 1)
+        elif k == K.Key_Home:
+            self.go(0)
+        elif k == K.Key_End:
+            self.go(self.page_count() - 1)
+        elif t in ("b", "."):
+            self._cover = None if self._cover == "black" else "black"
+            self.update()
+        elif t in ("w", ","):
+            self._cover = None if self._cover == "white" else "white"
+            self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.RightButton:
+            self.go(self._page - 1)
+        else:
+            self.go(self._page + 1)
+
+    def wheelEvent(self, e):
+        self.go(self._page + (1 if e.angleDelta().y() < 0 else -1))
+
+    def closeEvent(self, e):
+        self.closed.emit(self._page)
+        super().closeEvent(e)
+
+
 class ReferencePanel(QWidget):
     """The project's bibliography and a live search of the Zotero library: find, add + cite,
     format, reference list."""
@@ -836,6 +940,17 @@ class DocumentTab(QWidget):
                              "live: the document holds a reference, the numbers follow the data.")
         table_act.triggered.connect(lambda: self.insert_table())
         toolbar.addAction(table_act)
+        present_act = QAction("Present", self)
+        present_act.setShortcut(QKeySequence("F11"))
+        present_act.setToolTip("Run the built PDF as a full-screen slide show (F11). Arrow keys / "
+                               "space / click: next, B: black screen, Esc: leave")
+        present_act.triggered.connect(self.present)
+        toolbar.addAction(present_act)
+        pptx_act = QAction("Export PowerPoint...", self)
+        pptx_act.setToolTip("Editable .pptx of a presentation (uses your imported PowerPoint "
+                            "template's master and layouts when the theme comes from one)")
+        pptx_act.triggered.connect(self.export_pptx)
+        toolbar.addAction(pptx_act)
         docx_act = QAction("Export Word...", self)
         docx_act.setToolTip("Word (.docx) through pandoc: figures as 300 dpi PNGs, numbered "
                             "references, equations as native Word equations")
@@ -1553,6 +1668,55 @@ class DocumentTab(QWidget):
         if path:
             shutil.copyfile(self._pdf, path)
             self.status_label.setText(f"  exported {Path(path).name}")
+
+    def present(self):
+        """Full-screen show of the current PDF (built first if it is stale)."""
+        if not self._ensure_built():
+            return
+        self._presenter = PresentationView(self._pdf, 0)
+        self._presenter.closed.connect(lambda _p: setattr(self, "_presenter", None))
+        self._presenter.showFullScreen()
+        self._presenter.setFocus()
+
+    def export_pptx(self):
+        """Editable PowerPoint file of a Beamer presentation (see :mod:`NoorSuite.pptxexport`)."""
+        from . import assets as assets_mod
+        from . import templates
+        if templates.base_of(templates.detect(self.source())) != "beamer":
+            QMessageBox.information(self, "Export PowerPoint",
+                                    "Only presentations (document class beamer) can be exported "
+                                    "as PowerPoint. Create one with New presentation.")
+            return
+        try:
+            from . import pptxexport
+            pptxexport._need_pptx()
+        except RuntimeError as exc:
+            QMessageBox.information(self, "Export PowerPoint", str(exc))
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export PowerPoint",
+                                              f"{self.model.name}.pptx", "PowerPoint (*.pptx)")
+        if not path:
+            return
+
+        def asset_png(asset, dest):
+            if not assets_mod.export_png(asset, dest):
+                raise RuntimeError("figure file unreadable")
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            ok, notes = pptxexport.export_pptx(
+                self.host.expand_document_tables(self.source())[0], path,
+                self.host.document_sheets(), self.host.document_assets(),
+                lambda sm, p: self.host.export_sheet_raster(sm, p, 200), asset_png,
+                self.workdir / "pptx")
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Export PowerPoint", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        self.log.setPlainText("\n".join(notes))
+        self.status_label.setText(f"  exported {Path(path).name}"
+                                  + (f" ({len(notes)} note(s), see the log)" if notes else ""))
 
     def export_office(self, fmt: str):
         """Word / LibreOffice document via pandoc (see :mod:`NoorSuite.docexport`)."""

@@ -179,6 +179,20 @@ built, so exported folders compile anywhere) and listed as a layout. In the text
 sets the footer line of a frame, `\imagecredit{...}` and `\titleimage{<file>}` the title-page picture credit and
 picture (the other title pictures of the template are listed in `template.json`).
 
+**Running a talk.** *Present* (F11, document toolbar) shows the built PDF full screen: arrow keys / space /
+click = next, Backspace / right click = back, `B` black screen, `W` white screen, number + Enter jumps, Esc leaves.
+Any PDF viewer works as well (the exported PDF is the talk). To run it on another machine, *Export LaTeX folder...*
+writes `main.tex`, the theme, figures and a `README.txt`; `xelatex main.tex` (or `tectonic main.tex`) builds the
+PDF there.
+
+**PowerPoint export.** *Export PowerPoint...* (or `python -m NoorSuite latex pptx --doc Talk --out talk.pptx`) writes
+native, editable slides: frame titles in title placeholders, bullet lists with their levels, paragraphs, sheets and
+figure files as pictures, tables as PowerPoint tables, columns in the two-content layout, the footer
+`\framesource` line, `\note{...}` as speaker notes and slide numbers. When the theme was imported from a
+PowerPoint template, **that template's master and layouts are reused** (the original `.pptx` is kept in the theme
+folder), so the talk carries the real corporate design. Math is approximated as Unicode text (Greek letters,
+super / subscripts, fractions as (a)/(b)); anything else is listed in the log. Needs `pip install python-pptx`.
+
 **Where templates live.** Nothing corporate is part of the repository. NoorSuite ships one neutral theme
 (*Beamer - NoorSuite clean theme*, `NoorSuite/themes/noorclean/`: bar + accent rule, no logos, plain title page,
 colours editable at the top of the `.sty`). Your own layouts are files in your home folder:

@@ -71,6 +71,44 @@ def render_figures(pm, dm, workdir) -> list:
     return missing
 
 
+def _pptx(pm, dm, a) -> int:
+    """``latex pptx``: editable PowerPoint file of a Beamer presentation."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from . import assets as assets_mod
+    from . import pptxexport
+    from . import tables as _tables
+    from .sheet import export_sheet_raster
+    global _APP
+    _APP = QApplication.instance() or QApplication([])
+    repo = {o.id: o for o in pm.data_objects}
+    imgs = {i.id: i for i in pm.images}
+    assets = {x.asset_id: x for x in pm.assets}
+    expanded, _missing = _tables.expand_tables(dm.source, pm.tables, repo)
+
+    def sheet_png(sm, path):
+        export_sheet_raster(sm, repo, imgs, path, 200, assets=assets)
+
+    def asset_png(asset, path):
+        if not assets_mod.export_png(asset, path):
+            raise RuntimeError("figure file unreadable")
+
+    out = Path(a.out or (re.sub(r"[^\w.-]+", "_", dm.name) + ".pptx"))
+    work = Path(tempfile.mkdtemp(prefix="noorsuite_pptx_"))
+    try:
+        ok, notes = pptxexport.export_pptx(expanded, out.resolve(), pm.sheets, pm.assets,
+                                           sheet_png, asset_png, work)
+        for n in notes:
+            print("note:", n, file=sys.stderr)
+        print(f"exported {dm.name!r} -> {out}")
+        return 0 if ok else 1
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def _office(pm, dm, a) -> int:
     """``latex docx|odt``: Word / LibreOffice export through pandoc."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -110,7 +148,7 @@ def _office(pm, dm, a) -> int:
 
 def main(argv) -> int:
     ap = argparse.ArgumentParser(prog="noorsuite latex", description=__doc__)
-    ap.add_argument("command", choices=["build", "export", "engine", "docx", "odt"])
+    ap.add_argument("command", choices=["build", "export", "engine", "docx", "odt", "pptx"])
     ap.add_argument("--project", help=".sciproj file (default: the GUI session file)")
     ap.add_argument("--doc", help="document name or id (default: the first one)")
     ap.add_argument("--out", help="build: output PDF path (default: <document name>.pdf)")
@@ -126,6 +164,8 @@ def main(argv) -> int:
     dm = _pick_document(pm, a.doc)
     if a.command in ("docx", "odt"):
         return _office(pm, dm, a)
+    if a.command == "pptx":
+        return _pptx(pm, dm, a)
     workdir = Path(tempfile.mkdtemp(prefix="noorsuite_tex_"))
     try:
         style_id = latex.detect_bib_style(dm.source, getattr(dm, "bib_style", "")) \

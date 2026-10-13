@@ -584,6 +584,21 @@ def write_bundle(dest, source: str, figures_dir) -> Path:
     for pat in ("*.pdf", "*.png", "*.jpg"):
         for fig in Path(figures_dir).glob(pat):
             shutil.copy2(fig, dest / FIGURES_DIR / fig.name)
+    readme = dest / "README.txt"
+    if not readme.exists():
+        beamer = bool(re.search(r"\\documentclass(?:\[[^\]]*\])?\{beamer\}", source))
+        readme.write_text(
+            "Compile with one of\n"
+            "    xelatex main.tex          (twice for cross-references)\n"
+            "    tectonic main.tex\n"
+            "    latexmk -xelatex main.tex\n"
+            + ("\nA corporate theme may name a font (e.g. Open Sans Light); without it the "
+               "default sans font is used.\nRun the talk full screen from main.pdf with any PDF "
+               "viewer (Adobe Reader: Ctrl+L, SumatraPDF: F11, Okular: Ctrl+Shift+P,\n"
+               "pdfpc for a presenter view).\n" if beamer else "")
+            + "\nFiles: main.tex, noorsuite.sty (figure macros), noorsuite-figures/ (figure PDFs / "
+              "images), references.bib (if present),\nand beamertheme*.sty + pictures for "
+              "presentations.\n", encoding="utf-8")
     return dest
 
 

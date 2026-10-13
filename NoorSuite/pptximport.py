@@ -455,8 +455,34 @@ def import_pptx(path, name: str | None = None, out_root=None) -> dict:
         "  \\end{tikzpicture}}\n"
         "\\endinput\n")
     (folder / f"beamertheme{theme_name}.sty").write_text(sty, encoding="utf-8")
+    # the original file is kept as the reference for PowerPoint export (its master + layouts
+    # are reused, so the exported talk carries the real corporate template)
+    import shutil
+
+    def lay_name(part):
+        return (P["layouts"].get(part) or {}).get("name", "")
+
+    def n_body(lay):
+        return sum(1 for i in lay["items"] if i.get("ph") not in (None, "title", "sldNum")
+                   and (i.get("y") is None or i["y"] < 10))
+
+    def has_title(lay):
+        return any(i.get("ph") == "title" for i in lay["items"])
+
+    two = next((lay_name(n) for n, lay in sorted(P["layouts"].items())
+                if has_title(lay) and n_body(lay) >= 2), "")
+    only = next((lay_name(n) for n, lay in sorted(P["layouts"].items())
+                 if has_title(lay) and n_body(lay) == 0), "")
+    try:
+        shutil.copyfile(path, folder / "reference.pptx")
+    except OSError:
+        pass
     meta = {"label": label, "theme": theme_name, "source": Path(path).name,
-            "alt_title_images": alt, "notes": notes}
+            "alt_title_images": alt, "notes": notes,
+            "pptx": {"title_layout": lay_name(tl), "content_layout": lay_name(content_layout),
+                     "two_layout": two or lay_name(content_layout), "only_layout": only,
+                     "title_idx": [str((b or {}).get("idx", "")) for b in
+                                   (title_box, name_box, date_box)]}}
     (folder / "template.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     # user layout (base: beamer) so New presentation lists it
@@ -488,7 +514,7 @@ def support_files(source: str) -> dict:
                 d = root / name
                 if (d / f"beamertheme{name}.sty").is_file():
                     for f in d.iterdir():
-                        if f.is_file() and f.name != "template.json":
+                        if f.is_file() and f.name not in ("template.json", "reference.pptx"):
                             out[f.name] = f.read_bytes()
                     break
     return out

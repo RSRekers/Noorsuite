@@ -238,3 +238,158 @@ def test_theme_bundle_roundtrip_moves_a_template_between_machines(pres_env, tmp_
     assert "beamerthemecorporatetemplate.sty" in pptximport.support_files(doc)
     with pytest.raises(ValueError):
         pptximport.export_bundle("does-not-exist", tmp_path / "x.noortheme")
+
+
+# ------------------------------------------------------------------ PowerPoint export + slide show
+_TALK = (r"\begin{frame}{Results}{A subtitle}" "\n"
+         r"  \begin{itemize}" "\n"
+         r"    \item Level one with $E = mc^2$ and \textbf{bold}" "\n"
+         r"      \begin{itemize}\item Second level $\sigma$ in S\,cm$^{-1}$\end{itemize}" "\n"
+         r"    \item Another point" "\n"
+         r"  \end{itemize}" "\n"
+         r"  \framesource{Source: own data}" "\n" r"  \note{Say something about T.}" "\n"
+         r"\end{frame}" "\n"
+         r"\begin{frame}{A figure}\centering\noorsheet[width=0.8\textwidth]{fig-a}\end{frame}" "\n"
+         r"\begin{frame}{Two columns}\begin{columns}" "\n"
+         r"\begin{column}{0.5\textwidth}\begin{itemize}\item L1\item L2\end{itemize}\end{column}" "\n"
+         r"\begin{column}{0.5\textwidth}\noorsheet{fig-a}\end{column}\end{columns}\end{frame}" "\n"
+         r"\begin{frame}{Table}\begin{tabular}{rr}\toprule $T$ & $\sigma$ \\ \midrule 1 & 2 \\"
+         r" \bottomrule\end{tabular}\end{frame}" "\n")
+
+
+def test_math_and_markup_become_readable_slide_text():
+    from NoorSuite import pptxexport as X
+    assert X.plain(r"$\alpha^2 + \beta_i$") == "α² + βᵢ"
+    assert X.plain(r"S\,cm$^{-1}$ and $\frac{a}{b}$") == "S cm⁻¹ and (a)/(b)"
+    assert X.plain(r"\textbf{bold} \emph{it} 50\% --- done") == "bold it 50% — done"
+    assert X.plain(r"Li$_{3}$PS$_{4}$") == "Li₃PS₄"
+
+
+def test_beamer_frames_are_parsed_into_blocks():
+    from NoorSuite import pptxexport as X
+    src = T.build_document("beamer", "My talk", ["A. One"], "", _TALK).replace(
+        r"\date{\today}", r"\date{1 Jan}")
+    P = X.parse_presentation(src)
+    assert P["meta"]["title"] == "My talk" and P["meta"]["author"] == "A. One"
+    kinds = [f["kind"] for f in P["frames"]]
+    assert kinds == ["title", "content", "content", "content", "content"]
+    f1 = P["frames"][1]
+    assert f1["title"] == "Results" and f1["subtitle"] == "A subtitle"
+    lst = f1["blocks"][0][1]
+    assert [(lvl, txt) for lvl, txt, _o in lst] == [
+        (0, "Level one with E = mc² and bold"), (1, "Second level σ in S cm⁻¹"),
+        (0, "Another point")]
+    assert f1["source"] == "Source: own data" and f1["note"] == "Say something about T."
+    assert P["frames"][2]["blocks"][0] == ("picture", "noorsheet", "fig-a", "[width=0.8\\textwidth]")
+    assert P["frames"][3]["blocks"][0][0] == "columns" and len(P["frames"][3]["blocks"][0][1]) == 2
+    assert P["frames"][4]["blocks"][0][0] == "table"
+
+
+def _sheet_stub(tmp_path):
+    from NoorSuite.model import SheetModel
+    sm = SheetModel("Fig A", sheet_id="fig-a")
+    png = _png_bytes(60, 40, 0xFF336699)
+
+    def sheet_png(_sm, path):
+        open(path, "wb").write(png)
+    return [sm], sheet_png
+
+
+def test_pptx_export_default_design_is_editable(tmp_path):
+    pytest.importorskip("pptx")
+    from pptx import Presentation
+    from NoorSuite import pptxexport as X
+    sheets, sheet_png = _sheet_stub(tmp_path)
+    src = T.build_document("beamer", "My talk", ["A. One"], "", _TALK)
+    out = tmp_path / "talk.pptx"
+    ok, notes = X.export_pptx(src, out, sheets, [], sheet_png, lambda *a: None, tmp_path / "w")
+    assert ok and out.is_file()
+    prs = Presentation(str(out))
+    assert prs.slide_width / prs.slide_height == pytest.approx(1.6, abs=0.01)
+    slides = list(prs.slides)
+    assert len(slides) == 5
+    title = [s.text_frame.text for s in slides[0].shapes if s.has_text_frame]
+    assert "My talk" in title[0] and any("A. One" in t for t in title)
+    body = next(s for s in slides[1].shapes if s.has_text_frame and "Level one" in s.text_frame.text)
+    paras = body.text_frame.paragraphs
+    assert [p.level for p in paras] == [0, 1, 0]
+    assert slides[1].notes_slide.notes_text_frame.text == "Say something about T."
+    assert any(s.shape_type == 13 for s in slides[2].shapes)               # a picture
+    assert sum(1 for s in slides[3].shapes if s.shape_type == 13) == 1     # figure in a column
+    assert any(s.has_table for s in slides[4].shapes)                      # a real table
+    assert any(s.has_text_frame and "Source: own data" in s.text_frame.text
+               for s in slides[1].shapes)
+
+
+def test_pptx_export_reuses_a_reference_template_layouts(tmp_path):
+    pytest.importorskip("pptx")
+    from pptx import Presentation
+    from NoorSuite import pptxexport as X
+    ref = tmp_path / "ref.pptx"
+    base = Presentation()                      # stands in for a corporate template
+    for lay in base.slide_layouts:             # rename: layouts are found by name
+        if lay.name == "Title Slide":
+            lay.name = "My title layout"
+    base.slides.add_slide(base.slide_layouts[0])           # a sample slide that must disappear
+    base.save(str(ref))
+    sheets, sheet_png = _sheet_stub(tmp_path)
+    src = T.build_document("beamer", "T", ["A"], "", r"\begin{frame}{X}\begin{itemize}\item a"
+                           r"\end{itemize}\end{frame}")
+    out = tmp_path / "o.pptx"
+    ok, _ = X.export_pptx(src, out, sheets, [], sheet_png, lambda *a: None, tmp_path / "w",
+                          reference=str(ref), mapping={"title_layout": "My title layout"})
+    assert ok
+    prs = Presentation(str(out))
+    assert [s.slide_layout.name for s in prs.slides] == ["My title layout", "Title and Content"]
+
+
+def test_pptx_export_through_the_headless_command(tmp_path):
+    pytest.importorskip("pptx")
+    import subprocess
+    import sys
+    import pandas as pd
+    from NoorSuite.client import OfflineClient
+    s = OfflineClient(tmp_path / "p.sciproj")
+    s.push_dataframe(pd.DataFrame({"x": [1.0, 2.0], "y": [1.0, 4.0]}), name="d")
+    s.plot("d", "x", "y", new_sheet=True, title="Fig A")
+    s.push_document("Talk", r"\begin{frame}{Plot}\centering\noorsheet{Fig-A}\end{frame}",
+                    template="beamer", title="Talk", authors=["A"])
+    out = tmp_path / "talk.pptx"
+    r = subprocess.run([sys.executable, "-m", "NoorSuite", "latex", "pptx", "--project",
+                        str(tmp_path / "p.sciproj"), "--out", str(out)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    from pptx import Presentation
+    prs = Presentation(str(out))
+    assert len(prs.slides) == 2 and any(sh.shape_type == 13 for sh in prs.slides[1].shapes)
+
+
+def test_slide_show_navigates_and_covers(app, tmp_path):
+    from PyQt6.QtCore import QMarginsF, QSizeF
+    from PyQt6.QtGui import QPageLayout, QPageSize, QPainter, QPdfWriter
+    from NoorSuite.docview import PresentationView
+    pdf = tmp_path / "s.pdf"
+    w = QPdfWriter(str(pdf))
+    w.setPageSize(QPageSize(QSizeF(160, 100), QPageSize.Unit.Millimeter))
+    w.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+    p = QPainter(w)
+    for i in range(4):
+        if i:
+            w.newPage()
+        p.drawText(100, 100, f"Slide {i + 1}")
+    p.end()
+    v = PresentationView(str(pdf), 0)
+    v.resize(640, 400)
+    assert v.page_count() == 4 and v.page == 0
+    v.go(1)
+    v.go(99)
+    assert v.page == 3
+    v.go(-5)
+    assert v.page == 0
+    v._cover = "black"
+    v.go(2)
+    assert v._cover is None and v.page == 2
+    closed = []
+    v.closed.connect(closed.append)
+    v.close()
+    assert closed == [2]

@@ -158,6 +158,11 @@ Write frames: `\begin{frame}{Title} ... \end{frame}`; a figure frame is
 Layouts for presentations: `"beamer"` (plain), `"beamer-clean"` (NoorSuite's neutral theme), `"user:<name>"`
 (imported corporate templates, kept in the user's home folder - never put them into a repository).
 
+Running / exporting a talk (tell the user): *Present* (F11) in the document tab runs the PDF full screen;
+*Export PowerPoint...* or `{{PYTHON}} -m NoorSuite latex pptx --doc "Talk" --out talk.pptx` makes an editable .pptx
+(needs `python-pptx`; the imported corporate template's master / layouts are reused); *Export LaTeX folder...*
+(or `latex export --folder DIR`) gives a folder that compiles anywhere with `xelatex main.tex`.
+
 ### Author lists and Supporting Information
 
 With a layout template the author list is structured: `suite.push_document("Paper", body, template="acs",
