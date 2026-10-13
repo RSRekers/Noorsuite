@@ -79,7 +79,12 @@ def swap_figures(src: str, files: dict) -> tuple[str, list]:
             return rf"\textbf{{[missing figure {latex_escape(key)}]}}"
         return rf"\includegraphics{opts}{{{path}}}"
 
-    return _FIG_CMD.sub(sub, src), missing
+    out = []
+    for line in src.splitlines(keepends=True):         # never touch text inside a % comment
+        c = re.search(r"(?<!\\)%", line)
+        code, comment = (line[:c.start()], line[c.start():]) if c else (line, "")
+        out.append(_FIG_CMD.sub(sub, code) + comment)
+    return "".join(out), missing
 
 
 def latex_escape(text: str) -> str:

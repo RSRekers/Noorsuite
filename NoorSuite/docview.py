@@ -39,7 +39,8 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboB
 from . import latex, zotero
 from .fuzzy import smart_score
 
-_NOOR_LINE_RE = re.compile(r"\\(noorsheet|noorfile)\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
+_NOOR_LINE_RE = re.compile(
+    r"\\(noorsheet|noorfile|noortable)\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
 
 # Explicit high-contrast colours (the app theme must not decide readability): a white page
 # with black text by default, or light text on a dark ground.
@@ -124,7 +125,8 @@ class LatexEditor(QPlainTextEdit):
         for m in _NOOR_LINE_RE.finditer(line):
             if m.start() <= col <= m.end():
                 key = m.group(2).strip()
-                self.sheetRequested.emit(("asset:" + key) if m.group(1) == "noorfile" else key)
+                prefix = {"noorfile": "asset:", "noortable": "table:"}.get(m.group(1), "")
+                self.sheetRequested.emit(prefix + key)
                 return
         super().mouseDoubleClickEvent(event)
 
@@ -815,6 +817,11 @@ class DocumentTab(QWidget):
                               "compiles anywhere (journal submission, arXiv, Overleaf)")
         bundle_act.triggered.connect(self.export_bundle)
         toolbar.addAction(bundle_act)
+        table_act = QAction("Insert table...", self)
+        table_act.setToolTip("A table of a data object (columns, number formats, rows). It stays "
+                             "live: the document holds a reference, the numbers follow the data.")
+        table_act.triggered.connect(lambda: self.insert_table())
+        toolbar.addAction(table_act)
         docx_act = QAction("Export Word...", self)
         docx_act.setToolTip("Word (.docx) through pandoc: figures as 300 dpi PNGs, numbered "
                             "references, equations as native Word equations")
@@ -1125,7 +1132,40 @@ class DocumentTab(QWidget):
         assets = self.host.document_assets()
         return {k: latex.resolve_asset(k, assets) for k in latex.asset_refs(self.source())}
 
+    def referenced_tables(self) -> dict:
+        from . import tables
+        tabs = self.host.document_tables()
+        return {k: tables.resolve_table(k, tabs) for k in tables.table_refs(self.source())}
+
+    def insert_table(self, table=None):
+        """Open the table editor (new table, or ``table`` to edit); a new one is inserted at
+        the cursor as ``table`` environment with a ``\\noortable`` reference."""
+        from . import tables
+        from .tabledialog import TableEditorDialog
+        if not self.host.repository:
+            QMessageBox.information(self, "Insert table", "The project has no data objects yet.")
+            return
+        dlg = TableEditorDialog(self.host, table, self)
+        if dlg.exec() != dlg.DialogCode.Accepted or dlg.table is None:
+            return
+        tm = dlg.table
+        self.host.upsert_table(tm)
+        if table is None:
+            key = tables._slug(tm.name) or tm.table_id
+            self.insert_text(tables.table_snippet(tm.table_id if key == "" else key, tm.name))
+        self.status_label.setText(f"  table \"{tm.name}\" saved")
+        self._source_timer.start(self.AUTO_DELAY_MS)
+
     def _open_ref(self, key: str):
+        if key.startswith("table:"):
+            from . import tables
+            tm = tables.resolve_table(key[6:], self.host.document_tables())
+            if tm is None:
+                QMessageBox.information(self, "Unknown table",
+                                        f"There is no table matching \"{key[6:]}\" in this project.")
+            else:
+                self.insert_table(tm)
+            return
         if key.startswith("asset:"):
             a = latex.resolve_asset(key[6:], self.host.document_assets())
             if a is None:
@@ -1149,7 +1189,8 @@ class DocumentTab(QWidget):
             return
         fp = self._fingerprint()
         if fp != self._last_fp and (any(self.referenced_sheets().values())
-                                    or any(self.referenced_assets().values())):
+                                    or any(self.referenced_assets().values())
+                                    or any(self.referenced_tables().values())):
             self._source_timer.start(self.AUTO_DELAY_MS)
 
     def references_changed(self):
@@ -1163,6 +1204,8 @@ class DocumentTab(QWidget):
             parts.append(f"{key}:{self.host.sheet_fingerprint(sm.sheet_id) if sm else '-'}")
         for key, a in sorted(self.referenced_assets().items()):
             parts.append(f"asset:{key}:{self.host.asset_fingerprint(a.asset_id) if a else '-'}")
+        for key, tm in sorted(self.referenced_tables().items()):
+            parts.append(f"table:{key}:{self.host.table_fingerprint(tm.table_id) if tm else '-'}")
         used = set(zotero.cite_keys(self.source()))
         parts += [json.dumps(r, sort_keys=True) for r in self.host.document_references()
                   if r["key"] in used]
@@ -1363,8 +1406,10 @@ class DocumentTab(QWidget):
         t0 = time.time()
         style_id = self.bib_style_id()
         recs = self.host.document_references()
+        text, tab_missing = self.host.expand_document_tables(self.source())
         build_src, bib_notes, info = latex.prepare_build_source(
-            self.source(), recs, style_id, self.model.cite_mode)
+            text, recs, style_id, self.model.cite_mode)
+        bib_notes = list(bib_notes) + [f"no table matches {k}" for k in tab_missing]
         latex.prepare_workdir(self.workdir, build_src)
         # references.bib from the stored items (used by the BibTeX formats)
         (self.workdir / "references.bib").write_text(
@@ -1464,7 +1509,8 @@ class DocumentTab(QWidget):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             ok, log = docexport.export_office(
-                self.source(), self.host.document_references(), self.model.cite_mode,
+                self.host.expand_document_tables(self.source())[0],
+                self.host.document_references(), self.model.cite_mode,
                 self.host.document_sheets(), self.host.document_assets(), path, fmt,
                 self.workdir / "office", self.host.export_sheet_raster,
                 asset_png, pandoc)
@@ -1484,7 +1530,8 @@ class DocumentTab(QWidget):
         if not folder:
             return
         dest = Path(folder) / (re.sub(r"[^\w.-]+", "_", self.model.name) or "document")
-        latex.write_bundle(dest, self.source(), self.workdir / latex.FIGURES_DIR)
+        latex.write_bundle(dest, self.host.expand_document_tables(self.source())[0],
+                           self.workdir / latex.FIGURES_DIR)
         bib = self.workdir / "references.bib"
         if bib.is_file():
             shutil.copy2(bib, dest / "references.bib")

@@ -43,11 +43,13 @@ from .zotero import label as zotero_label
 from .docview import DocumentTab
 from .fuzzy import fuzzy_match, smart_score
 from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_ASSET,
+                  ACTION_TABLE,
                   ACTION_DOCUMENT, ACTION_REFERENCES,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
                   ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
 from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
+                    TableModel,
                     apply_group_transform,
                     REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
                     SPLIT_LAYOUTS, ColorMap, DataObject, DocumentModel, ImageObject, ImageRef,
@@ -796,6 +798,7 @@ class SciSuiteWindow(QMainWindow):
         self.open_tabs: dict[str, PlotSheet] = {}
         self.documents: dict[str, DocumentModel] = {}   # LaTeX documents
         self.assets: dict[str, AssetModel] = {}         # imported SVG / PNG / PDF figures
+        self.tables: dict[str, TableModel] = {}         # data tables for documents
         self._asset_watch = QFileSystemWatcher(self)    # working files open in an editor
         self._asset_watch.fileChanged.connect(self._asset_file_changed)
         self._asset_paths: dict[str, str] = {}          # working file -> asset id
@@ -2613,6 +2616,58 @@ class SciSuiteWindow(QMainWindow):
     def document_assets(self) -> list:
         return list(self.assets.values())
 
+    # ------------------------------------------------------------------ data tables
+    def document_tables(self) -> list:
+        return list(self.tables.values())
+
+    def table_fingerprint(self, table_id) -> str:
+        from . import tables as _tables
+        tm = self.tables.get(table_id)
+        if tm is None:
+            return ""
+        return _tables.fingerprint(tm, self.repository.get(tm.data_id)
+                                   or self._find_data(tm.data_id))
+
+    def upsert_table(self, tm: TableModel) -> TableModel:
+        """Add or replace a table (by id) and refresh documents that use it."""
+        self.tables[tm.table_id] = tm
+        self._notify_documents()
+        self._refresh_ipc_snapshot()
+        return tm
+
+    def remove_table(self, table_id):
+        self.tables.pop(table_id, None)
+        self._notify_documents()
+        self._refresh_ipc_snapshot()
+
+    def expand_document_tables(self, source: str):
+        """``source`` with ``\\noortable{..}`` replaced by the rendered tables."""
+        from . import tables as _tables
+        return _tables.expand_tables(source, self.tables.values(), self.repository)
+
+    def _handle_table(self, payload: dict):
+        from . import tables as _tables
+        data = self._find_data(payload.get("data"))
+        if data is None:
+            self.statusBar().showMessage(f"table: no data object {payload.get('data')!r}", 8000)
+            return
+        name = payload.get("name") or data.name
+        cols = payload.get("columns")
+        try:
+            specs = _tables.normalize_columns(
+                data, None if cols in (None, "__all__") else cols,
+                payload.get("digits"), payload.get("fmt"))
+        except ValueError as exc:
+            self.statusBar().showMessage(f"table: {exc}", 8000)
+            return
+        tm = next((t for t in self.tables.values() if name in (t.name, t.table_id)), None) \
+            or TableModel(name)
+        tm.data_id, tm.columns = data.id, specs
+        for k, v in (payload.get("options") or {}).items():
+            if k in TableModel._FIELDS and k not in ("name", "data_id", "columns"):
+                setattr(tm, k, v)
+        self.upsert_table(tm)
+
     def asset_fingerprint(self, asset_id) -> str:
         a = self.assets.get(asset_id)
         return assets_mod.fingerprint(a) if a is not None else ""
@@ -2996,6 +3051,7 @@ class SciSuiteWindow(QMainWindow):
         pm.colormaps = list(self.colormaps)
         pm.documents = list(self.documents.values())
         pm.assets = list(self.assets.values())
+        pm.tables = list(self.tables.values())
         pm.references = list(self.references.values())
         cs = self.current_sheet()
         pm.active_sheet_id = cs.sheet_id if cs else next(iter(self.sheets), "")
@@ -3007,6 +3063,9 @@ class SciSuiteWindow(QMainWindow):
         self.sheets.clear()
         self.open_tabs.clear()
         self.documents.clear()
+        self.tables.clear()
+        for t in pm.tables:
+            self.tables[t.table_id] = t
         self.assets.clear()
         for a in pm.assets:
             self.assets[a.asset_id] = a
@@ -3329,7 +3388,10 @@ class SciSuiteWindow(QMainWindow):
             "duplicate_name": name_counts[sm.name] > 1,
             "folder": folders.get(sm.sheet_id, ""),
         } for sm in self.sheets.values()]
-        self.ipc.snapshot = {"assets": [
+        self.ipc.snapshot = {"tables": [
+                                 {"id": t.table_id, "name": t.name, "data": t.data_id,
+                                  "columns": len(t.columns)} for t in self.tables.values()],
+                             "assets": [
                                  {"id": a.asset_id, "name": a.name, "ext": a.ext,
                                   "version": a.version, "bytes": len(a.data)}
                                  for a in self.assets.values()],
@@ -3380,6 +3442,8 @@ class SciSuiteWindow(QMainWindow):
             self._handle_document(payload)
         elif action == ACTION_REFERENCES:
             self.add_references(payload.get("items", []))
+        elif action == ACTION_TABLE:
+            self._handle_table(payload)
         elif action == ACTION_ASSET:
             try:
                 self.import_asset(name=payload.get("name"), data=payload.get("data", b""),

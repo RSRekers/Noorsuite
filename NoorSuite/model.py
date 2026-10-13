@@ -1235,6 +1235,42 @@ class AssetModel:
                    d.get("version", 1))
 
 
+class TableModel:
+    """A table of a data object for LaTeX / Word documents (see :mod:`NoorSuite.tables`).
+    ``columns`` = ``[{"col", "header", "fmt", "digits", "align", "scale"}]`` in display order;
+    ``data_id`` is the data object's id (a name also works)."""
+
+    _FIELDS = ("name", "data_id", "columns", "row_start", "row_end", "step", "max_rows",
+               "sort_by", "descending", "booktabs")
+
+    def __init__(self, name="Table", data_id="", columns=None, table_id=None):
+        self.table_id = table_id or _new_id()
+        self.name = name
+        self.data_id = data_id
+        self.columns = [dict(c) for c in (columns or [])]
+        self.row_start = 1
+        self.row_end = None          # None -> to the last row
+        self.step = 1
+        self.max_rows = 0            # 0 -> no limit
+        self.sort_by = ""            # column name; "" -> keep the data order
+        self.descending = False
+        self.booktabs = True
+
+    def to_dict(self) -> dict:
+        d = {f: getattr(self, f) for f in self._FIELDS}
+        d["table_id"] = self.table_id
+        d["columns"] = [dict(c) for c in self.columns]
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TableModel":
+        t = cls(d.get("name", "Table"), d.get("data_id", ""), d.get("columns"), d.get("table_id"))
+        for f in cls._FIELDS:
+            if f in d and d[f] is not None and f not in ("name", "data_id", "columns"):
+                setattr(t, f, d[f])
+        return t
+
+
 class DocumentModel:
     """A LaTeX document stored in the project: ``source`` is the ``.tex`` text; figures are
     sheets referenced with ``\noorsheet{<sheet id>}`` (see :mod:`NoorSuite.latex`)."""
@@ -1278,6 +1314,7 @@ class ProjectModel:
         self.documents: list[DocumentModel] = []   # LaTeX documents (optional key)
         self.references: list[dict] = []           # bibliography records (see zotero.normalize)
         self.assets: list[AssetModel] = []         # imported SVG / PDF / PNG / JPG figures
+        self.tables: list[TableModel] = []         # data tables for documents (optional key)
         self.active_sheet_id = ""
 
     def to_dict(self) -> dict:
@@ -1292,6 +1329,7 @@ class ProjectModel:
             "documents": [dm.to_dict() for dm in self.documents],
             "references": [dict(r) for r in self.references],
             "assets": [a.to_dict() for a in self.assets],
+            "tables": [t.to_dict() for t in self.tables],
         }
 
     @classmethod
@@ -1312,6 +1350,7 @@ class ProjectModel:
         p.documents = [DocumentModel.from_dict(x) for x in d.get("documents", [])]
         p.references = [dict(r) for r in d.get("references", []) if r.get("key")]
         p.assets = [AssetModel.from_dict(x) for x in d.get("assets", [])]
+        p.tables = [TableModel.from_dict(x) for x in d.get("tables", [])]
         return p
 
     def to_json(self, indent=2) -> str:

@@ -94,8 +94,10 @@ def _office(pm, dm, a) -> int:
     out = Path(a.out or (re.sub(r"[^\w.-]+", "_", dm.name) + "." + a.command))
     work = Path(tempfile.mkdtemp(prefix="noorsuite_office_"))
     try:
+        from . import tables as _tables
+        expanded, _missing = _tables.expand_tables(dm.source, pm.tables, repo)
         ok, log = docexport.export_office(
-            dm.source, pm.references, getattr(dm, "cite_mode", "superscript"), pm.sheets,
+            expanded, pm.references, getattr(dm, "cite_mode", "superscript"), pm.sheets,
             pm.assets, out.resolve(), a.command, work, sheet_png, asset_png)
         if log:
             print(log, file=sys.stderr)
@@ -128,8 +130,13 @@ def main(argv) -> int:
     try:
         style_id = latex.detect_bib_style(dm.source, getattr(dm, "bib_style", "")) \
             or getattr(dm, "bib_style", "") or None
+        from . import tables as _tables
+        repo = {o.id: o for o in pm.data_objects}
+        expanded, tab_missing = _tables.expand_tables(dm.source, pm.tables, repo)
+        for k in tab_missing:
+            print(f"warning: no table matches {{{k}}}", file=sys.stderr)
         source, notes, info = latex.prepare_build_source(
-            dm.source, pm.references, style_id, getattr(dm, "cite_mode", "superscript"))
+            expanded, pm.references, style_id, getattr(dm, "cite_mode", "superscript"))
         for n in notes:
             print("note:", n, file=sys.stderr)
         for k in info["undefined"]:
@@ -145,7 +152,7 @@ def main(argv) -> int:
         if a.command == "export":
             if not a.folder:
                 raise SystemExit("export needs --folder")
-            dest = latex.write_bundle(a.folder, dm.source, workdir / latex.FIGURES_DIR)
+            dest = latex.write_bundle(a.folder, expanded, workdir / latex.FIGURES_DIR)
             shutil.copy2(workdir / "references.bib", dest / "references.bib")
             print(f"exported {dm.name!r} -> {dest}")
             return 0

@@ -30,7 +30,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_DOCUMENT, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
                        ACTION_LIST_REFERENCES, ACTION_REFERENCES, ACTION_ASSET,
-                       ACTION_LIST_ASSETS,
+                       ACTION_LIST_ASSETS, ACTION_TABLE, ACTION_LIST_TABLES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_PING,
                        ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE)
@@ -80,6 +80,7 @@ class OfflineBackend:
             ACTION_GET_IMAGE: self._get_image,
             ACTION_LIST_DOCUMENTS: self._list_documents,
             ACTION_LIST_ASSETS: self._list_assets,
+            ACTION_LIST_TABLES: self._list_tables,
             ACTION_GET_DOCUMENT: self._get_document,
             ACTION_LIST_REFERENCES: self._list_references,
         }.get(action)
@@ -100,6 +101,7 @@ class OfflineBackend:
             ACTION_DOCUMENT: self._document,
             ACTION_REFERENCES: self._references,
             ACTION_ASSET: self._asset,
+            ACTION_TABLE: self._table,
         }.get(action)
         if mutate is None:
             return {"status": "error", "message": f"unknown action {action!r}"}
@@ -293,6 +295,35 @@ class OfflineBackend:
         a = AssetModel(name, ext, p.get("data", b""))
         self.project.assets.append(a)
         return {"status": "success", "id": a.asset_id}
+
+    def _table(self, p):
+        from .model import TableModel
+        data = self._find_data(p.get("data"))
+        if data is None:
+            return {"status": "error", "message": f"no data object matching {p.get('data')!r}"}
+        name = p.get("name") or data.name
+        tm = next((t for t in self.project.tables if name in (t.name, t.table_id)), None)
+        if tm is None:
+            tm = TableModel(name)
+            self.project.tables.append(tm)
+        from . import tables as _tables
+        cols = p.get("columns")
+        try:
+            specs = _tables.normalize_columns(data, None if cols in (None, "__all__") else cols,
+                                              p.get("digits"), p.get("fmt"))
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        tm.data_id = data.id
+        tm.columns = specs
+        for k, v in (p.get("options") or {}).items():
+            if k in TableModel._FIELDS and k not in ("name", "data_id", "columns"):
+                setattr(tm, k, v)
+        return {"status": "success", "id": tm.table_id}
+
+    def _list_tables(self, p):
+        return {"status": "success", "tables": [
+            {"id": t.table_id, "name": t.name, "data": t.data_id, "columns": len(t.columns)}
+            for t in self.project.tables]}
 
     def _list_assets(self, p):
         return {"status": "success", "assets": [

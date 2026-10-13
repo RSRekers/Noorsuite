@@ -146,6 +146,14 @@ text. Keys are data coordinates; the entries are stored as `"0=RT; 1=77 K"` (so 
 `;`). A string-labelled heatmap axis shows one tick per label by itself; the mapping only renames.
 In the GUI: Axes tab -> "X / Y tick labels" (same `value=text; value=text` syntax).
 
+### Tables from data objects
+
+`suite.push_table("IV summary", "IV A3", columns=["V", ("I", "Current (mA)"), {"col": "R", "fmt": "sci",
+"digits": 2, "align": "r", "scale": 1e-3}], rows=(1, 20), sort_by="V", max_rows=10)` defines a live table;
+`suite.table_snippet("IV summary", caption="...")` is the `table` environment to put into a document with
+`push_document(..., mode="append")` (it contains `\noortable{iv-summary}`). Numbers use math minus signs, NaN
+prints `--`; headers default to column name + unit. `suite.list_tables()` lists them.
+
 ### Journal layouts
 
 `suite.push_document("Paper", body_text, template="acs", title="...", authors=["A. One", "B. Two"],

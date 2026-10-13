@@ -25,7 +25,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_DOCUMENT,
                        ACTION_GET_DATA, ACTION_GET_DOCUMENT, ACTION_LIST_DOCUMENTS,
                        ACTION_LIST_REFERENCES, ACTION_REFERENCES, ACTION_ASSET,
-                       ACTION_LIST_ASSETS,
+                       ACTION_LIST_ASSETS, ACTION_TABLE, ACTION_LIST_TABLES,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_REMOVE_DATA,
@@ -541,6 +541,33 @@ class SciSuiteClient:
         if ext not in ("svg", "pdf", "png", "jpg"):
             raise ValueError(f"unsupported figure format {ext!r} (svg, pdf, png, jpg)")
         return self._ipc.send({"action": ACTION_ASSET, "name": name, "ext": ext, "data": data})
+
+    def push_table(self, name, data, columns=None, *, rows=None, step=1, max_rows=0,
+                   sort_by="", descending=False, booktabs=True, digits=None, fmt=None):
+        """Define a table of a data object for LaTeX / Word documents. Reference it in a
+        document as ``\\noortable{<name>}`` (see :meth:`table_snippet`); it follows the data.
+
+        ``columns``: names, ``(name, header)`` pairs or dicts ``{"col", "header", "fmt"
+        ("auto"|"fixed"|"sig"|"sci"|"int"), "digits", "align" ("l"|"c"|"r"), "scale"}``;
+        default every column (header = name + unit). ``rows=(first, last)`` 1-based,
+        ``step``, ``max_rows``, ``sort_by`` / ``descending``. Re-pushing a name updates it."""
+        from . import tables as _tables
+        specs = _tables.normalize_columns(None, columns, digits, fmt) if columns else None
+        opts = {"row_start": rows[0] if rows else 1, "row_end": rows[1] if rows else None,
+                "step": step, "max_rows": max_rows, "sort_by": sort_by,
+                "descending": descending, "booktabs": booktabs}
+        return self._ipc.send({"action": ACTION_TABLE, "name": name, "data": data,
+                               "columns": specs if specs is not None else "__all__",
+                               "options": opts, "digits": digits, "fmt": fmt})
+
+    def table_snippet(self, name, caption="", label="") -> str:
+        """A ``table`` environment with the caption and ``\\noortable{<name>}`` inside."""
+        from . import tables as _tables
+        return _tables.table_snippet(_tables._slug(name) or name, name, caption, label)
+
+    def list_tables(self) -> pd.DataFrame:
+        resp = self._ipc.send({"action": ACTION_LIST_TABLES}) or {}
+        return pd.DataFrame(resp.get("tables", []), columns=["id", "name", "data", "columns"])
 
     def list_assets(self) -> pd.DataFrame:
         resp = self._ipc.send({"action": ACTION_LIST_ASSETS}) or {}

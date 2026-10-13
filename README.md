@@ -161,6 +161,17 @@ in `plot` / `heatmap` / `show_image` / `organize_sheet`. On a categorical heatma
 that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick labels*, written as
 `0=RT; 1=77 K; 2=4 K`.
 
+## Tables from data
+
+*Insert table...* (document toolbar) builds a table of a data object: tick and order the columns, give each a
+header (default: name + unit), number format (automatic, fixed decimals, significant digits, scientific, integer),
+alignment and scale factor; choose the row range, step, maximum rows and sort column. The LaTeX preview is shown
+live. The document holds `\noortable{name}` inside a normal `table` environment (caption / label are yours): the
+table is **live** - it is regenerated at build time, so it follows the data like a figure follows its sheet - and
+the Word / LibreOffice export gets a real table. Double-click the `\noortable` line to edit it again. From code:
+`suite.push_table("IV summary", "IV A3", ["V", ("I", "Current (mA)")], rows=(1, 20), digits=2, fmt="fixed")` and
+`suite.table_snippet("IV summary", caption="...")`.
+
 ## Journal layouts
 
 *My layouts*: **Save layout...** (document toolbar) keeps the open document's class, packages and macros as your own

@@ -607,6 +607,19 @@ title/x_label/y_label + trace labels).
   black text by default; QSettings `doc/dark`). Don't rely on the app palette in the Document tab.
 - While a document tab is current the main splitter collapses the inspector (`_saved_split` restores it).
 
+## Data tables (`tables.py`, `tabledialog.py`)
+
+- `TableModel` (`ProjectModel.tables`, optional key): `data_id`, `columns` [{col, header, fmt, digits, align,
+  scale}], `row_start/row_end/step/max_rows`, `sort_by/descending`, `booktabs`. The document only holds
+  `\noortable[opts]{id-or-name-slug}`; `tables.expand_tables(source, tables, repository)` replaces it by the
+  rendered `tabular` in the *build copy* (GUI compile, headless build/export, Word export, LaTeX bundle) and
+  adds `\usepackage{booktabs}` when needed. `normalize_columns` is the shared spec normaliser (client push,
+  GUI `_handle_table`, `OfflineBackend._table`). Numbers: math minus, NaN -> `--`, scientific as
+  `m\,$\times$\,10$^{e}$`. Data objects hold numeric columns only.
+- Fingerprints (`table_fingerprint`) feed `DocumentTab._fingerprint` so edits of the data rebuild the document.
+  Double-click on the reference line emits `table:<key>` -> `DocumentTab._open_ref` -> editor dialog.
+- `docexport.swap_figures` skips `%` comments (the template preamble comment mentions the macros).
+
 ## Journal templates (`templates.py`)
 
 - `TEMPLATES` (article / acs / rsc / elsevier): `preamble`, `front` (with `@TITLE@ @AUTHORS@ @ABSTRACT@`,

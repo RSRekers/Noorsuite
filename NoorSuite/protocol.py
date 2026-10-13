@@ -35,15 +35,17 @@ ACTION_LIST_REFERENCES = "list_references"
 ACTION_GET_DOCUMENT = "get_document"
 ACTION_ASSET = "asset"                    # import / replace a figure file (SVG, PNG, ...)
 ACTION_LIST_ASSETS = "list_assets"
+ACTION_TABLE = "table"                    # create / update a data table for documents
+ACTION_LIST_TABLES = "list_tables"
 
 MUTATION_ACTIONS = {ACTION_APPEND_TRACE, ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                     ACTION_ADD_TO_SHEET, ACTION_ADD_IMAGE_TO_SHEET, ACTION_REMOVE_DATA,
                     ACTION_REMOVE_TRACE, ACTION_CLEAR, ACTION_ORGANIZE, ACTION_DOCUMENT,
-                    ACTION_REFERENCES, ACTION_ASSET}
+                    ACTION_REFERENCES, ACTION_ASSET, ACTION_TABLE}
 QUERY_ACTIONS = {ACTION_LIST_DATA, ACTION_LIST_IMAGES, ACTION_LIST_TRACES,
                  ACTION_LIST_SHEETS, ACTION_GET_DATA, ACTION_GET_IMAGE,
                  ACTION_LIST_DOCUMENTS, ACTION_GET_DOCUMENT, ACTION_LIST_REFERENCES,
-                 ACTION_LIST_ASSETS}
+                 ACTION_LIST_ASSETS, ACTION_LIST_TABLES}
 
 
 def frame(payload: dict) -> bytes:
