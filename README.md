@@ -181,7 +181,10 @@ Classes that bring their own natbib (achemso, elsarticle, rsc) are never given a
 files are embedded as 300 dpi PNGs at their figure size, citations are the superscript numbers with the
 numbered ACS list (journal italic, year bold, DOI as a link), figures / tables / sections are numbered
 ("Figure 2. ...") and `\ref` / `\autoref` resolved, equations become native Word / ODF equations.
-Not carried over: equation numbers, custom macros, BibTeX-style formats other than the numbered ACS list
+Numbered equations (`\begin{equation}`) become a small borderless three-column table: empty left cell,
+the equation centred in the middle, `(n)` right-aligned - `\eqref` / `\ref` use the same numbers (Word
+only; ODT keeps the table without the alignment). `align` and `equation*` stay plain display math.
+Not carried over: numbering of `align` rows, custom macros, BibTeX-style formats other than the numbered ACS list
 (the Word file always gets that list). pandoc is found via `$NOORSUITE_PANDOC`, `config.json`
 `{"pandoc": ...}`, PATH or the `noorlatex` conda env (`conda install -n noorlatex -c conda-forge pandoc`).
 

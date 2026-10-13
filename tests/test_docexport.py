@@ -200,3 +200,46 @@ def test_offline_push_document_with_template(tmp_path):
                     authors=["X Y", "Z W"], abstract="Abs.")
     src = ProjectModel.load(tmp_path / "p.sciproj").documents[0].source
     assert "{achemso}" in src and src.count(r"\author{") == 2 and "Body." in src
+
+
+# ------------------------------------------------------------------ equation numbering
+def test_equations_become_three_column_tables_with_numbers():
+    src = (r"A \begin{equation}\label{e1} x = 1 % note" "\n" r"\nonumber\end{equation} B" "\n"
+           "% \\begin{equation} hidden \\end{equation}\n"
+           r"\begin{equation*} u=v \end{equation*}" "\n"
+           r"\begin{equation} y = \frac{1}{2} \end{equation}")
+    out, n = docexport.equations_to_tables(src)
+    assert n == 2
+    assert out.count(r"\begin{longtable}{p{0.08\linewidth}p{0.80\linewidth}p{0.08\linewidth}}") == 2
+    assert r" & $\displaystyle x = 1$ & (1) \\" in out
+    assert r" & $\displaystyle y = \frac{1}{2}$ & (2) \\" in out
+    assert r"\label" not in out and "hidden" in out and r"\begin{equation*}" in out
+
+
+def test_equation_labels_resolve_in_references():
+    src = (r"\section{S}\label{s} See \eqref{e2}, \ref{e1}, \autoref{e2}." "\n"
+           r"\begin{equation}\label{e1} a \end{equation}" "\n"
+           r"\begin{equation}\label{e2} b \end{equation}")
+    out, labels = docexport.number_references(src)
+    assert "See (2), 1, Equation 2." in out
+    assert labels["e1"] == "Equation 1" and labels["e2"] == "Equation 2"
+
+
+@pytest.mark.skipif(docexport.find_pandoc() is None, reason="pandoc not installed")
+def test_docx_equation_tables_are_aligned_and_borderless(tmp_path):
+    src = (r"\documentclass{article}\begin{document}" "\n"
+           r"Energy~\eqref{e}." "\n"
+           r"\begin{equation}\label{e} E = mc^2 \end{equation}" "\n"
+           r"\end{document}")
+    out = tmp_path / "o.docx"
+    ok, log = docexport.export_office(src, [], "superscript", [], [], out, "docx",
+                                      tmp_path / "w", lambda *a: None, lambda *a: None,
+                                      docexport.find_pandoc())
+    assert ok, log
+    xml = zipfile.ZipFile(out).read("word/document.xml").decode("utf8")
+    assert xml.count("<w:tbl>") == 1 and "<m:oMath" in xml
+    tbl = re.search(r"<w:tbl>.*</w:tbl>", xml, re.S).group(0)
+    assert 'w:jc w:val="center"' in tbl and 'w:jc w:val="right"' in tbl
+    assert 'w:val="nil"' in tbl
+    text = re.sub(r"<[^>]+>", " ", xml)
+    assert "(1)" in text and "Energy (1)" in re.sub(r"\s+", " ", text)

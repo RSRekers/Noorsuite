@@ -110,6 +110,7 @@ def bibliography_to_paragraphs(src: str, heading: str = "References") -> str:
 _SEC = re.compile(r"\\(section|subsection|subsubsection)\*?\s*\{")
 _TOKEN = re.compile(
     r"\\(?P<sec>section|subsection|subsubsection)(?P<star>\*)?\s*\{"
+    r"|\\begin\{(?P<eqb>equation)\}|\\end\{(?P<eqe>equation)\}"
     r"|\\begin\{(?P<env>figure|figure\*|table|table\*)\}"
     r"|\\end\{(?P<endenv>figure|figure\*|table|table\*)\}"
     r"|\\caption\s*(?:\[[^\]]*\])?\s*\{"
@@ -122,7 +123,7 @@ def number_references(src: str) -> tuple[str, dict]:
     code = _COMMENT.sub("", src)
     labels: dict = {}
     sec = [0, 0, 0]
-    fig = tab = 0
+    fig = tab = eq = 0
     cur = None                                   # ("figure", n) while inside an environment
     last_sec = ""
     inserts = []                                 # (position, text): caption prefixes
@@ -133,6 +134,11 @@ def number_references(src: str) -> tuple[str, dict]:
             for j in range(lvl + 1, 3):
                 sec[j] = 0
             last_sec = ".".join(str(x) for x in sec[:lvl + 1])
+        elif m.group("eqb"):
+            eq += 1
+            cur = ("Equation", eq)
+        elif m.group("eqe"):
+            cur = None
         elif m.group("env"):
             if m.group("env").startswith("figure"):
                 fig += 1
@@ -201,6 +207,74 @@ def _prefix_captions(src: str) -> str:
     return "".join(out)
 
 
+_EQ_ENV = re.compile(r"\\begin\{equation\}(.*?)\\end\{equation\}", re.S)
+
+
+def equations_to_tables(src: str) -> tuple[str, int]:
+    """Numbered ``equation`` environments as a borderless three-column table -- empty left
+    cell, the equation in the middle, ``(n)`` in the right cell -- so Word shows them like
+    LaTeX does. ``equation*`` / ``\\[ \\]`` stay plain display math. Numbers follow
+    :func:`number_references`. Returns ``(text, count)``."""
+    masked = _COMMENT.sub(lambda m: " " * len(m.group(0)), src)
+    out, pos, n = [], 0, 0
+    for m in _EQ_ENV.finditer(masked):
+        n += 1
+        inner = src[m.start(1):m.end(1)]
+        inner = re.sub(r"\\(?:label\s*\{[^}]*\}|nonumber|notag)", "", inner)
+        inner = " ".join(_COMMENT.sub("", inner).split())
+        out.append(src[pos:m.start()])
+        out.append("\\begin{longtable}{p{0.08\\linewidth}p{0.80\\linewidth}p{0.08\\linewidth}}\n"
+                   f" & $\\displaystyle {inner}$ & ({n}) \\\\\n\\end{{longtable}}")
+        pos = m.end()
+    out.append(src[pos:])
+    return "".join(out), n
+
+
+_TBL = re.compile(r"<w:tbl>.*?</w:tbl>", re.S)
+
+
+def style_equation_tables(docx_path) -> int:
+    """Post-process a pandoc .docx: the 3-column tables made by :func:`equations_to_tables`
+    get centred equations, right-aligned numbers and no borders. Returns how many."""
+    import zipfile
+    count = 0
+
+    def fix(m):
+        nonlocal count
+        t = m.group(0)
+        cells = re.findall(r"<w:tc>.*?</w:tc>", t, re.S)
+        if t.count("<w:gridCol") != 3 or len(cells) != 3 or "<w:tr>" not in t \
+                or t.count("<w:tr>") != 1:
+            return t
+        txt = lambda c: "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", c)).strip()  # noqa: E731
+        if txt(cells[0]) or not re.fullmatch(r"\(\d+\)", txt(cells[2])):
+            return t
+        count += 1
+        mid = cells[1].replace('<w:jc w:val="left" />', '<w:jc w:val="center" />')
+        right = cells[2].replace('<w:jc w:val="left" />', '<w:jc w:val="right" />')
+        for old, new in ((cells[1], mid), (cells[2], right)):
+            t = t.replace(old, new, 1)
+        t = re.sub(r"<w:tcPr\s*/>", '<w:tcPr><w:vAlign w:val="center" /></w:tcPr>', t)
+        none = "".join(f'<w:{e} w:val="nil" />'
+                       for e in ("top", "left", "bottom", "right", "insideH", "insideV"))
+        t = re.sub(r"(<w:tblLayout[^>]*/>)", r"\1<w:tblBorders>" + none + "</w:tblBorders>", t,
+                   count=1)
+        return t
+
+    try:
+        zin = zipfile.ZipFile(docx_path)
+        items = [(i, zin.read(i.filename)) for i in zin.infolist()]
+        zin.close()
+    except (OSError, zipfile.BadZipFile):
+        return 0
+    with zipfile.ZipFile(docx_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info, data in items:
+            if info.filename == "word/document.xml":
+                data = _TBL.sub(fix, data.decode("utf-8")).encode("utf-8")
+            zout.writestr(info, data)
+    return count
+
+
 # ------------------------------------------------------------------------ orchestration
 def prepare_office_source(source: str, records: list, cite_mode: str, sheets, assets,
                           fig_dir, sheet_png, asset_png) -> tuple[str, list, list]:
@@ -239,6 +313,7 @@ def prepare_office_source(source: str, records: list, cite_mode: str, sheets, as
     text, missing = swap_figures(text, files)
     text = bibliography_to_paragraphs(text)
     text, _labels = number_references(text)
+    text, _n_eq = equations_to_tables(text)
     text = re.sub(r"\\usepackage(\[[^\]]*\])?\{noorsuite\}", "", text)
     return text, notes, missing
 
@@ -299,5 +374,7 @@ def export_office(source: str, records: list, cite_mode: str, sheets, assets, ou
         ref = make_reference_docx(templates.detect(source), workdir,
                                   pandoc or find_pandoc() or "pandoc")
     ok, log = run_pandoc(workdir, "main.tex", out_path, fmt, pandoc, reference_doc=ref)
+    if ok and fmt == "docx":
+        style_equation_tables(out_path)
     extra = [f"note: {n}" for n in notes] + [f"missing figure: {k}" for k in missing]
     return ok, "\n".join(extra + ([log] if log else []))
