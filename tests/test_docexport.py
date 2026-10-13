@@ -74,3 +74,129 @@ def test_missing_pandoc_gives_the_install_hint(tmp_path, monkeypatch):
     monkeypatch.setattr(docexport, "find_pandoc", lambda: None)
     ok, log = docexport.run_pandoc(tmp_path, "main.tex", tmp_path / "o.docx", "docx")
     assert not ok and "conda install" in log
+
+
+# ------------------------------------------------------------------ journal templates
+def test_templates_switch_keeps_text_and_front_matter():
+    from NoorSuite import templates as T
+    body = (r"\section{Intro}" "\n" r"Text $E=mc^2$." "\n" r"\noorsheet{fig-a}" "\n"
+            r"\bibliography{references}" "\n")
+    src = T.build_document("article", "My title", ["A. One", "B. Two"], "Abstract here.", body)
+    src = src.replace(r"\usepackage{noorsuite}",
+                      r"\usepackage{siunitx}" "\n" r"\usepackage{noorsuite}")
+    cur = src
+    for tid, marker in (("acs", "{achemso}"), ("rsc", "{rsc}"), ("elsevier", "{elsarticle}"),
+                        ("article", "{article}"), ("acs", "{achemso}")):
+        cur = T.apply_template(cur, tid)
+        p = T.extract_parts(cur)
+        assert marker in cur and T.detect(cur) == tid
+        assert p["title"] == "My title" and p["abstract"] == "Abstract here."
+        assert r"\noorsheet{fig-a}" in p["body"] and r"\bibliography{references}" in p["body"]
+        assert any("siunitx" in e for e in p["extra"]), tid
+    # two authors become two \author entries in ACS
+    assert cur.count(r"\author{") == 2 and "A. One" in cur and "B. Two" in cur
+
+
+def test_acs_environments_round_trip_to_sections():
+    from NoorSuite import templates as T
+    acs = T.build_document("acs", "T", ["X"], "A.",
+                           "Text.\n" r"\begin{acknowledgement}" "\nThanks.\n"
+                           r"\end{acknowledgement}" "\n")
+    art = T.apply_template(acs, "article")
+    assert r"\section*{Acknowledgements}" in art and "acknowledgement}" not in art
+    back = T.apply_template(art, "acs")
+    assert r"\begin{acknowledgement}" in back
+
+
+def test_compose_wraps_body_text_and_switches_full_documents():
+    from NoorSuite import templates as T
+    wrapped = T.compose(r"\section{A}" "\nBody.", "elsevier", "Title X", ["Au Thor"], "Abs.")
+    assert r"\documentclass[preprint,12pt]{elsarticle}" in wrapped and "Title X" in wrapped
+    assert r"\section{A}" "\nBody." in wrapped
+    assert wrapped.rstrip().endswith(r"\end{document}")
+
+
+def test_figure_widths_and_two_column_snippet():
+    from NoorSuite import templates as T
+    w = dict((lab, cm) for lab, cm, _ in T.figure_widths("acs"))
+    assert w["ACS single column (8.25 cm)"] == 8.25
+    assert T.get("rsc")["two_column"] and not T.get("acs")["two_column"]
+    snip = latex.figure_snippet("abc", "Fig", width="width=17.1cm", star=True)
+    assert snip.startswith(r"\begin{figure*}") and snip.rstrip().endswith(r"\end{figure*}")
+
+
+def test_class_with_own_citations_is_not_given_natbib():
+    from NoorSuite import templates as T
+    for tid in ("acs", "rsc", "elsevier"):
+        doc = T.build_document(tid, "T", ["A"], "Abs.",
+                               r"Cite \citep{x}." "\n" r"\bibliography{references}" "\n")
+        out, _ = latex.normalize_for_style(doc, "acs")
+        assert out == doc, tid                       # nothing injected
+        assert latex.own_citations(doc)
+    assert not latex.own_citations(T.build_document("article"))
+
+
+@pytest.mark.skipif(docexport.find_pandoc() is None, reason="pandoc not installed")
+def test_word_reference_doc_takes_journal_font_and_margins(tmp_path):
+    from NoorSuite import templates as T
+    ref = docexport.make_reference_docx("acs", tmp_path, docexport.find_pandoc())
+    assert ref and zipfile.is_zipfile(ref)
+    z = zipfile.ZipFile(ref)
+    assert "Times New Roman" in z.read("word/styles.xml").decode("utf8")
+    assert 'w:left="1440"' in z.read("word/document.xml").decode("utf8")      # 2.54 cm
+    ok, log = docexport.export_office(
+        T.build_document("acs", "T", ["A"], "Abs.", "Body text."), [], "superscript", [], [],
+        tmp_path / "o.docx", "docx", tmp_path / "w", lambda *a: None, lambda *a: None,
+        docexport.find_pandoc())
+    assert ok, log
+
+
+# ------------------------------------------------------------------ GUI integration
+from PyQt6.QtCore import Qt  # noqa: E402
+from tests.test_gui_features import app, win, _doc_win, _wait  # noqa: E402,F401
+
+
+def test_document_tab_layout_switch_widths_and_sheet_resize(win):
+    ids, dm, tab = _doc_win(win, 1)
+    assert tab.layout_combo.currentData() == "article"
+    tab.set_layout("acs")
+    assert r"\documentclass[journal=jacsat,manuscript=article]{achemso}" in tab.source()
+    assert tab.layout_combo.currentData() == "acs"
+    labels = [tab.figures.width_combo.itemText(i) for i in range(tab.figures.width_combo.count())]
+    assert any("single column (8.25 cm)" in t for t in labels)
+    # one undoable edit
+    tab.editor.undo()
+    assert "{achemso}" not in tab.source()
+    tab.set_layout("rsc")
+    # a figure at the double-column width: figure*, and the sheet takes that width
+    fp = tab.figures
+    i = next(i for i in range(fp.width_combo.count()) if fp.width_combo.itemText(i).startswith("RSC full"))
+    fp.width_combo.setCurrentIndex(i)
+    for k in range(fp.list.count()):
+        if fp.list.item(k).data(Qt.ItemDataRole.UserRole) == ids[0]:
+            fp.list.item(k).setSelected(True)
+    snip = fp.snippets_for(fp.list.selectedItems())
+    assert r"\begin{figure*}" in snip and "width=17.1cm" in snip
+    sm = win.sheets[ids[0]]
+    assert abs(sm.fig_width_cm - 17.1) < 1e-6
+    assert abs(sm.fig_height_cm - 17.1 * 2 / 3) < 0.01
+
+
+def test_new_journal_manuscript_and_push_document_template(win):
+    dm = win.create_new_document("Paper ACS", template="acs")
+    assert r"{achemso}" in dm.source and "Paper ACS" in dm.source
+    win.handle_incoming_ipc({"action": "document", "name": "Via skill", "mode": "replace",
+                             "source": r"\section{A}" "\nText.", "template": "elsevier",
+                             "title": "Skill title", "authors": ["A One"], "abstract": "Abs."})
+    d2 = next(d for d in win.documents.values() if d.name == "Via skill")
+    assert r"{elsarticle}" in d2.source and "Skill title" in d2.source and "A One" in d2.source
+
+
+def test_offline_push_document_with_template(tmp_path):
+    from NoorSuite.client import OfflineClient
+    from NoorSuite.model import ProjectModel
+    s = OfflineClient(tmp_path / "p.sciproj")
+    s.push_document("Paper", r"\section{Intro}" "\nBody.", template="acs", title="T",
+                    authors=["X Y", "Z W"], abstract="Abs.")
+    src = ProjectModel.load(tmp_path / "p.sciproj").documents[0].source
+    assert "{achemso}" in src and src.count(r"\author{") == 2 and "Body." in src

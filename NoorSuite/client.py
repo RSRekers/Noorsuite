@@ -579,13 +579,21 @@ class SciSuiteClient:
         return pd.DataFrame(resp.get("sheets", []), columns=_SHEET_COLUMNS)
 
     # ------------------------------------------------------------- LaTeX documents
-    def push_document(self, name, source, *, mode="replace", folder=None):
+    def push_document(self, name, source, *, mode="replace", folder=None, template=None,
+                      title=None, authors=None, abstract=""):
         """Create or update a LaTeX document stored in the project (shown in the project
         tree, opened with its live PDF preview in the GUI). ``mode="append"`` adds to the
         end of an existing one. Figures are sheets: ``\\noorsheet{<sheet id>}`` --
-        :meth:`figure_snippet` returns a ready ``figure`` environment."""
+        :meth:`figure_snippet` returns a ready ``figure`` environment.
+
+        ``template`` = ``"acs"`` | ``"rsc"`` | ``"elsevier"`` | ``"article"`` lays the
+        document out for that journal: a body-only ``source`` is wrapped (``title``,
+        ``authors`` and ``abstract`` fill the front matter), a complete one is switched to the
+        template's preamble with its text kept."""
         return self._ipc.send({"action": ACTION_DOCUMENT, "name": name, "source": source,
-                               "mode": mode, "folder": folder or ""})
+                               "mode": mode, "folder": folder or "", "template": template or "",
+                               "title": title or "", "authors": list(authors or []),
+                               "abstract": abstract})
 
     def list_documents(self) -> pd.DataFrame:
         resp = self._ipc.send({"action": ACTION_LIST_DOCUMENTS}) or {}

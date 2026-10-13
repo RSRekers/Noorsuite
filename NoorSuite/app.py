@@ -1769,6 +1769,11 @@ class SciSuiteWindow(QMainWindow):
         new_folder_act = menu.addAction("New Folder")
         new_sheet_act = menu.addAction("New Sheet")
         new_doc_act = menu.addAction("New LaTeX Document")
+        tpl_menu = menu.addMenu("New journal manuscript")
+        tpl_acts = {}
+        from . import templates as _tpl
+        for tid, tlabel in _tpl.list_templates():
+            tpl_acts[tpl_menu.addAction(tlabel)] = tid
         tags_act = menu.addAction("Set tags...") if is_sheet else None
         rename_act = menu.addAction("Rename") if item is not None else None
         dup_act = menu.addAction("Duplicate") if item is not None else None
@@ -1786,6 +1791,8 @@ class SciSuiteWindow(QMainWindow):
             self._open_sheet_tab(sm.sheet_id)
         elif action == new_doc_act:
             self.create_new_document()
+        elif action in tpl_acts:
+            self.create_new_document(template=tpl_acts[action])
         elif action == tags_act and is_sheet:
             self._set_sheet_tags(item)
         elif action == rename_act and item is not None:
@@ -2802,6 +2809,24 @@ class SciSuiteWindow(QMainWindow):
         """PNG of a sheet model at its figure size (Word / LibreOffice export)."""
         export_sheet_raster(sheet, self.repository, self.images, path, dpi, assets=self.assets)
 
+    def set_sheet_width(self, sheet_id, width_cm) -> None:
+        """Make a sheet ``width_cm`` wide (journal column width), keeping its aspect ratio
+        (3:2 when it has no explicit size yet)."""
+        sm = self.sheets.get(sheet_id)
+        if sm is None or not width_cm:
+            return
+        if sm.fig_width_cm and sm.fig_height_cm:
+            ratio = float(sm.fig_height_cm) / float(sm.fig_width_cm)
+        else:
+            ratio = 2.0 / 3.0
+        if sm.fig_width_cm and abs(float(sm.fig_width_cm) - float(width_cm)) < 1e-6:
+            return
+        sm.fig_width_cm, sm.fig_height_cm = float(width_cm), round(float(width_cm) * ratio, 3)
+        ps = self.open_tabs.get(sheet_id)
+        if ps is not None:
+            ps.render(self.repository, self.images)
+        self._refresh_ipc_snapshot()
+
     def sheet_thumbnail(self, sheet_id, px=360):
         """QPixmap preview of a sheet, cached on disk by the sheet's fingerprint."""
         from PyQt6.QtGui import QPixmap
@@ -2825,10 +2850,11 @@ class SciSuiteWindow(QMainWindow):
                         pass
         return QPixmap(str(path))
 
-    def create_new_document(self, name=None, source=None, folder=None) -> DocumentModel:
+    def create_new_document(self, name=None, source=None, folder=None,
+                            template=None) -> DocumentModel:
         name = name or f"Document {len(self.documents) + 1}"
         dm = DocumentModel(name, source if source is not None
-                           else latex.article_template(name))
+                           else latex.article_template(name, template_id=template))
         self.documents[dm.doc_id] = dm
         parent = self._folder_item(split_folder_path(folder)) if folder \
             else self._selected_folder()
@@ -2881,6 +2907,11 @@ class SciSuiteWindow(QMainWindow):
             (d for d in self.documents.values() if d.name == key), None)
         text = payload.get("source", "")
         mode = payload.get("mode", "replace")
+        if payload.get("template"):
+            from . import templates
+            text = templates.compose(text, payload["template"],
+                                     payload.get("title") or key or "",
+                                     payload.get("authors"), payload.get("abstract", ""))
         if dm is None:
             self.create_new_document(key or "Document", text, payload.get("folder"))
             return

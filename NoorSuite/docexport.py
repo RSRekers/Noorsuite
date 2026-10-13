@@ -243,8 +243,27 @@ def prepare_office_source(source: str, records: list, cite_mode: str, sheets, as
     return text, notes, missing
 
 
+def make_reference_docx(template_id: str, workdir, pandoc: str) -> str | None:
+    """pandoc's default reference.docx restyled to the journal layout (font, size, line
+    spacing, margins); the path, or ``None`` if it could not be made."""
+    from . import templates
+    workdir = Path(workdir)
+    default = workdir / "reference-default.docx"
+    try:
+        res = subprocess.run([pandoc, "--print-default-data-file", "reference.docx"],
+                             capture_output=True, timeout=60,
+                             creationflags=_CREATE_NO_WINDOW)
+        if res.returncode != 0 or not res.stdout:
+            return None
+        default.write_bytes(res.stdout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = workdir / "reference.docx"
+    return str(out) if templates.write_reference_docx(template_id, out, default) else None
+
+
 def run_pandoc(workdir, tex_name: str, out_path, fmt: str, pandoc: str | None = None,
-               timeout: int = 180) -> tuple[bool, str]:
+               timeout: int = 180, reference_doc: str | None = None) -> tuple[bool, str]:
     """``pandoc <workdir>/<tex_name> -> out_path`` (``fmt``: ``docx`` | ``odt``)."""
     pandoc = pandoc or find_pandoc()
     if not pandoc:
@@ -253,6 +272,8 @@ def run_pandoc(workdir, tex_name: str, out_path, fmt: str, pandoc: str | None = 
         return False, f"unknown format {fmt!r}"
     cmd = [pandoc, tex_name, "-f", "latex", "-t", fmt, "-o", str(out_path), "--standalone",
            "--number-sections", f"--resource-path={workdir}"]
+    if reference_doc and fmt == "docx":
+        cmd.append(f"--reference-doc={reference_doc}")
     try:
         res = subprocess.run(cmd, cwd=str(workdir), capture_output=True, text=True,
                              timeout=timeout, creationflags=_CREATE_NO_WINDOW)
@@ -272,6 +293,11 @@ def export_office(source: str, records: list, cite_mode: str, sheets, assets, ou
         source, records, cite_mode, sheets, assets, workdir / "office-figures",
         sheet_png, asset_png)
     (workdir / "main.tex").write_text(text, encoding="utf-8")
-    ok, log = run_pandoc(workdir, "main.tex", out_path, fmt, pandoc)
+    ref = None
+    if fmt == "docx":
+        from . import templates
+        ref = make_reference_docx(templates.detect(source), workdir,
+                                  pandoc or find_pandoc() or "pandoc")
+    ok, log = run_pandoc(workdir, "main.tex", out_path, fmt, pandoc, reference_doc=ref)
     extra = [f"note: {n}" for n in notes] + [f"missing figure: {k}" for k in missing]
     return ok, "\n".join(extra + ([log] if log else []))

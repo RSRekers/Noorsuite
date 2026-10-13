@@ -350,6 +350,20 @@ class FigurePanel(QWidget):
         self.list.itemDoubleClicked.connect(lambda it: self.insertRequested.emit(
             self.snippets_for([it])))
         lay.addWidget(self.list, 1)
+        wrow = QHBoxLayout()
+        wrow.addWidget(QLabel("Width:"))
+        self.width_combo = _NoWheelComboBox()
+        self.width_combo.setToolTip("Figure width for the journal of this document")
+        wrow.addWidget(self.width_combo, 1)
+        self.match_check = QCheckBox("Resize sheet")
+        self.match_check.setChecked(True)
+        self.match_check.setToolTip(
+            "Also set the sheet's own figure size to this width (aspect ratio kept), so text "
+            "and line widths come out at their real size in the journal")
+        wrow.addWidget(self.match_check)
+        lay.addLayout(wrow)
+        self.width_provider = None             # set by the DocumentTab: -> [(label, cm, span)]
+        self.two_column_provider = None        # -> True when the layout has two columns
         row = QHBoxLayout()
         self.insert_btn = QPushButton("Insert selected")
         self.insert_btn.setToolTip("Insert the selected figures at the cursor "
@@ -380,8 +394,21 @@ class FigurePanel(QWidget):
         self._timer.timeout.connect(self._next_thumbnail)
         self.refresh()
 
+    def refresh_widths(self):
+        opts = self.width_provider() if self.width_provider else []
+        cur = self.width_combo.currentData()
+        self.width_combo.blockSignals(True)
+        self.width_combo.clear()
+        self.width_combo.addItem("Natural size (sheet size)", None)
+        for label, cm, span in opts:
+            self.width_combo.addItem(label, (cm, span))
+        i = self.width_combo.findData(cur)
+        self.width_combo.setCurrentIndex(max(0, i))
+        self.width_combo.blockSignals(False)
+
     # -- content --------------------------------------------------------------
     def refresh(self):
+        self.refresh_widths()
         self._timer.stop()
         sel = {it.data(Qt.ItemDataRole.UserRole) for it in self.list.selectedItems()}
         self.list.clear()
@@ -451,7 +478,17 @@ class FigurePanel(QWidget):
             ref = it.data(Qt.ItemDataRole.UserRole)
             sm = by_id.get(ref)
             if sm is not None:
-                out.append(latex.figure_snippet(sm.sheet_id, sm.name, sm.name))
+                choice = self.width_combo.currentData()
+                width, star = "", False
+                if choice:
+                    cm, span = choice
+                    width = f"width={cm:g}cm"
+                    star = bool(span) and bool(self.two_column_provider
+                                               and self.two_column_provider())
+                    if self.match_check.isChecked() and hasattr(self.host, "set_sheet_width"):
+                        self.host.set_sheet_width(sm.sheet_id, cm)
+                out.append(latex.figure_snippet(sm.sheet_id, sm.name, sm.name, width=width,
+                                                star=star))
             elif ref in by_asset:
                 a = by_asset[ref]
                 out.append(latex.asset_snippet(a.asset_id, a.name, a.name))
@@ -750,6 +787,18 @@ class DocumentTab(QWidget):
         cite_act.triggered.connect(lambda: self.pick_from_zotero(insert=True))
         toolbar.addAction(cite_act)
         toolbar.addSeparator()
+        from . import templates as _templates
+        toolbar.addWidget(QLabel(" Layout: "))
+        self.layout_combo = _NoWheelComboBox()
+        for tid, tlabel in _templates.list_templates():
+            self.layout_combo.addItem(tlabel, tid)
+        self.layout_combo.setToolTip(
+            "Journal layout of this document. Switching rewrites the preamble and front "
+            "matter (title, authors, abstract) and keeps your text; undoable with Ctrl+Z.")
+        self.layout_combo.activated.connect(
+            lambda _i: self.set_layout(self.layout_combo.currentData()))
+        toolbar.addWidget(self.layout_combo)
+        toolbar.addSeparator()
         pdf_act = QAction("Export PDF...", self)
         pdf_act.triggered.connect(self.export_pdf)
         toolbar.addAction(pdf_act)
@@ -795,6 +844,9 @@ class DocumentTab(QWidget):
 
         self.figures = FigurePanel(host)
         self.figures.insertRequested.connect(self.insert_text)
+        from . import templates as _tpl
+        self.figures.width_provider = lambda: _tpl.figure_widths(self.current_layout())
+        self.figures.two_column_provider = lambda: _tpl.get(self.current_layout())["two_column"]
         self.refs = ReferencePanel(host)
         self.refs.insertRequested.connect(self.insert_text)
         self.refs.pickRequested.connect(lambda ins: self.pick_from_zotero(insert=ins))
@@ -850,6 +902,7 @@ class DocumentTab(QWidget):
         if engine is None:
             self.log.setPlainText(latex.build_pdf(self.workdir, None).log)
         self._load_cached_pdf()
+        self.sync_layout_combo()
         QTimer.singleShot(1500, lambda: self._complete_records(None))   # old, thin records
 
     # -- theme --------------------------------------------------------------------
@@ -873,6 +926,7 @@ class DocumentTab(QWidget):
     def set_source(self, text: str):
         if text != self.editor.toPlainText():
             self.editor.setPlainText(text)
+        self.sync_layout_combo()
 
     # -- reference-list format of this document --------------------------------------------
     def bib_style_id(self) -> str:
@@ -905,6 +959,42 @@ class DocumentTab(QWidget):
         if self.auto_check.isChecked():
             self._source_timer.start(self.AUTO_DELAY_MS)
 
+    def current_layout(self) -> str:
+        from . import templates
+        return templates.detect(self.source())
+
+    def sync_layout_combo(self):
+        if not hasattr(self, "layout_combo") or not hasattr(self, "figures"):
+            return
+        lid = self.current_layout()
+        i = self.layout_combo.findData(lid)
+        if i >= 0 and i != self.layout_combo.currentIndex():
+            self.layout_combo.setCurrentIndex(i)
+        if lid != getattr(self, "_layout_seen", None):
+            self._layout_seen = lid
+            self.figures.refresh_widths()
+
+    def set_layout(self, template_id: str):
+        """Explicit user choice: re-lay the document out for a journal (one undoable edit)."""
+        from . import templates
+        if template_id == self.current_layout():
+            return
+        new = templates.apply_template(self.source(), template_id)
+        # keep the document's own citation format working in the new class
+        style = self.bib_style_id()
+        if style:
+            new = latex.apply_bib_style(new, style)
+        cur = self.editor.textCursor()
+        cur.beginEditBlock()
+        cur.select(cur.SelectionType.Document)
+        cur.insertText(new)
+        cur.endEditBlock()
+        self.status_label.setText(f"  layout: {templates.get(template_id)['label']}")
+        self.sync_layout_combo()
+        self.contentChanged.emit()
+        if self.auto_check.isChecked():
+            self._source_timer.start(self.AUTO_DELAY_MS)
+
     def _set_cite_mode(self, mode: str):
         self.model.cite_mode = mode
         self.contentChanged.emit()
@@ -919,6 +1009,7 @@ class DocumentTab(QWidget):
     def _on_text_changed(self):
         self.model.source = self.editor.toPlainText()
         self._sync_style_combo()
+        self.sync_layout_combo()
         self.contentChanged.emit()
         if self.auto_check.isChecked():
             self._source_timer.start(self.AUTO_DELAY_MS)

@@ -146,6 +146,13 @@ text. Keys are data coordinates; the entries are stored as `"0=RT; 1=77 K"` (so 
 `;`). A string-labelled heatmap axis shows one tick per label by itself; the mapping only renames.
 In the GUI: Axes tab -> "X / Y tick labels" (same `value=text; value=text` syntax).
 
+### Journal layouts
+
+`suite.push_document("Paper", body_text, template="acs", title="...", authors=["A. One", "B. Two"],
+abstract="...")` - `template` is `"acs"` (achemso), `"rsc"`, `"elsevier"` (elsarticle) or `"article"`.
+Body text only gets wrapped in the template; a complete document is switched to the template's preamble
+with its text kept. The user switches layouts later with the *Layout* box of the document tab.
+
 ### Word / LibreOffice export of a document
 
 `python -m NoorSuite latex docx --doc "Paper" --out paper.docx` (or `odt`; `--project file.sciproj` to

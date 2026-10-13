@@ -161,6 +161,19 @@ in `plot` / `heatmap` / `show_image` / `organize_sheet`. On a categorical heatma
 that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick labels*, written as
 `0=RT; 1=77 K; 2=4 K`.
 
+## Journal layouts
+
+A document's *Layout* box (toolbar) re-lays it out for **ACS (`achemso`)**, **RSC (`rsc.sty`, two
+columns)**, **Elsevier (`elsarticle`)** or a plain article. Switching regenerates the preamble and front
+matter from the document's title / authors / abstract and keeps your text, figures, macros and extra
+packages (one undoable edit; ACS `acknowledgement` / `suppinfo` turn into plain sections and back).
+New documents: right-click in the project tree -> *New journal manuscript*. The figure panel offers the
+journal's widths (ACS 8.25 / 17.78 cm, RSC 8.3 / 17.1 cm, Elsevier 9 / 14 / 19 cm); *Resize sheet* also
+sets the sheet's own size to it (aspect kept) so text comes out at its real size, and a double-column
+width in RSC becomes a `figure*`. The Word export takes the layout's font, size, line spacing and margins.
+From code: `suite.push_document("Paper", body, template="acs", title=..., authors=[...], abstract=...)`.
+Classes that bring their own natbib (achemso, elsarticle, rsc) are never given a second one.
+
 ## Word / LibreOffice export
 
 *Export Word...* / *Export LibreOffice...* in the document toolbar (or `python -m NoorSuite latex docx|odt

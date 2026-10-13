@@ -607,6 +607,23 @@ title/x_label/y_label + trace labels).
   black text by default; QSettings `doc/dark`). Don't rely on the app palette in the Document tab.
 - While a document tab is current the main splitter collapses the inspector (`_saved_split` restores it).
 
+## Journal templates (`templates.py`)
+
+- `TEMPLATES` (article / acs / rsc / elsevier): `preamble`, `front` (with `@TITLE@ @AUTHORS@ @ABSTRACT@`,
+  `@ACSAUTHORS@`, `@ELSAUTHORS@`), figure `widths` [(label, cm, spans_both_columns)], `two_column`, `word`
+  look, `known` packages. `extract_parts(source)` -> title / authors / abstract / body / extra preamble;
+  `apply_template` = extract + `build_document`; `compose` wraps body-only text (`push_document(template=)`).
+  `detect(source)` is derived from `\documentclass` / `\usepackage{rsc}` -- there is no stored template id.
+- Classes that bring natbib (achemso, elsarticle, rsc.sty): `latex.own_citations(source)`; the citation
+  package logic (`normalize_for_style`, `ensure_bibliography`, `apply_bib_style`) leaves them alone.
+- Authors: article `A \and B`, others `A and B`; ACS / Elsevier get one `\author` each
+  (`_split_authors`). RSC front matter is the `\twocolumn[...]` block.
+- `DocumentTab.set_layout` (undoable edit, then re-applies the document's bib style), `layout_combo`;
+  `FigurePanel.width_combo` / `match_check` (`host.set_sheet_width`) / `figure*` for double-column widths
+  in two-column templates. Word: `docexport.make_reference_docx` restyles pandoc's reference.docx.
+- Verified with tectonic: achemso, elsarticle, rsc.sty compile; `rsc.sty` loads natbib itself (do not add
+  `\usepackage{natbib}` -- option clash).
+
 ## Word / LibreOffice export (`docexport.py`)
 
 - pandoc LaTeX -> docx/odt. `prepare_office_source`: native numbered ACS text (`prepare_build_source`

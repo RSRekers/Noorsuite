@@ -157,6 +157,13 @@ def package_loaded(source: str, name: str) -> bool:
     return bool(re.search(pat, source) or re.search(cls, source))
 
 
+def own_citations(source: str) -> bool:
+    """The class / package (achemso, elsarticle, rsc.sty, or the achemso package) loads natbib
+    and sets the reference look itself: never add or switch citation packages there."""
+    from . import templates
+    return templates.has_own_citations(source) or package_loaded(source, "achemso")
+
+
 def ensure_bibliography(source: str, style_id: str | None = None):
     r"""Make citations resolvable in the *built* copy of a document: if it cites (``\cite*``) but
     has no ``\bibliography{...}``, add the reference list in the default format before the final
@@ -181,7 +188,7 @@ def ensure_bibliography(source: str, style_id: str | None = None):
     if not has_list:
         for line in style["packages"]:
             name = re.search(r"\{([^}]*)\}\s*$", line).group(1)
-            if not package_loaded(code, name) and not package_loaded(code, "achemso"):
+            if not package_loaded(code, name) and not own_citations(code):
                 preamble.append(line)
         end = list(re.finditer(r"\\end\{document\}", source))
         if end:
@@ -192,7 +199,7 @@ def ensure_bibliography(source: str, style_id: str | None = None):
                          f"'{style['id']}' format ({style['bst']}.bst) to the built copy - "
                          "use References -> Insert reference list to make it permanent")
     if re.search(r"\\cite[pt]\*?\b|\\cite(?:author|year)\b", code) \
-            and not package_loaded(code, "natbib") and not package_loaded(code, "achemso") \
+            and not package_loaded(code, "natbib") and not own_citations(code) \
             and not any("natbib" in p for p in preamble):
         preamble.append(r"\usepackage{natbib}")
         notes.append(r"\citep/\citet need natbib: added \usepackage{natbib} to the built copy")
@@ -244,8 +251,8 @@ def normalize_for_style(source: str, style_id: str | None = None):
     ``(source, notes)``; the user's text is never modified, only the compiled copy."""
     st = bib_style(style_id)
     needed = {re.search(r"\{([^}]*)\}\s*$", p).group(1) for p in st["packages"]}
-    if re.search(r"\\documentclass(?:\[[^\]]*\])?\{achemso\}", source):
-        return source, []                         # the ACS class brings its own citations
+    if own_citations(source):
+        return source, []                         # the class brings its own citations
     present = {n for n in MANAGED_PACKAGES if package_loaded(source, n)}
     drop = present - needed
     notes = []
@@ -286,7 +293,7 @@ def apply_bib_style(source: str, style_id: str) -> str:
     the format's own, and an existing ``\bibliographystyle{...}`` is switched. Nothing else
     is touched; a document without a reference list just gets the preamble lines."""
     st = bib_style(style_id)
-    if re.search(r"\\documentclass(?:\[[^\]]*\])?\{achemso\}", source):
+    if own_citations(source):
         return _BST_RE.sub(lambda m: f"\\bibliographystyle{{{st['bst']}}}", source) \
             if not st.get("native") else source
     out = strip_packages(source, MANAGED_PACKAGES)
@@ -334,7 +341,11 @@ def prepare_build_source(source: str, records, style_id: str | None = None,
                         "style": st}
 
 
-def article_template(title: str = "Title", style_id: str | None = None) -> str:
+def article_template(title: str = "Title", style_id: str | None = None,
+                     template_id: str | None = None) -> str:
+    if template_id and template_id != "article":
+        from . import templates
+        return templates.build_document(template_id, title)
     text = ARTICLE_TEMPLATE.replace("@TITLE@", title)
     pk = "\n".join(bib_style(style_id)["packages"])
     return text.replace(r"\usepackage{noorsuite}   % \noorsheet{...}: NoorSuite sheets as figures",
@@ -414,14 +425,16 @@ def resolve_ref(key: str, sheets):
 
 
 def figure_snippet(sheet_id: str, name: str = "", caption: str = "", label: str = "",
-                   width: str = "") -> str:
-    """A ``figure`` environment for one sheet (what *Insert figure...* writes)."""
+                   width: str = "", star: bool = False) -> str:
+    """A ``figure`` environment for one sheet (what *Insert figure...* writes); ``star``
+    -> ``figure*`` (spanning both columns of a two-column layout)."""
     opts = f"[{width}]" if width else ""
     label = label or f"fig:{slug(name) or sheet_id}"
     note = f"%  {name}" if name else ""
-    return (f"\\begin{{figure}}[htbp]\n  \\centering\n  \\noorsheet{opts}{{{sheet_id}}}{note}\n"
+    env = "figure*" if star else "figure"
+    return (f"\\begin{{{env}}}[htbp]\n  \\centering\n  \\noorsheet{opts}{{{sheet_id}}}{note}\n"
             f"  \\caption{{{caption or name or 'Caption.'}}}\n  \\label{{{label}}}\n"
-            f"\\end{{figure}}\n")
+            f"\\end{{{env}}}\n")
 
 
 # --------------------------------------------------------------------------- engine
