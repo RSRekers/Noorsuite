@@ -15,6 +15,7 @@ from matplotlib.backends.backend_qtagg import (FigureCanvasQTAgg,
 from matplotlib.colors import to_rgb
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
+from matplotlib.transforms import Affine2D, Affine2DBase
 from matplotlib.ticker import FormatStrFormatter
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
@@ -23,6 +24,26 @@ from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextE
 from .model import (INDEX_COL, ImageRef, ShapeRef, SheetModel, apply_tick_labels,
                     gradient_rgba, heatmap_band_edges, heatmap_iso_levels, resolve_ticks)
 from .widgets import CollapsibleSection
+
+class _DynRot(Affine2DBase):
+    """Rotation by ``angle`` degrees *in display space* about the display position of a data
+    point -- so a rotated object turns exactly as the mouse does, whatever the axes scales.
+    Composed as ``tf + _DynRot(tf, cx, cy, angle)``; follows layout / limit changes."""
+
+    def __init__(self, tf, cx, cy, angle):
+        super().__init__()
+        self._tf, self._c, self._a = tf, (float(cx), float(cy)), float(angle)
+        self._mtx = None
+        self.set_children(tf)
+        self._invalid = 1
+
+    def get_matrix(self):
+        if self._invalid or self._mtx is None:
+            c = self._tf.transform(self._c)
+            self._mtx = Affine2D().rotate_deg_around(c[0], c[1], self._a).get_matrix()
+            self._invalid = 0
+        return self._mtx
+
 
 _ACTIVE_ACCENT = "#ff7f0e"
 _HL_PAD_PX = 6.0
@@ -134,6 +155,8 @@ class PlotSheet(QWidget):
     active_subplot_changed = pyqtSignal(int)
     element_double_clicked = pyqtSignal(object)   # dict: {"kind": ..., ...}
     element_right_clicked = pyqtSignal(object, object)   # (hit dict, QMouseEvent | None)
+    shape_selected = pyqtSignal(object)           # a ShapeRef was clicked on the canvas
+    shape_edited = pyqtSignal(object)             # a ShapeRef was moved / scaled / rotated
     notes_changed = pyqtSignal()
     image_changed = pyqtSignal()                  # slider moved / axis switched
 
@@ -146,6 +169,8 @@ class PlotSheet(QWidget):
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.canvas.mpl_connect("button_press_event", self.on_canvas_click)
+        self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
+        self.canvas.mpl_connect("button_release_event", self._on_canvas_release)
         self.canvas.mpl_connect("draw_event", self._on_draw)
         self.canvas.mpl_connect("resize_event", self._on_canvas_resize)
 
@@ -156,6 +181,13 @@ class PlotSheet(QWidget):
         self._image_axes = {}         # Axes -> subplot_index (has an image)
         self._image_geom = {}         # Axes -> (xpos, xlabels, ypos, ylabels) for tick control
         self._highlight_patch = None  # figure-level Rectangle around the active subplot
+        self._sel_shape = None        # ShapeRef whose handles are shown
+        self._handle_artists: list = []
+        self._handle_pts: dict = {}   # handle name -> display (x, y) from the last draw
+        self._handle_sig = None
+        self._shape_artist: dict = {} # id(ShapeRef) -> artist (rebuilt every render)
+        self._drag = None             # active move / scale / rotate gesture
+        self._last_drag_render = 0.0
         self._in_highlight = False    # reentrancy guard for the draw_event handler
 
         self.canvas_host = _AspectCanvasHost(self.canvas)
@@ -406,6 +438,8 @@ class PlotSheet(QWidget):
             pass
 
         self.artist_map = {}
+        self._shape_artist = {}
+        self._handle_sig = None
         self._axes = []
         self._text_targets = []
         if getattr(self, "assets", None) is None:
@@ -542,7 +576,11 @@ class PlotSheet(QWidget):
                 ax.set_xlim(xl)
                 ax.set_ylim(yl)
 
-            if n_drawn and sub.legend_visible:
+            if sub.bare:                        # content only: nothing but what is drawn
+                ax.set_axis_off()
+                ax.set_title("")
+                ax.patch.set_visible(False)
+            if n_drawn and sub.legend_visible and not sub.bare:
                 legend = ax.legend(loc=sub.legend_loc, frameon=sub.legend_frame,
                                    fontsize=sub.legend_fontsize * text_scale,
                                    ncol=max(1, int(sub.legend_ncol)),
@@ -551,15 +589,26 @@ class PlotSheet(QWidget):
                     legend.set_picker(True)
 
         try:
-            self.fig.tight_layout()
+            self._layout()
         except Exception:
             pass
         self._highlight_patch = None   # stale after clf(); redrawn by _on_draw
+        self._handle_artists = []      # removed by clf() as well
+        self._handle_sig = None
         self._rebuild_slider_bar()
         ratio = (m.fig_width_cm / m.fig_height_cm
                  if m.fig_width_cm and m.fig_height_cm else None)
         self.canvas_host.set_ratio(ratio)
         self.canvas.draw_idle()
+
+    def _layout(self):
+        """``tight_layout`` -- or, when every subplot is content-only, no margins at all so the
+        picture / image fills its cell."""
+        subs = self.model.subplots[:self.model.rows * self.model.cols]
+        if subs and all(getattr(s, "bare", False) for s in subs):
+            self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0.02, hspace=0.02)
+        else:
+            self.fig.tight_layout()
 
     @staticmethod
     def _auto_trace_labels(sub, repository) -> tuple[str, str]:
@@ -772,6 +821,7 @@ class PlotSheet(QWidget):
                           va="center", rotation=float(sh.angle), zorder=z,
                           fontsize=float(sh.fontsize) * text_scale)
             self.artist_map[art] = sh
+            self._shape_artist[id(sh)] = art
             return
         if sh.kind in ("line", "arrow"):
             if sh.kind == "line":
@@ -785,6 +835,7 @@ class PlotSheet(QWidget):
                                       zorder=z)
                 ax.add_patch(art)
             self.artist_map[art] = sh
+            self._shape_artist[id(sh)] = art
             return
 
         # --- closed shapes -------------------------------------------------------
@@ -802,22 +853,21 @@ class PlotSheet(QWidget):
         w, h = br - bl, bt - bb
         cx, cy = bl + w / 2.0, bb + h / 2.0
         rot = float(sh.angle) if sh.kind in ("rect", "ellipse") else 0.0
+        rtf = tf + _DynRot(tf, cx, cy, rot) if rot else tf     # rotation in display space
 
         fill_rgba = (0, 0, 0, 0)
         gradient = sh.is_filled and sh.fill_mode in ("linear", "radial")
         if sh.is_filled and not gradient:
             fill_rgba = rgba(sh.fill_color, sh.fill_alpha)
-        kw = dict(transform=tf, facecolor=fill_rgba, edgecolor=edge, linewidth=lw,
+        kw = dict(transform=rtf, facecolor=fill_rgba, edgecolor=edge, linewidth=lw,
                   linestyle=sh.line_style, zorder=z)
         if sh.kind == "ellipse":
-            patch = Ellipse((cx, cy), w, h, angle=rot, **kw)
+            patch = Ellipse((cx, cy), w, h, **kw)
         else:
-            try:
-                patch = Rectangle((bl, bb), w, h, angle=rot, rotation_point="center", **kw)
-            except TypeError:                       # matplotlib < 3.6
-                patch = Rectangle((bl, bb), w, h, angle=rot, **kw)
+            patch = Rectangle((bl, bb), w, h, **kw)
         ax.add_patch(patch)
         self.artist_map[patch] = sh
+        self._shape_artist[id(sh)] = patch
 
         if gradient and w != 0 and h != 0:
             img = gradient_rgba(sh.grad_stops, sh.fill_mode, sh.grad_angle, sh.grad_cx,
@@ -826,10 +876,7 @@ class PlotSheet(QWidget):
             im = AxesImage(ax, origin="lower", interpolation="bilinear",
                            extent=(bl, br, bb, bt), zorder=z - 0.001)
             im.set_data(img)
-            trans = tf
-            if rot:
-                trans = mtf.Affine2D().rotate_deg_around(cx, cy, rot) + tf
-            im.set_transform(trans)
+            im.set_transform(rtf)
             im.set_clip_path(patch)
             ax.add_artist(im)
 
@@ -878,11 +925,13 @@ class PlotSheet(QWidget):
         im = _Fitted(ax, origin="upper", interpolation="antialiased",
                      extent=(l, r, b, t), zorder=z)
         im.set_data(arr)
-        im.set_transform(tf)
+        rot = float(sh.angle)
+        im.set_transform(tf + _DynRot(tf, (l + r) / 2.0, (b + t) / 2.0, rot) if rot else tf)
         ax.add_artist(im)
         ax.set_xlim(xl)
         ax.set_ylim(yl)
         self.artist_map[im] = sh
+        self._shape_artist[id(sh)] = im
 
     def _draw_error_overlay(self, ax, tref, x, y, yerr):
         """Error-bar whiskers on top of whatever :meth:`_draw_trace` already drew --
@@ -907,7 +956,7 @@ class PlotSheet(QWidget):
         only thing that "fixed" it, because render() itself ends with tight_layout()."""
         self._sync_zoom_dpi(draw=False)
         try:
-            self.fig.tight_layout()
+            self._layout()
         except Exception:
             pass
         self.canvas.draw_idle()
@@ -926,7 +975,7 @@ class PlotSheet(QWidget):
             self.fig.set_size_inches(w_px / target, h_px / target, forward=False)
         if draw:
             try:
-                self.fig.tight_layout()
+                self._layout()
             except Exception:
                 pass
             self.canvas.draw_idle()
@@ -945,10 +994,12 @@ class PlotSheet(QWidget):
         try:
             if patch is not None:
                 patch.set_visible(False)
+            for a in self._handle_artists:
+                a.set_visible(False)
             if size_in:
                 self.fig.set_size_inches(*size_in, forward=False)
                 try:
-                    self.fig.tight_layout()
+                    self._layout()
                 except Exception:
                     pass
             self.fig.savefig(dest, format=fmt, dpi=dpi,
@@ -957,10 +1008,12 @@ class PlotSheet(QWidget):
         finally:
             if patch is not None:
                 patch.set_visible(True)
+            for a in self._handle_artists:
+                a.set_visible(True)
             if size_in:
                 self.fig.set_size_inches(*old_size, forward=False)
                 try:
-                    self.fig.tight_layout()
+                    self._layout()
                 except Exception:
                     pass
             self._exporting = False
@@ -975,6 +1028,7 @@ class PlotSheet(QWidget):
         self._in_highlight = True
         try:
             changed = self._place_active_highlight(renderer)
+            changed = self._place_shape_handles(renderer) or changed
         finally:
             self._in_highlight = False
         if changed:
@@ -1016,8 +1070,300 @@ class PlotSheet(QWidget):
         self._highlight_patch = patch
         return True
 
+    # ------------------------------------------------- object handles (move/scale/rotate)
+    def set_selected_shape(self, ref):
+        """Show the transform handles of ``ref`` (a ShapeRef of this sheet, or ``None``)."""
+        self._sel_shape = ref
+        self._handle_sig = None
+        self.canvas.draw_idle()
+
+    def _shape_context(self, sh):
+        """(axes, subplot) holding ``sh`` and the transform its coordinates live in."""
+        for i, sub in enumerate(self.model.subplots[:len(self._axes)]):
+            if any(s is sh for s in sub.shapes):
+                return self._axes[i], sub
+        return None, None
+
+    @staticmethod
+    def _coord_tf(ax, sh):
+        return ax.transAxes if sh.coords == "axes" else ax.transData
+
+    def shape_display_fns(self, sh):
+        """``(fwd, inv)``: the shape's coordinates <-> display pixels (for group moves)."""
+        ax, _ = self._shape_context(sh)
+        if ax is None:
+            return None, None
+        tf = self._coord_tf(ax, sh)
+        inv = tf.inverted()
+        return (lambda p: tuple(tf.transform((p[0], p[1])))), \
+               (lambda p: tuple(inv.transform((p[0], p[1]))))
+
+    def _handles_for(self, sh):
+        """``{name: (x_px, y_px)}`` handle positions of ``sh`` for the current layout."""
+        import math
+        ax, _ = self._shape_context(sh)
+        if ax is None or not sh.enabled:
+            return {}
+        tf = self._coord_tf(ax, sh)
+        k = sh.kind
+        if k in ("line", "arrow"):
+            return {"p0": tuple(tf.transform((sh.x0, sh.y0))),
+                    "p1": tuple(tf.transform((sh.x1, sh.y1)))}
+        if k == "xspan":
+            l, _, r, _ = sh.bounds()
+            mid = ax.transAxes.transform((0, 0.5))[1]
+            fx = (lambda x: ax.transAxes.transform((x, 0))[0]) if sh.coords == "axes" \
+                else (lambda x: ax.transData.transform((x, 0))[0])
+            return {"left": (fx(l), mid), "right": (fx(r), mid)}
+        if k == "yspan":
+            _, b, _, t = sh.bounds()
+            mid = ax.transAxes.transform((0.5, 0))[0]
+            fy = (lambda y: ax.transAxes.transform((0, y))[1]) if sh.coords == "axes" \
+                else (lambda y: ax.transData.transform((0, y))[1])
+            return {"bottom": (mid, fy(b)), "top": (mid, fy(t))}
+        l, b, r, t = sh.bounds()
+        cd = tf.transform(((l + r) / 2.0, (b + t) / 2.0))
+        a = math.radians(float(sh.angle))
+        ca, sa = math.cos(a), math.sin(a)
+
+        def rot(p):
+            dx, dy = p[0] - cd[0], p[1] - cd[1]
+            return (cd[0] + dx * ca - dy * sa, cd[1] + dx * sa + dy * ca)
+
+        if k == "text":
+            top = (cd[0], cd[1] + 28)
+            return {"rotate": rot(top)}
+        out = {"c_bl": rot(tf.transform((l, b))), "c_br": rot(tf.transform((r, b))),
+               "c_tr": rot(tf.transform((r, t))), "c_tl": rot(tf.transform((l, t)))}
+        tm = tf.transform(((l + r) / 2.0, t))
+        out["rotate"] = rot((tm[0], tm[1] + 24))
+        return out
+
+    def _place_shape_handles(self, renderer=None) -> bool:
+        sh = self._sel_shape
+        pts = self._handles_for(sh) if sh is not None else {}
+        sig = tuple((n, round(p[0]), round(p[1])) for n, p in sorted(pts.items()))
+        if sig == self._handle_sig:
+            return False
+        self._handle_sig = sig
+        for a in self._handle_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._handle_artists = []
+        self._handle_pts = pts
+        if not pts:
+            return True
+        from matplotlib.lines import Line2D
+        from matplotlib.transforms import IdentityTransform
+        ident = IdentityTransform()
+        corners = [pts[n] for n in ("c_bl", "c_br", "c_tr", "c_tl") if n in pts]
+        if len(corners) == 4:
+            xs = [p[0] for p in corners] + [corners[0][0]]
+            ys = [p[1] for p in corners] + [corners[0][1]]
+            outline = Line2D(xs, ys, transform=ident, color=_ACTIVE_ACCENT, lw=1.0,
+                             linestyle="--", zorder=2_000_000)
+            outline.set_in_layout(False)
+            self.fig.add_artist(outline)
+            self._handle_artists.append(outline)
+            if "rotate" in pts:
+                tm = ((corners[2][0] + corners[3][0]) / 2, (corners[2][1] + corners[3][1]) / 2)
+                stem = Line2D([tm[0], pts["rotate"][0]], [tm[1], pts["rotate"][1]],
+                              transform=ident, color=_ACTIVE_ACCENT, lw=1.0, zorder=2_000_000)
+                stem.set_in_layout(False)
+                self.fig.add_artist(stem)
+                self._handle_artists.append(stem)
+        for name, (x, y) in pts.items():
+            dot = Line2D([x], [y], transform=ident, marker="o" if name == "rotate" else "s",
+                         markersize=7, markerfacecolor="white", markeredgecolor=_ACTIVE_ACCENT,
+                         markeredgewidth=1.4, linestyle="none", zorder=2_000_001)
+            dot.set_in_layout(False)
+            self.fig.add_artist(dot)
+            self._handle_artists.append(dot)
+        return True
+
+    def _handle_at(self, event):
+        if self._sel_shape is None:
+            return None
+        best, bd = None, 10.0
+        for name, (x, y) in self._handle_pts.items():
+            d = ((x - event.x) ** 2 + (y - event.y) ** 2) ** 0.5
+            if d < bd:
+                best, bd = name, d
+        return best
+
+    def _shape_at(self, event):
+        """Top-most object under the pointer in the clicked subplot (None if none)."""
+        if event.inaxes is None or event.inaxes not in self._axes:
+            return None
+        sub = self.model.subplots[self._axes.index(event.inaxes)]
+        stack = sub.stack()
+        if self._sel_shape is not None and any(s is self._sel_shape for s in sub.shapes):
+            stack = [self._sel_shape] + [s for s in reversed(stack) if s is not self._sel_shape]
+        else:
+            stack = list(reversed(stack))
+        for it in stack:
+            if getattr(it, "kind", None) is None or not hasattr(it, "shape_id") or not it.enabled:
+                continue
+            art = self._shape_artist.get(id(it))
+            if art is not None and _contains(art, event):
+                return it
+        return None
+
+    def _begin_drag(self, sh, mode, handle, event):
+        import math
+        ax, sub = self._shape_context(sh)
+        if ax is None:
+            return
+        tf = self._coord_tf(ax, sh)
+        l, b, r, t = sh.bounds()
+        cd = tf.transform(((l + r) / 2.0, (b + t) / 2.0))
+        corners = [tf.transform(p) for p in ((l, b), (r, b), (r, t), (l, t))]
+        hw = abs(corners[1][0] - corners[0][0]) / 2.0
+        hh = abs(corners[3][1] - corners[0][1]) / 2.0
+        self._drag = {
+            "sh": sh, "mode": mode, "handle": handle, "ax": ax, "tf": tf,
+            "start": sh.to_dict(), "geom0": sh.geom(), "cd": tuple(cd), "hw": max(hw, 1e-6),
+            "hh": max(hh, 1e-6), "m0": (event.x, event.y), "moved": False,
+            "kids": [(c, c.to_dict()) for c in sub.descendants(sh)],
+            "uniform": sh.kind == "picture" and bool(sh.keep_aspect),
+        }
+
+    def _restore(self, sh, d):
+        for f, v in d.items():
+            if f in ("grad_stops",):
+                v = [list(x) for x in v]
+            setattr(sh, f, v)
+
+    def _on_canvas_motion(self, event):
+        g = self._drag
+        if g is None or event.x is None:
+            return
+        import math
+        import time
+        from .model import apply_group_transform
+        sh, tf = g["sh"], g["tf"]
+        dx, dy = event.x - g["m0"][0], event.y - g["m0"][1]
+        if not g["moved"] and (abs(dx) + abs(dy)) < 3:
+            return
+        g["moved"] = True
+        self._restore(sh, g["start"])
+        inv = tf.inverted()
+        mode, k = g["mode"], sh.kind
+        if mode == "move":
+            c0 = g["cd"]
+            n = inv.transform((c0[0] + dx, c0[1] + dy))
+            o = inv.transform(c0)
+            ddx, ddy = float(n[0] - o[0]), float(n[1] - o[1])
+            if k != "yspan":
+                sh.x0 += ddx
+                sh.x1 += ddx
+            if k != "xspan":
+                sh.y0 += ddy
+                sh.y1 += ddy
+        elif mode == "rotate":
+            c = g["cd"]
+            ang = math.degrees(math.atan2(event.y - c[1], event.x - c[0])) - 90.0
+            if getattr(event, "key", None) == "shift":
+                ang = round(ang / 15.0) * 15.0
+            sh.angle = ((ang + 180.0) % 360.0) - 180.0
+        elif mode == "point":
+            p = inv.transform((event.x, event.y))
+            nm = g["handle"]
+            if nm == "p0":
+                sh.x0, sh.y0 = float(p[0]), float(p[1])
+            elif nm == "p1":
+                sh.x1, sh.y1 = float(p[0]), float(p[1])
+            elif nm == "left":
+                sh.x0 = float(p[0]) if sh.x0 <= sh.x1 else sh.x0
+                sh.x1 = float(p[0]) if sh.x0 > sh.x1 else sh.x1
+            elif nm == "right":
+                if sh.x1 >= sh.x0:
+                    sh.x1 = float(p[0])
+                else:
+                    sh.x0 = float(p[0])
+            elif nm == "bottom":
+                if sh.y0 <= sh.y1:
+                    sh.y0 = float(p[1])
+                else:
+                    sh.y1 = float(p[1])
+            elif nm == "top":
+                if sh.y1 >= sh.y0:
+                    sh.y1 = float(p[1])
+                else:
+                    sh.y0 = float(p[1])
+        elif mode == "scale":
+            c = g["cd"]
+            a = math.radians(float(sh.angle))
+            ca, sa = math.cos(-a), math.sin(-a)
+            mx, my = event.x - c[0], event.y - c[1]
+            lx, ly = mx * ca - my * sa, mx * sa + my * ca            # pointer, unrotated frame
+            sgx = 1.0 if g["handle"] in ("c_br", "c_tr") else -1.0
+            sgy = 1.0 if g["handle"] in ("c_tl", "c_tr") else -1.0
+            ax_, ay_ = -sgx * g["hw"], -sgy * g["hh"]               # the fixed (opposite) corner
+            nhw = max(3.0, abs(lx - ax_) / 2.0)
+            nhh = max(3.0, abs(ly - ay_) / 2.0)
+            if g["uniform"] or getattr(event, "key", None) == "shift":
+                f = max(nhw / g["hw"], nhh / g["hh"])
+                nhw, nhh = g["hw"] * f, g["hh"] * f
+            ox, oy = (ax_ + sgx * nhw), (ay_ + sgy * nhh)          # new centre, unrotated frame
+            cxn = c[0] + ox * math.cos(a) - oy * math.sin(a)
+            cyn = c[1] + ox * math.sin(a) + oy * math.cos(a)
+            nc = inv.transform((cxn, cyn))
+            w0 = abs(sh.x1 - sh.x0)
+            h0 = abs(sh.y1 - sh.y0)
+            sh.scale_x = float(g["start"]["scale_x"]) * nhw / g["hw"]
+            sh.scale_y = float(g["start"]["scale_y"]) * nhh / g["hh"]
+            sh.x0, sh.x1 = float(nc[0]) - w0 / 2.0, float(nc[0]) + w0 / 2.0
+            sh.y0, sh.y1 = float(nc[1]) - h0 / 2.0, float(nc[1]) + h0 / 2.0
+        # the children follow their root
+        if g["kids"]:
+            fwd = lambda p: tuple(tf.transform((p[0], p[1])))             # noqa: E731
+            bwd = lambda p: tuple(inv.transform((p[0], p[1])))            # noqa: E731
+            new = sh.geom()
+            for child, d0 in g["kids"]:
+                self._restore(child, d0)
+                apply_group_transform(child, g["geom0"], new, fwd, bwd)
+        now = time.monotonic()
+        if now - self._last_drag_render > 0.04:
+            self._last_drag_render = now
+            self._redraw_after_edit()
+
+    def _redraw_after_edit(self):
+        if getattr(self, "_repository", None) is not None:
+            self.render(self._repository, self._images)
+            self.canvas.draw_idle()
+
+    def _on_canvas_release(self, event):
+        g, self._drag = self._drag, None
+        if g is None:
+            return
+        if g["moved"]:
+            self._redraw_after_edit()
+            self.shape_edited.emit(g["sh"])
+
     # -------------------------------------------------------------- interaction
     def on_canvas_click(self, event):
+        if getattr(event, "button", None) == 1 and not getattr(event, "dblclick", False) \
+                and getattr(self.toolbar, "mode", "") in ("", None):
+            hname = self._handle_at(event)
+            if hname is not None and self._sel_shape is not None:
+                mode = "rotate" if hname == "rotate" else \
+                    "scale" if hname.startswith("c_") else "point"
+                self._begin_drag(self._sel_shape, mode, hname, event)
+                return
+            hit_shape = self._shape_at(event)
+            if hit_shape is not None:
+                if event.inaxes in self._axes:
+                    self.model.active_index = self._axes.index(event.inaxes)
+                    self.active_subplot_changed.emit(self.model.active_index)
+                self.shape_selected.emit(hit_shape)
+                self._sel_shape = hit_shape
+                self._handle_sig = None
+                self._begin_drag(hit_shape, "move", None, event)
+                self.canvas.draw_idle()
+                return
         if event.inaxes is not None and event.inaxes in self._axes:
             self.model.active_index = self._axes.index(event.inaxes)
             self.active_subplot_changed.emit(self.model.active_index)

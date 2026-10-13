@@ -378,6 +378,13 @@ class AxesStyleWidget(QWidget):
         cosmetic_body = QWidget()
         cform = QFormLayout(cosmetic_body)
         _tighten(cform)
+        self.bare_check = QCheckBox("Content only (hide axes, ticks, labels, title, legend, "
+                                    "background)")
+        self.bare_check.setToolTip(
+            "Show only what is drawn inside this subplot -- e.g. just an image or picture "
+            "with its objects. With every subplot of a sheet content-only the margins go too.")
+        self.bare_check.toggled.connect(self._push)
+        cform.addRow("", self.bare_check)
         self.tick_spin = _spin(2.0, 40.0); self.tick_spin.valueChanged.connect(self._push)
         cform.addRow("Tick label size:", self.tick_spin)
         self.title_fs_spin = _spin(4.0, 48.0); self.title_fs_spin.valueChanged.connect(self._push)
@@ -484,6 +491,7 @@ class AxesStyleWidget(QWidget):
             self.tick_spin.setValue(sub.tick_label_size)
             self.title_fs_spin.setValue(sub.title_fontsize)
             self.label_fs_spin.setValue(sub.xlabel_fontsize)
+            self.bare_check.setChecked(bool(sub.bare))
             self.face_btn.setColor(sub.face_color)
             self.face_alpha_spin.setValue(sub.face_alpha)
             self.spine_btn.setColor(sub.spine_color)
@@ -549,6 +557,7 @@ class AxesStyleWidget(QWidget):
         s.xlabel_fontsize = s.ylabel_fontsize = self.label_fs_spin.value()
         s.face_color = self.face_btn.color()
         s.face_alpha = self.face_alpha_spin.value()
+        s.bare = self.bare_check.isChecked()
         s.spine_color = self.spine_btn.color()
         s.spine_width = self.spine_width_spin.value()
         s.spine_style = self.spine_style_combo.currentText()
@@ -1381,6 +1390,20 @@ class ShapeStyleWidget(QWidget):
         self.angle_spin.setSingleStep(5.0)
         self.angle_spin.valueChanged.connect(self._push)
         form.addRow("Rotation (deg):", self.angle_spin)
+        self.scale_x_spin = QDoubleSpinBox()
+        self.scale_y_spin = QDoubleSpinBox()
+        for sp in (self.scale_x_spin, self.scale_y_spin):
+            sp.setRange(0.01, 100.0)
+            sp.setDecimals(3)
+            sp.setSingleStep(0.1)
+            sp.setValue(1.0)
+        self.scale_x_spin.valueChanged.connect(self._on_scale_x)
+        self.scale_y_spin.valueChanged.connect(self._push)
+        self.scale_link = QCheckBox("Keep proportions")
+        self.scale_link.setChecked(True)
+        form.addRow("Scale factor (width):", self.scale_x_spin)
+        form.addRow("Scale factor (height):", self.scale_y_spin)
+        form.addRow("", self.scale_link)
 
         self.text_edit = QLineEdit()
         self.text_edit.textEdited.connect(self._push)
@@ -1497,6 +1520,19 @@ class ShapeStyleWidget(QWidget):
     # -- host / colormaps ----------------------------------------------------------
     def set_host(self, host):
         self._host = host
+
+    def _on_scale_x(self, value):
+        if self._loading:
+            return
+        if self.scale_link.isChecked() and self._ref is not None:
+            old_x = float(self._ref.scale_x or 1.0)
+            ratio = value / old_x if old_x else 1.0
+            self._loading = True
+            try:
+                self.scale_y_spin.setValue(float(self._ref.scale_y or 1.0) * ratio)
+            finally:
+                self._loading = False
+        self._push()
 
     def _edit_asset(self):
         if self._ref is not None and self._host is not None:
@@ -1641,7 +1677,11 @@ class ShapeStyleWidget(QWidget):
         self._set_row_visible(self.edge_btn, not pic)
         self._set_row_visible(self.style_combo, not pic and kind != "text")
         self._set_row_visible(self.width_spin, not pic and kind != "text")
-        self._set_row_visible(self.angle_spin, kind in ("rect", "ellipse", "text"))
+        self._set_row_visible(self.angle_spin, kind in ("rect", "ellipse", "text", "picture"))
+        boxed = kind in ("rect", "ellipse", "picture", "xspan", "yspan")
+        self._set_row_visible(self.scale_x_spin, boxed and kind != "yspan")
+        self._set_row_visible(self.scale_y_spin, boxed and kind != "xspan")
+        self.scale_link.setVisible(kind in ("rect", "ellipse", "picture"))
         self._set_row_visible(self.text_edit, kind == "text")
         self._set_row_visible(self.fontsize_spin, kind == "text")
         self._set_row_visible(self.arrow_combo, kind == "arrow")
@@ -1673,6 +1713,8 @@ class ShapeStyleWidget(QWidget):
             for k, e in self.geom_edits.items():
                 e.setText(f"{getattr(ref, k):g}")
             self.angle_spin.setValue(float(ref.angle))
+            self.scale_x_spin.setValue(float(ref.scale_x or 1.0))
+            self.scale_y_spin.setValue(float(ref.scale_y or 1.0))
             self.text_edit.setText(ref.text)
             self.fontsize_spin.setValue(float(ref.fontsize))
             self.keep_check.setChecked(bool(ref.keep_aspect))
@@ -1710,6 +1752,7 @@ class ShapeStyleWidget(QWidget):
             return
         from .model import FILL_MODES, SHAPE_COORDS
         r = self._ref
+        old_geom = r.geom()
         r.name = self.name_edit.text()
         r.enabled = self.enabled_check.isChecked()
         r.coords = SHAPE_COORDS[max(0, self.coords_combo.currentIndex())]
@@ -1719,6 +1762,8 @@ class ShapeStyleWidget(QWidget):
             except ValueError:
                 pass
         r.angle = self.angle_spin.value()
+        r.scale_x = self.scale_x_spin.value()
+        r.scale_y = self.scale_y_spin.value()
         r.text = self.text_edit.text()
         r.keep_aspect = self.keep_check.isChecked()
         r.fontsize = self.fontsize_spin.value()
@@ -1738,6 +1783,9 @@ class ShapeStyleWidget(QWidget):
         r.grad_cy = self.grad_cy_spin.value()
         r.grad_radius = self.grad_r_spin.value()
         self._update_visibility()
+        hook = getattr(self._host, "shape_geometry_edited", None)
+        if hook is not None and r.geom() != old_geom:
+            hook(r, old_geom)             # children of this object follow
         self.changed.emit()
 
 

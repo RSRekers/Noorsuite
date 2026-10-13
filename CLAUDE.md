@@ -620,6 +620,21 @@ title/x_label/y_label + trace labels).
   stops' own opacity. Text goes through a mathtext check (a stray `$` must not kill the canvas).
 - Objects come in through the `organize` payload (`shapes`, `clear_shapes`; `apply_sheet_annotations`, one
   implementation for GUI and offline). Client: `add_shape`, `clear_shapes`.
+- Hierarchy: `ShapeRef.shape_id` / `parent_id`; `SubplotModel.children_of / descendants / depth_of /
+  set_parent / remove_shape`. Moving a root carries its descendants: `model.apply_group_transform(child,
+  old_geom, new_geom, fwd, inv)` (geom = `ShapeRef.geom()` = effective centre/size/angle; `fwd`/`inv` map
+  to display pixels so rotations stay rotations). Numeric edits call `host.shape_geometry_edited`, canvas
+  drags do the same inside `PlotSheet`. `scale_x/scale_y` multiply the box around its centre
+  (`ShapeRef.bounds()` is the *effective* box -- never use raw x0..x1 for drawing).
+- Rotation of rect/ellipse/picture is applied in **display space** (`sheet._DynRot`, composed as
+  `tf + _DynRot(tf, cx, cy, angle)`), so what the mouse rotates is what is drawn on any axes scales.
+- Canvas editing (`PlotSheet`): `set_selected_shape` -> figure-level handle artists placed in `_on_draw`
+  (signature-checked, hidden during exports); press on a handle / object starts `_drag`
+  (move | scale | rotate | point), motion re-renders throttled (~25 fps) from the drag-start snapshot,
+  release emits `shape_edited`. `shape_selected` selects the entry in the layer list. Never edit a
+  drag from the *current* model state -- always `_restore(start)` first (idempotent).
+- `SubplotModel.bare` ("content only"): `set_axis_off`, no title/legend/face; `PlotSheet._layout()`
+  replaces every `tight_layout()` call and removes all margins when every subplot is bare.
 - `AssetModel` (`ProjectModel.assets`, base64 in the JSON) = imported SVG/PDF/PNG/JPG; `assets.py` finds
   Inkscape, writes the working file `~/.noorsuite/assets/<slug>-<id>.<ext>`, converts (`export_for_latex`:
   SVG -> PDF via Inkscape CLI, QtSvg fallback) and rasterises (`raster`, cached by fingerprint).

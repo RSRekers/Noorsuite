@@ -91,11 +91,14 @@ def _heatmap_style(cmap, reverse_cmap, vmin, vmax, bins, boundaries, colorbar, i
 
 
 def _organize_payload(title, tags, notes, folder, subplot, subplot_title, x_label,
-                      y_label, x_tick_labels=None, y_tick_labels=None) -> dict:
+                      y_label, x_tick_labels=None, y_tick_labels=None,
+                      content_only=None) -> dict:
     sub = {k: v for k, v in (("title", subplot_title), ("x_label", x_label),
                              ("y_label", y_label),
                              ("x_tick_labels", format_tick_labels(x_tick_labels)),
                              ("y_tick_labels", format_tick_labels(y_tick_labels))) if v}
+    if content_only is not None:
+        sub["bare"] = bool(content_only)
     return {"name": title or "", "tags": list(tags or []), "notes": notes or "",
             "folder": folder or "", "subplots": {int(subplot): sub} if sub else {}}
 
@@ -338,7 +341,8 @@ class SciSuiteClient:
     def show_image(self, data, *, name=None, axis_names=None, sheet=None, subplot=0,
                    axes=(-2, -1), new_sheet=False, style=None, title=None, tags=None,
                    notes=None, folder=None, subplot_title=None, x_label=None,
-                   y_label=None, x_tick_labels=None, y_tick_labels=None):
+                   y_label=None, x_tick_labels=None, y_tick_labels=None,
+                   content_only=None):
         """Register (if given an array) and place an image on a sheet subplot.
 
         ``axes`` are the two axes to display as (rows, cols); negatives allowed.
@@ -367,7 +371,7 @@ class SciSuiteClient:
             "image_style": dict(style or {}),
             "organize": _organize_payload(title, tags, notes, folder, subplot,
                                           subplot_title, x_label, y_label,
-                                          x_tick_labels, y_tick_labels),
+                                          x_tick_labels, y_tick_labels, content_only),
         })
 
     def list_images(self) -> pd.DataFrame:
@@ -472,12 +476,15 @@ class SciSuiteClient:
 
     def organize_sheet(self, sheet, *, title=None, tags=None, notes=None, folder=None,
                        subplot=0, subplot_title=None, x_label=None, y_label=None,
-                       replace_notes=False, x_tick_labels=None, y_tick_labels=None):
+                       replace_notes=False, x_tick_labels=None, y_tick_labels=None,
+                       content_only=None):
         """Name / tag / annotate / file an existing sheet (by id or name). Tags are merged
         in, notes appended (``replace_notes=True`` overwrites), ``folder`` moves it into
-        that folder path, creating folders as needed."""
+        that folder path, creating folders as needed. ``content_only=True`` hides the
+        subplot's axes, ticks, labels, title, legend and background (just the drawn content,
+        e.g. an image or picture)."""
         org = _organize_payload(title, tags, notes, folder, subplot, subplot_title,
-                                x_label, y_label, x_tick_labels, y_tick_labels)
+                                x_label, y_label, x_tick_labels, y_tick_labels, content_only)
         org["replace_notes"] = replace_notes
         return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet",
                                "target": sheet, **org})
@@ -485,7 +492,7 @@ class SciSuiteClient:
     def add_shape(self, sheet, kind="rect", *, subplot=0, x0=None, x1=None, y0=None, y1=None,
                   text=None, coords="data", position="front", name=None, fill=None,
                   colors=None, stops=None, cmap=None, gradient_angle=None, center=None,
-                  radius=None, asset=None, **style):
+                  radius=None, asset=None, parent=None, scale=None, **style):
         """Draw an object on a subplot of an existing sheet (by id or name).
 
         ``kind``: ``rect`` | ``ellipse`` | ``line`` | ``arrow`` | ``xspan`` (vertical band,
@@ -500,11 +507,20 @@ class SciSuiteClient:
         ``radius``. Other styles: ``edge_color``, ``line_width``, ``line_style``,
         ``alpha``, ``fill_alpha``, ``rotation``, ``fontsize``, ``arrow_head``.
 
+        ``scale=1.5`` (or ``scale_x`` / ``scale_y``) multiplies the size around the centre;
+        ``parent="<name of another object>"`` makes it move / rotate / scale along with that
+        object (its root).
+
         A picture: ``add_shape(sheet, "picture", asset="logo", x0=.., x1=.., y0=.., y1=..)``
         with a figure file pushed by :meth:`push_asset` (an SVG can then be edited in
         Inkscape from the GUI)."""
+        if scale is not None:
+            style.setdefault("scale_x", scale)
+            style.setdefault("scale_y", scale)
         spec = _shape_spec(kind, subplot, x0, x1, y0, y1, text, coords, position, name, fill,
                            colors, stops, cmap, gradient_angle, center, radius, style, asset)
+        if parent:
+            spec["parent"] = parent
         return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet", "target": sheet,
                                "shapes": [spec]})
 

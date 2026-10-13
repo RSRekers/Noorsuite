@@ -165,6 +165,11 @@ suite.add_shape(sid, "rect", coords="axes", x0=0.05, x1=0.3, y0=0.7, y1=0.95, cm
 suite.clear_shapes(sid)                              # remove all objects of a subplot
 ```
 
+Hierarchy / size / bare panels: `add_shape(..., parent="frame")` makes an object move, rotate and scale
+along with another one (its root); `scale=1.5` (or `scale_x` / `scale_y`) multiplies the size around the
+centre; `suite.organize_sheet(sid, content_only=True)` (also an argument of `show_image`) hides axes, ticks,
+labels, title, legend and background of the subplot so only an image / picture + objects remain.
+
 Kinds: `rect`, `ellipse`, `line`, `arrow`, `xspan` (vertical band), `yspan` (horizontal band), `text`,
 `picture`. Coordinates are data units; `coords="axes"` = 0..1 of the panel. `fill` is a colour, or
 `"linear"` / `"radial"` with `colors=[...]` (evenly spaced key colours), `stops=[(pos, colour, opacity)]`

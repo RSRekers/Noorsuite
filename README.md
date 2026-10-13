@@ -169,6 +169,15 @@ that category (`{"sig_S_cm": "sigma"}`). In the GUI: Axes tab -> *X / Y tick lab
   object to edit it: geometry in data or axes coordinates, outline, rotation, and a fill that is solid, a
   **linear or radial gradient** through any number of key colours with per-colour transparency (load a
   colormap's colours, or save yours as a colormap). From code: `suite.add_shape(...)`, see the skill.
+* **Direct manipulation**: click an object on the plot to select it - drag the body to **move**, a
+  corner handle to **scale** (Shift = keep proportions; pictures keep theirs), the round handle on top to
+  **rotate** (Shift = 15 degree steps). Line / arrow end points and band edges have their own handles.
+  The Object tab holds the same as numbers: position, rotation and **scale factors** (width / height).
+* **Hierarchy**: *Make child of...* pools objects under a root - children move, rotate and scale along with
+  it, are shown indented in the layer list and travel with it in the layer order.
+* **Content only** (Axes tab -> Cosmetics): hide axes, ticks, labels, title, legend and background of a
+  subplot so just the image / picture and its objects remain; when every subplot of a sheet is
+  content-only the margins go as well.
 * **Figure files** (SVG, PDF, PNG, JPG): *Figures* panel of a document -> *Add figure file...*; they are
   stored in the project. Insert with a click/drag (`\noorfile[width=..]{name}`); SVG is converted to a
   vector PDF by Inkscape (or Qt as a fallback). **Double-click the figure in the PDF preview (or the

@@ -789,17 +789,22 @@ class ShapeRef:
     start and end, ``xspan`` only x0/x1, ``yspan`` only y0/y1, ``text`` the anchor x0,y0.
     ``layer_pos`` is where it sits in the subplot's stack (see ``SubplotModel.stack``)."""
 
-    _FIELDS = ("kind", "name", "enabled", "coords", "x0", "y0", "x1", "y1", "angle",
+    _FIELDS = ("kind", "name", "shape_id", "parent_id", "scale_x", "scale_y", "enabled",
+               "coords", "x0", "y0", "x1", "y1", "angle",
                "edge_color", "line_width", "line_style", "alpha", "fill", "fill_color",
                "fill_alpha", "fill_mode", "grad_stops", "grad_angle", "grad_cx", "grad_cy",
                "grad_radius", "grad_reverse", "text", "fontsize", "arrow_head", "asset_id",
                "keep_aspect", "layer_pos")
     # everything settable through a style / geometry payload (all but the kind)
-    STYLE_FIELDS = tuple(f for f in _FIELDS if f not in ("kind", "layer_pos"))
+    STYLE_FIELDS = tuple(f for f in _FIELDS if f not in ("kind", "layer_pos", "shape_id"))
 
     def __init__(self, kind="rect", name=""):
         self.kind = kind if kind in SHAPE_KINDS else "rect"
         self.name = name
+        self.shape_id = _new_id()         # stable handle for parent_id
+        self.parent_id = ""               # "" -> a root; else the shape_id it moves along with
+        self.scale_x = 1.0                # scale factors applied around the object's centre
+        self.scale_y = 1.0
         self.enabled = True
         self.coords = "data"
         self.x0, self.y0, self.x1, self.y1 = 0.0, 0.0, 1.0, 1.0
@@ -837,9 +842,18 @@ class ShapeRef:
         return self.kind in FILLABLE_KINDS and bool(self.fill)
 
     def bounds(self) -> tuple:
-        """``(left, bottom, right, top)`` with the corners put in order."""
-        return (min(self.x0, self.x1), min(self.y0, self.y1),
-                max(self.x0, self.x1), max(self.y0, self.y1))
+        """``(left, bottom, right, top)`` of the *effective* box: corners put in order and
+        the scale factors applied around the centre."""
+        l, b = min(self.x0, self.x1), min(self.y0, self.y1)
+        r, t = max(self.x0, self.x1), max(self.y0, self.y1)
+        sx, sy = float(self.scale_x or 1.0), float(self.scale_y or 1.0)
+        cx, cy, hw, hh = (l + r) / 2.0, (b + t) / 2.0, (r - l) / 2.0 * sx, (t - b) / 2.0 * sy
+        return (cx - hw, cy - hh, cx + hw, cy + hh)
+
+    def geom(self) -> tuple:
+        """``(cx, cy, w, h, angle)`` of the effective box (what group moves track)."""
+        l, b, r, t = self.bounds()
+        return ((l + r) / 2.0, (b + t) / 2.0, r - l, t - b, float(self.angle))
 
     def apply_style(self, style: dict | None) -> None:
         for k, v in (style or {}).items():
@@ -860,6 +874,58 @@ class ShapeRef:
                 setattr(s, f, d[f])
         s.grad_stops = normalize_stops(s.grad_stops) or normalize_stops(["#ffffff", "#000000"])
         return s
+
+
+def apply_group_transform(child: ShapeRef, old: tuple, new: tuple, fwd=None, inv=None) -> None:
+    """Carry ``child`` along when its root changed from ``old`` to ``new`` (both
+    :meth:`ShapeRef.geom` tuples): translation, rotation and the size ratio are applied
+    about the root's centre. ``fwd`` / ``inv`` map the shapes' coordinates to a uniform
+    (display) space and back, so a rotation stays a true rotation on axes with different
+    scales; without them the shapes' own coordinates are used."""
+    import math
+    f = fwd or (lambda p: (float(p[0]), float(p[1])))
+    g = inv or (lambda p: (float(p[0]), float(p[1])))
+    ocx, ocy, ow, oh, oa = old
+    ncx, ncy, nw, nh, na = new
+    sx = (nw / ow) if ow else 1.0
+    sy = (nh / oh) if oh else 1.0
+    if not ow:
+        sx = 1.0
+    if not oh:
+        sy = 1.0
+    oc, nc = f((ocx, ocy)), f((ncx, ncy))
+    ra, rb = math.radians(-oa), math.radians(na)
+
+    def mp(p):
+        dx, dy = f(p)[0] - oc[0], f(p)[1] - oc[1]
+        x = dx * math.cos(ra) - dy * math.sin(ra)
+        y = dx * math.sin(ra) + dy * math.cos(ra)
+        x, y = x * sx, y * sy
+        qx = x * math.cos(rb) - y * math.sin(rb) + nc[0]
+        qy = x * math.sin(rb) + y * math.cos(rb) + nc[1]
+        return g((qx, qy))
+
+    k = child.kind
+    if k in ("line", "arrow"):
+        child.x0, child.y0 = mp((child.x0, child.y0))
+        child.x1, child.y1 = mp((child.x1, child.y1))
+    elif k == "xspan":
+        a, b = mp((child.x0, ocy))[0], mp((child.x1, ocy))[0]
+        child.x0, child.x1 = a, b
+    elif k == "yspan":
+        a, b = mp((ocx, child.y0))[1], mp((ocx, child.y1))[1]
+        child.y0, child.y1 = a, b
+    else:                                   # rect / ellipse / picture / text
+        cx, cy = (child.x0 + child.x1) / 2.0, (child.y0 + child.y1) / 2.0
+        qx, qy = mp((cx, cy))
+        hw, hh = abs(child.x1 - child.x0) / 2.0, abs(child.y1 - child.y0) / 2.0
+        child.x0, child.x1, child.y0, child.y1 = qx - hw, qx + hw, qy - hh, qy + hh
+        # the child's own axes may be turned by ~90 deg relative to the root's
+        rel = (child.angle - oa) % 180.0
+        swap = 45.0 < rel < 135.0
+        child.scale_x = float(child.scale_x) * (sy if swap else sx)
+        child.scale_y = float(child.scale_y) * (sx if swap else sy)
+        child.angle = float(child.angle) + (na - oa)
 
 
 def make_shape(kind, geometry=None, style=None) -> ShapeRef:
@@ -888,7 +954,7 @@ class SubplotModel:
                "spine_color", "spine_width", "spine_style",
                "title_fontsize", "xlabel_fontsize", "ylabel_fontsize",
                "legend_visible", "legend_loc", "legend_frame", "legend_fontsize",
-               "legend_ncol")
+               "legend_ncol", "bare")
 
     def __init__(self, title="Plot"):
         self.title = title
@@ -948,6 +1014,53 @@ class SubplotModel:
         self.legend_frame = True
         self.legend_fontsize = 8.0
         self.legend_ncol = 1
+        # "content only": no axes, ticks, labels, title, legend or background -- just what
+        # is drawn inside (an image, a picture, objects, traces)
+        self.bare = False
+
+    # -- object hierarchy -----------------------------------------------------------
+    def shape_by_id(self, shape_id):
+        return next((s for s in self.shapes if s.shape_id == shape_id), None) \
+            if shape_id else None
+
+    def parent_of(self, shape):
+        return self.shape_by_id(shape.parent_id)
+
+    def children_of(self, shape) -> list:
+        return [s for s in self.shapes if s.parent_id == shape.shape_id and s is not shape]
+
+    def descendants(self, shape) -> list:
+        out, todo = [], list(self.children_of(shape))
+        while todo:
+            s = todo.pop(0)
+            if s not in out:
+                out.append(s)
+                todo.extend(self.children_of(s))
+        return out
+
+    def depth_of(self, shape) -> int:
+        d, seen, cur = 0, {id(shape)}, self.parent_of(shape)
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            d += 1
+            cur = self.parent_of(cur)
+        return d
+
+    def set_parent(self, shape, parent) -> bool:
+        """Make ``shape`` move along with ``parent`` (``None`` -> a root). Refuses a cycle."""
+        if parent is None:
+            shape.parent_id = ""
+            return True
+        if parent is shape or parent in self.descendants(shape):
+            return False
+        shape.parent_id = parent.shape_id
+        return True
+
+    def remove_shape(self, shape) -> None:
+        """Delete a shape; its children move up to its parent."""
+        for c in self.children_of(shape):
+            c.parent_id = shape.parent_id
+        self.shapes = [s for s in self.shapes if s is not shape]
 
     # -- one z-ordered stack of traces and shapes (index 0 = back) ------------------
     def stack(self) -> list:
@@ -1007,6 +1120,10 @@ class SubplotModel:
                 setattr(s, f, d[f])
         s.traces = [TraceRef.from_dict(t) for t in d.get("traces", [])]
         s.shapes = [ShapeRef.from_dict(x) for x in d.get("shapes", [])]
+        known = {sh.shape_id for sh in s.shapes}
+        for sh in s.shapes:                 # a parent that no longer exists -> root
+            if sh.parent_id and sh.parent_id not in known:
+                sh.parent_id = ""
         img = d.get("image")
         s.image = ImageRef.from_dict(img) if img else None
         return s
@@ -1311,6 +1428,8 @@ def apply_sheet_annotations(sm, payload: dict, assets=None) -> None:
             for f in ("title", "x_label", "y_label", "x_tick_labels", "y_tick_labels"):
                 if fields.get(f):
                     setattr(sm.subplots[i], f, fields[f])
+            if "bare" in fields:
+                sm.subplots[i].bare = bool(fields["bare"])
     # drawn objects: {"subplot": i, "kind", "geometry": {x0..}, "style": {...},
     #                 "position": "front" | "back"}; "clear_shapes": [subplot indices]
     for i in payload.get("clear_shapes") or []:
@@ -1329,6 +1448,12 @@ def apply_sheet_annotations(sm, payload: dict, assets=None) -> None:
             sh.asset_id = hit.asset_id if hit is not None else str(key)
             sh.kind = "picture"
             sh.fill = False
+        if spec.get("parent"):                          # moves along with that object
+            key = spec["parent"]
+            par = next((s for s in sub.shapes
+                        if key in (s.shape_id, s.name) and s is not sh), None)
+            if par is not None:
+                sh.parent_id = par.shape_id
         sh.layer_pos = 0 if spec.get("position") == "back" else len(sub.traces)
         if spec.get("position") == "back":
             sub.shapes.insert(0, sh)

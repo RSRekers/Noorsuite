@@ -48,6 +48,7 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_ASSET,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
                   ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
 from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
+                    apply_group_transform,
                     REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
                     SPLIT_LAYOUTS, ColorMap, DataObject, DocumentModel, ImageObject, ImageRef,
                     ProjectModel, SHAPE_KIND_LABELS, SHAPE_KINDS, ShapeRef, SheetModel,
@@ -1022,6 +1023,20 @@ class SciSuiteWindow(QMainWindow):
         self.dup_object_btn.clicked.connect(self._duplicate_selected_shapes)
         add_row.addWidget(self.dup_object_btn)
         tb.addLayout(add_row)
+        tree_row = QHBoxLayout()
+        self.parent_btn = QPushButton("Make child of...")
+        self.parent_btn.setToolTip(
+            "Pool the selected objects under another object: they then move, rotate and "
+            "scale along with it (and travel with it in the layer order).")
+        self._parent_menu = QMenu(self.parent_btn)
+        self._parent_menu.aboutToShow.connect(self._fill_parent_menu)
+        self.parent_btn.setMenu(self._parent_menu)
+        tree_row.addWidget(self.parent_btn)
+        self.unparent_btn = QPushButton("Detach")
+        self.unparent_btn.setToolTip("Make the selected objects independent again")
+        self.unparent_btn.clicked.connect(lambda: self._set_parent_of_selection(None))
+        tree_row.addWidget(self.unparent_btn)
+        tb.addLayout(tree_row)
         rm_btn = QPushButton("Remove selected")
         rm_btn.clicked.connect(self._remove_selected_subplot_traces)
         tb.addWidget(rm_btn)
@@ -1620,6 +1635,8 @@ class SciSuiteWindow(QMainWindow):
             return None
         ps = PlotSheet(sm)
         ps.assets = self.assets
+        ps.shape_selected.connect(self._on_canvas_shape_selected)
+        ps.shape_edited.connect(self._on_canvas_shape_edited)
         ps.active_subplot_changed.connect(self.on_subplot_selection_changed)
         ps.element_double_clicked.connect(self.open_element_editor)
         ps.element_right_clicked.connect(self._on_canvas_right_click)
@@ -1905,7 +1922,10 @@ class SciSuiteWindow(QMainWindow):
             sub = sm.get_active_subplot()
             for i, ref in enumerate(sub.stack()):
                 if isinstance(ref, ShapeRef):
-                    item = QListWidgetItem(f"\u25a1  {ref.display_label}")
+                    depth = sub.depth_of(ref)
+                    item = QListWidgetItem(
+                        ("    " * depth) + ("\u2514 " if depth else "") +
+                        f"\u25a1  {ref.display_label}")
                     item.setToolTip(f"object ({ref.kind}) - double-click on the plot to edit")
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     item.setCheckState(Qt.CheckState.Checked if ref.enabled
@@ -1966,9 +1986,13 @@ class SciSuiteWindow(QMainWindow):
     def _on_subplot_trace_selection(self):
         refs = self._selected_trace_refs()
         shapes = self._selected_shapes()
+        cs = self.current_sheet()
+        if cs is not None:
+            cs.set_selected_shape(shapes[0] if len(shapes) == 1 and not refs else None)
         if shapes and not refs:
             if len(shapes) == 1:
                 self.shape_widget.set_shape(shapes[0])
+                self._shape_geom_cache = {id(shapes[0]): shapes[0].geom()}
             self.inspector_tabs.setCurrentIndex(self._SHAPE_TAB)
             self.trace_broadcast_btn.setEnabled(False)
             self.combine_btn.setEnabled(False)
@@ -2022,7 +2046,7 @@ class SciSuiteWindow(QMainWindow):
         sub = sm.get_active_subplot()
         for ref in self._selected_layers():
             if isinstance(ref, ShapeRef):
-                sub.shapes = [s for s in sub.shapes if s is not ref]
+                sub.remove_shape(ref)
             else:
                 sub.remove_trace(ref)
         self._sync_subplot_trace_list(keep_selection=False)
@@ -2068,6 +2092,9 @@ class SciSuiteWindow(QMainWindow):
         sel = {id(r) for r in self._selected_layers()}
         if not sel:
             return
+        for r in self._selected_layers():            # a root brings its children with it
+            if isinstance(r, ShapeRef):
+                sel |= {id(c) for c in sub.descendants(r)}
         if mode == "front":
             new = [r for r in stack if id(r) not in sel] + [r for r in stack if id(r) in sel]
         elif mode == "back":
@@ -2125,6 +2152,69 @@ class SciSuiteWindow(QMainWindow):
         self.render_current_sheet()
         self._refresh_ipc_snapshot()
 
+    def _fill_parent_menu(self):
+        self._parent_menu.clear()
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        sub = sm.get_active_subplot()
+        picked = self._selected_shapes()
+        blocked = {id(s) for s in picked} | {id(d) for s in picked for d in sub.descendants(s)}
+        cands = [s for s in sub.shapes if id(s) not in blocked]
+        if not picked or not cands:
+            self._parent_menu.addAction("(select objects first, and have others to attach to)") \
+                .setEnabled(False)
+        for c in cands:
+            self._parent_menu.addAction(c.display_label).triggered.connect(
+                lambda _=False, p=c: self._set_parent_of_selection(p))
+
+    def _set_parent_of_selection(self, parent):
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        sub = sm.get_active_subplot()
+        for sh in self._selected_shapes():
+            sub.set_parent(sh, parent)
+        # keep a root's family adjacent in the stack: put the children right after it
+        if parent is not None:
+            stack = [r for r in sub.stack() if r not in self._selected_shapes()]
+            at = stack.index(parent) + 1
+            for sh in self._selected_shapes():
+                stack.insert(at, sh)
+                at += 1
+            keep = {id(s) for s in self._selected_shapes()}
+            self._adopt_stack(sm, sub, stack, keep)
+        else:
+            self._sync_subplot_trace_list()
+        self._refresh_ipc_snapshot()
+
+    def shape_geometry_edited(self, shape, old_geom):
+        """Host hook of the object editor: numeric edits move the object's children too."""
+        sm = self._active_sheet_model()
+        cs = self.current_sheet()
+        if sm is None:
+            return
+        for sub in sm.subplots:
+            if any(s is shape for s in sub.shapes):
+                kids = sub.descendants(shape)
+                if not kids:
+                    return
+                fwd = inv = None
+                if cs is not None:
+                    fwd, inv = cs.shape_display_fns(shape)
+                new = shape.geom()
+                for k in kids:
+                    apply_group_transform(k, old_geom, new, fwd, inv)
+                return
+
+    def _on_canvas_shape_selected(self, ref):
+        self._select_layer(ref)
+
+    def _on_canvas_shape_edited(self, ref):
+        self.shape_widget.set_shape(ref)
+        self._refresh_ipc_snapshot()
+        self._notify_documents()
+
     def _fill_picture_menu(self):
         self._pic_menu.clear()
         if not self.assets:
@@ -2158,13 +2248,23 @@ class SciSuiteWindow(QMainWindow):
         if sm is None:
             return
         sub = sm.get_active_subplot()
-        new = []
-        for sh in self._selected_shapes():
+        new, idmap = [], {}
+        picked = self._selected_shapes()
+        todo = list(picked)
+        for sh in picked:                           # a root is copied with its children
+            todo += [d for d in sub.descendants(sh) if d not in todo]
+        for sh in todo:
             c = ShapeRef.from_dict(sh.to_dict())
-            c.name = (sh.name or sh.display_label) + " (copy)"
+            c.shape_id = _new_id()
+            idmap[sh.shape_id] = c.shape_id
+            if sh in picked:
+                c.name = (sh.name or sh.display_label) + " (copy)"
             c.layer_pos = sh.layer_pos
             sub.shapes.insert(sub.shapes.index(sh) + 1, c)
             new.append(c)
+        for c in new:                               # copies hang below the copied parent
+            if c.parent_id in idmap:
+                c.parent_id = idmap[c.parent_id]
         if not new:
             return
         self._sync_subplot_trace_list(keep_selection=False)
@@ -2475,7 +2575,7 @@ class SciSuiteWindow(QMainWindow):
             return
         for sub in sm.subplots:
             if isinstance(ref, ShapeRef) and ref in sub.shapes:
-                sub.shapes = [s for s in sub.shapes if s is not ref]
+                sub.remove_shape(ref)
                 break
             if ref in sub.traces:
                 sub.remove_trace(ref)
