@@ -99,6 +99,55 @@ def _organize_payload(title, tags, notes, folder, subplot, subplot_title, x_labe
             "folder": folder or "", "subplots": {int(subplot): sub} if sub else {}}
 
 
+_SHAPE_KINDS = ("rect", "ellipse", "line", "arrow", "xspan", "yspan", "text")
+_SHAPE_ALIASES = {"rectangle": "rect", "box": "rect", "circle": "ellipse", "oval": "ellipse",
+                  "hband": "yspan", "vband": "xspan", "span_x": "xspan", "span_y": "yspan",
+                  "label": "text", "annotation": "text"}
+
+
+def _shape_spec(kind, subplot, x0, x1, y0, y1, text, coords, position, name, fill, colors,
+                stops, cmap, gradient_angle, center, radius, style) -> dict:
+    """One ``shapes`` entry of an organize payload (see ``model.apply_sheet_annotations``)."""
+    kind = _SHAPE_ALIASES.get(str(kind).lower(), str(kind).lower())
+    if kind not in _SHAPE_KINDS:
+        raise ValueError(f"unknown shape kind {kind!r}; use one of {_SHAPE_KINDS}")
+    geom = {k: v for k, v in (("x0", x0), ("x1", x1), ("y0", y0), ("y1", y1)) if v is not None}
+    st = dict(style)
+    if text is not None:
+        st["text"] = text
+    st["coords"] = coords
+    if fill in (False, "none"):
+        st["fill"] = False
+    elif fill in ("solid", "linear", "radial"):
+        st["fill"], st["fill_mode"] = True, fill
+    elif fill is True:
+        st["fill"] = True
+    elif isinstance(fill, str):                         # a colour
+        st["fill"], st["fill_color"] = True, fill
+    if cmap and not (stops or colors):
+        try:
+            from matplotlib import colormaps
+            from matplotlib.colors import to_hex
+            cm = colormaps[cmap]
+            colors = [to_hex(cm(t)) for t in (0.0, 0.25, 0.5, 0.75, 1.0)]
+        except Exception as exc:
+            raise ValueError(f"unknown colormap {cmap!r}") from exc
+    if stops or colors:
+        st["grad_stops"] = [list(s) for s in stops] if stops else list(colors)
+        if fill not in ("linear", "radial"):
+            st["fill"], st["fill_mode"] = True, "linear"
+    if gradient_angle is not None:
+        st["grad_angle"] = gradient_angle
+    if center is not None:
+        st["grad_cx"], st["grad_cy"] = center
+    if radius is not None:
+        st["grad_radius"] = radius
+    if "rotation" in st:
+        st["angle"] = st.pop("rotation")
+    return {"subplot": int(subplot), "kind": kind, "geometry": geom, "style": st,
+            "position": position, "name": name or ""}
+
+
 class SciSuiteClient:
     """Client API for interactive use in Jupyter notebooks."""
 
@@ -424,6 +473,33 @@ class SciSuiteClient:
         org["replace_notes"] = replace_notes
         return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet",
                                "target": sheet, **org})
+
+    def add_shape(self, sheet, kind="rect", *, subplot=0, x0=None, x1=None, y0=None, y1=None,
+                  text=None, coords="data", position="front", name=None, fill=None,
+                  colors=None, stops=None, cmap=None, gradient_angle=None, center=None,
+                  radius=None, **style):
+        """Draw an object on a subplot of an existing sheet (by id or name).
+
+        ``kind``: ``rect`` | ``ellipse`` | ``line`` | ``arrow`` | ``xspan`` (vertical band,
+        ``x0``..``x1``) | ``yspan`` (horizontal band, ``y0``..``y1``) | ``text``. Corners /
+        end points are ``x0, y0, x1, y1`` in data units (``coords="axes"`` = 0..1 of the
+        panel). ``position`` puts it ``"front"`` (default) or ``"back"`` in the layer stack.
+
+        Fill: ``fill="#ffcc00"`` solid colour, ``fill="linear" | "radial"`` plus a gradient
+        through ``colors=["#fff", "#f00", ...]`` (evenly spaced key colours),
+        ``stops=[(0, "#fff", 1.0), (0.6, "#f00", 0.5), (1, "#00f", 0.0)]`` (position, colour,
+        opacity) or ``cmap="viridis"``; ``gradient_angle`` (deg) / ``center=(0.5, 0.5)`` /
+        ``radius``. Other styles: ``edge_color``, ``line_width``, ``line_style``,
+        ``alpha``, ``fill_alpha``, ``rotation``, ``fontsize``, ``arrow_head``."""
+        spec = _shape_spec(kind, subplot, x0, x1, y0, y1, text, coords, position, name, fill,
+                           colors, stops, cmap, gradient_angle, center, radius, style)
+        return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet", "target": sheet,
+                               "shapes": [spec]})
+
+    def clear_shapes(self, sheet, subplot=0):
+        """Remove every drawn object from one subplot of a sheet."""
+        return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet", "target": sheet,
+                               "clear_shapes": [int(subplot)]})
 
     def annotate_data(self, key, *, tags=None, notes=None, replace_notes=False):
         """Add tags / notes to an existing data object (by id or name)."""

@@ -703,6 +703,173 @@ class ImageRef:
         return ref
 
 
+# ---------------------------------------------------------------------------
+# Shapes: lines, arrows, rectangles, ellipses, text and highlight bands drawn on a subplot.
+# They share ONE z-ordered stack with the traces (SubplotModel.stack()).
+# ---------------------------------------------------------------------------
+SHAPE_KINDS = ["rect", "ellipse", "line", "arrow", "xspan", "yspan", "text"]
+SHAPE_KIND_LABELS = ["Rectangle", "Ellipse", "Line", "Arrow", "Vertical band (x range)",
+                     "Horizontal band (y range)", "Text"]
+SHAPE_COORDS = ["data", "axes"]
+SHAPE_COORD_LABELS = ["Data coordinates", "Axes fraction (0-1)"]
+FILL_MODES = ["solid", "linear", "radial"]
+FILL_MODE_LABELS = ["Solid", "Linear gradient", "Radial gradient"]
+# kinds that have an interior
+FILLABLE_KINDS = ("rect", "ellipse", "xspan", "yspan")
+
+
+def _hex_rgb(color) -> tuple:
+    """``"#rrggbb"`` / ``"#rgb"`` -> floats in 0..1 (the GUI only ever stores hex)."""
+    c = str(color or "#000000").strip().lstrip("#")
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    try:
+        return tuple(int(c[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        return (0.0, 0.0, 0.0)
+
+
+def normalize_stops(stops) -> list:
+    """Clean a gradient stop list to ``[[pos, "#hex", alpha], ...]`` sorted by position.
+    Accepts ``["#a", "#b"]`` (evenly spaced), ``[(pos, color)]`` or ``[(pos, color, alpha)]``."""
+    out = []
+    items = list(stops or [])
+    for i, s in enumerate(items):
+        if isinstance(s, str):
+            out.append([i / max(1, len(items) - 1), s, 1.0])
+            continue
+        try:
+            pos = float(s[0])
+            col = str(s[1])
+            alpha = float(s[2]) if len(s) > 2 else 1.0
+        except (TypeError, ValueError, IndexError):
+            continue
+        out.append([min(1.0, max(0.0, pos)), col, min(1.0, max(0.0, alpha))])
+    out.sort(key=lambda s: s[0])
+    return out
+
+
+def gradient_rgba(stops, mode="linear", angle=0.0, cx=0.5, cy=0.5, radius=0.5,
+                  n=192, reverse=False) -> np.ndarray:
+    """An ``(n, n, 4)`` float RGBA image (row 0 = bottom) of a linear or radial gradient
+    through ``stops`` (see :func:`normalize_stops`; colours *and* alpha are interpolated).
+
+    ``angle`` (degrees, 0 = left -> right, 90 = bottom -> top) drives the linear one;
+    ``cx, cy`` (0..1 within the shape's bounding box) and ``radius`` (fraction of the box
+    width, ``0.5`` = reaches the box edge) the radial one."""
+    st = normalize_stops(stops) or [[0.0, "#000000", 1.0], [1.0, "#ffffff", 1.0]]
+    if len(st) == 1:
+        st = [st[0], [1.0, st[0][1], st[0][2]]]
+    pos = np.array([s[0] for s in st])
+    rgb = np.array([_hex_rgb(s[1]) for s in st])
+    alpha = np.array([s[2] for s in st])
+    u = (np.arange(n) + 0.5) / n
+    uu, vv = np.meshgrid(u, u)                      # vv grows with the row = upwards
+    if mode == "radial":
+        t = np.hypot(uu - float(cx), vv - float(cy)) / max(1e-6, float(radius))
+    else:
+        a = np.deg2rad(float(angle))
+        ca, sa = np.cos(a), np.sin(a)
+        span = (abs(ca) + abs(sa)) or 1.0
+        t = ((uu - 0.5) * ca + (vv - 0.5) * sa) / span + 0.5
+    t = np.clip(t, 0.0, 1.0)
+    if reverse:
+        t = 1.0 - t
+    img = np.empty((n, n, 4))
+    for k in range(3):
+        img[..., k] = np.interp(t, pos, rgb[:, k])
+    img[..., 3] = np.interp(t, pos, alpha)
+    return img
+
+
+class ShapeRef:
+    """A drawn object on one subplot. Geometry is ``x0,y0`` / ``x1,y1`` in ``coords``
+    (``"data"`` follows the axes, ``"axes"`` is a 0..1 fraction of the panel):
+    rect / ellipse use them as two opposite corners of the bounding box, line / arrow as
+    start and end, ``xspan`` only x0/x1, ``yspan`` only y0/y1, ``text`` the anchor x0,y0.
+    ``layer_pos`` is where it sits in the subplot's stack (see ``SubplotModel.stack``)."""
+
+    _FIELDS = ("kind", "name", "enabled", "coords", "x0", "y0", "x1", "y1", "angle",
+               "edge_color", "line_width", "line_style", "alpha", "fill", "fill_color",
+               "fill_alpha", "fill_mode", "grad_stops", "grad_angle", "grad_cx", "grad_cy",
+               "grad_radius", "grad_reverse", "text", "fontsize", "arrow_head", "layer_pos")
+    # everything settable through a style / geometry payload (all but the kind)
+    STYLE_FIELDS = tuple(f for f in _FIELDS if f not in ("kind", "layer_pos"))
+
+    def __init__(self, kind="rect", name=""):
+        self.kind = kind if kind in SHAPE_KINDS else "rect"
+        self.name = name
+        self.enabled = True
+        self.coords = "data"
+        self.x0, self.y0, self.x1, self.y1 = 0.0, 0.0, 1.0, 1.0
+        self.angle = 0.0                  # rotation (deg) of a rect / ellipse about its centre
+        self.edge_color = "#d62728"
+        self.line_width = 1.5
+        self.line_style = "-"
+        self.alpha = 1.0                  # outline / text opacity
+        self.fill = True
+        self.fill_color = "#d62728"
+        self.fill_alpha = 0.2
+        self.fill_mode = "solid"          # solid | linear | radial
+        self.grad_stops = [[0.0, "#ffffff", 1.0], [1.0, "#d62728", 1.0]]
+        self.grad_angle = 0.0
+        self.grad_cx, self.grad_cy, self.grad_radius = 0.5, 0.5, 0.5
+        self.grad_reverse = False
+        self.text = "Text"
+        self.fontsize = 10.0
+        self.arrow_head = "->"            # matplotlib arrowstyle
+        self.layer_pos = 10 ** 6          # "above everything" until the stack is rebuilt
+
+    @property
+    def display_label(self) -> str:
+        if self.name:
+            return self.name
+        base = dict(zip(SHAPE_KINDS, SHAPE_KIND_LABELS)).get(self.kind, self.kind)
+        return f"{base}: {self.text[:24]}" if self.kind == "text" else base
+
+    @property
+    def is_filled(self) -> bool:
+        return self.kind in FILLABLE_KINDS and bool(self.fill)
+
+    def bounds(self) -> tuple:
+        """``(left, bottom, right, top)`` with the corners put in order."""
+        return (min(self.x0, self.x1), min(self.y0, self.y1),
+                max(self.x0, self.x1), max(self.y0, self.y1))
+
+    def apply_style(self, style: dict | None) -> None:
+        for k, v in (style or {}).items():
+            if k in self.STYLE_FIELDS and v is not None:
+                if k == "grad_stops":
+                    v = normalize_stops(v)
+                setattr(self, k, v)
+
+    def to_dict(self) -> dict:
+        return {f: ([list(s) for s in self.grad_stops] if f == "grad_stops"
+                    else getattr(self, f)) for f in self._FIELDS}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ShapeRef":
+        s = cls(d.get("kind", "rect"))
+        for f in cls._FIELDS:
+            if f in d and d[f] is not None and f != "kind":
+                setattr(s, f, d[f])
+        s.grad_stops = normalize_stops(s.grad_stops) or normalize_stops(["#ffffff", "#000000"])
+        return s
+
+
+def make_shape(kind, geometry=None, style=None) -> ShapeRef:
+    """Build a shape from plain dicts (``x0,y0,x1,y1`` ...) -- used by the GUI, the IPC
+    handler and :class:`~NoorSuite.offline.OfflineBackend`."""
+    s = ShapeRef(kind)
+    s.apply_style({**(geometry or {}), **(style or {})})
+    for f in ("x0", "y0", "x1", "y1"):
+        try:
+            setattr(s, f, float(getattr(s, f)))
+        except (TypeError, ValueError):
+            setattr(s, f, 0.0)
+    return s
+
+
 class SubplotModel:
     """Configuration for one panel / subplot within a sheet."""
 
@@ -750,6 +917,7 @@ class SubplotModel:
         self.grid_color = "#b0b0b0"
         self.grid_alpha = 0.5
         self.traces: list[TraceRef] = []
+        self.shapes: list["ShapeRef"] = []    # drawn objects; z-ordered together with traces
         self.image: "ImageRef | None" = None
 
         # Axis limits (None -> autoscale)
@@ -776,9 +944,53 @@ class SubplotModel:
         self.legend_fontsize = 8.0
         self.legend_ncol = 1
 
+    # -- one z-ordered stack of traces and shapes (index 0 = back) ------------------
+    def stack(self) -> list:
+        """Traces and shapes interleaved back-to-front. A shape sits above
+        ``min(layer_pos, len(traces))`` traces; shapes with the same position keep their
+        ``shapes`` order. The result is exactly the list shown in the GUI and drawn."""
+        out, n = [], len(self.traces)
+        by_pos: dict = {}
+        for sh in self.shapes:
+            by_pos.setdefault(max(0, min(int(sh.layer_pos), n)), []).append(sh)
+        for i in range(n + 1):
+            out.extend(by_pos.get(i, []))
+            if i < n:
+                out.append(self.traces[i])
+        return out
+
+    def set_stack(self, items) -> None:
+        """Adopt a (re)ordered stack: traces and shapes keep their relative order and every
+        shape remembers how many traces lie below it."""
+        items = list(items)
+        keep = {id(x) for x in self.traces} | {id(x) for x in self.shapes}
+        if {id(x) for x in items} != keep or len(items) != len(keep):
+            raise ValueError("stack must be a permutation of the current traces and shapes")
+        n_tr, traces, shapes = 0, [], []
+        for it in items:
+            if isinstance(it, ShapeRef):
+                it.layer_pos = n_tr
+                shapes.append(it)
+            else:
+                n_tr += 1
+                traces.append(it)
+        self.traces, self.shapes = traces, shapes
+
+    def remove_trace(self, ref) -> None:
+        """Delete a trace without letting the shapes above it slide down a layer."""
+        if ref not in self.traces:
+            return
+        i = self.traces.index(ref)
+        for sh in self.shapes:
+            if int(sh.layer_pos) > i:
+                sh.layer_pos = int(sh.layer_pos) - 1
+        del self.traces[i]
+
     def to_dict(self) -> dict:
         d = {f: getattr(self, f) for f in self._FIELDS}
         d["traces"] = [t.to_dict() for t in self.traces]
+        if self.shapes:
+            d["shapes"] = [sh.to_dict() for sh in self.shapes]
         d["image"] = self.image.to_dict() if self.image is not None else None
         return d
 
@@ -789,6 +1001,7 @@ class SubplotModel:
             if f in d and d[f] is not None:
                 setattr(s, f, d[f])
         s.traces = [TraceRef.from_dict(t) for t in d.get("traces", [])]
+        s.shapes = [ShapeRef.from_dict(x) for x in d.get("shapes", [])]
         img = d.get("image")
         s.image = ImageRef.from_dict(img) if img else None
         return s
@@ -1065,6 +1278,23 @@ def apply_sheet_annotations(sm, payload: dict) -> None:
             for f in ("title", "x_label", "y_label", "x_tick_labels", "y_tick_labels"):
                 if fields.get(f):
                     setattr(sm.subplots[i], f, fields[f])
+    # drawn objects: {"subplot": i, "kind", "geometry": {x0..}, "style": {...},
+    #                 "position": "front" | "back"}; "clear_shapes": [subplot indices]
+    for i in payload.get("clear_shapes") or []:
+        if 0 <= int(i) < len(sm.subplots):
+            sm.subplots[int(i)].shapes = []
+    for spec in payload.get("shapes") or []:
+        i = int(spec.get("subplot", 0))
+        if not 0 <= i < len(sm.subplots):
+            continue
+        sub = sm.subplots[i]
+        sh = make_shape(spec.get("kind", "rect"), spec.get("geometry"), spec.get("style"))
+        sh.name = spec.get("name") or sh.name
+        sh.layer_pos = 0 if spec.get("position") == "back" else len(sub.traces)
+        if spec.get("position") == "back":
+            sub.shapes.insert(0, sh)
+        else:
+            sub.shapes.append(sh)
 
 
 def tree_move_sheet(nodes: list, sheet_id: str, folder_path: list,

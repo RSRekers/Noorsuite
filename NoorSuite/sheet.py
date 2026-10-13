@@ -20,8 +20,8 @@ from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                              QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget)
 
-from .model import (INDEX_COL, ImageRef, SheetModel, apply_tick_labels,
-                    heatmap_band_edges, heatmap_iso_levels, resolve_ticks)
+from .model import (INDEX_COL, ImageRef, ShapeRef, SheetModel, apply_tick_labels,
+                    gradient_rgba, heatmap_band_edges, heatmap_iso_levels, resolve_ticks)
 from .widgets import CollapsibleSection
 
 _ACTIVE_ACCENT = "#ff7f0e"
@@ -498,8 +498,9 @@ class PlotSheet(QWidget):
                 self._draw_image(ax, sub.image, idx)
 
             n_drawn = 0
-            for tref in sub.traces:
-                if not tref.enabled:
+            stack = sub.stack()                 # traces + shapes, back to front
+            for si, tref in enumerate(stack):
+                if isinstance(tref, ShapeRef) or not tref.enabled:
                     continue
                 data = repository.get(tref.data_id)
                 if data is None or tref.y_col not in data.columns:
@@ -508,6 +509,7 @@ class PlotSheet(QWidget):
                     x, y = tref.resolve(data)
                 except Exception:
                     continue
+                before = set(ax.get_children())
                 self._draw_trace(ax, tref, x, y)
                 if tref.show_errorbar:
                     try:
@@ -516,6 +518,8 @@ class PlotSheet(QWidget):
                         yerr = None
                     if yerr is not None:
                         self._draw_error_overlay(ax, tref, x, y, yerr)
+                for art in set(ax.get_children()) - before:   # layer order = list order
+                    art.set_zorder(2.0 + 0.01 * si)
                 n_drawn += 1
 
             if sub.x_min is not None or sub.x_max is not None:
@@ -523,6 +527,18 @@ class PlotSheet(QWidget):
             if sub.y_min is not None or sub.y_max is not None:
                 ax.set_ylim(bottom=sub.y_min, top=sub.y_max)
             self._apply_axis_ticks(ax, sub)
+
+            # shapes: drawn last so they never move the (already final) view limits
+            if any(isinstance(it, ShapeRef) and it.enabled for it in stack):
+                xl, yl = ax.get_xlim(), ax.get_ylim()
+                for si, it in enumerate(stack):
+                    if isinstance(it, ShapeRef) and it.enabled:
+                        try:
+                            self._draw_shape(ax, it, 2.0 + 0.01 * si, text_scale)
+                        except Exception:
+                            pass
+                ax.set_xlim(xl)
+                ax.set_ylim(yl)
 
             if n_drawn and sub.legend_visible:
                 legend = ax.legend(loc=sub.legend_loc, frameon=sub.legend_frame,
@@ -723,6 +739,94 @@ class PlotSheet(QWidget):
             for art in container:
                 self.artist_map[art] = tref
 
+    def _draw_shape(self, ax, sh, z, text_scale=1.0):
+        """One :class:`~NoorSuite.model.ShapeRef` as matplotlib artists. Gradient fills are
+        an RGBA image clipped to the shape's own outline (so rotation, ellipses and bands
+        all work the same way); the outline artist is what the canvas hit-tests."""
+        from matplotlib import transforms as mtf
+        from matplotlib.image import AxesImage
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Ellipse, FancyArrowPatch
+
+        axes_frac = sh.coords == "axes"
+        tf = ax.transAxes if axes_frac else ax.transData
+        edge = rgba(sh.edge_color, sh.alpha)
+        lw = max(0.0, float(sh.line_width))
+        l, b, r, t = sh.bounds()
+
+        if sh.kind == "text":
+            label = str(sh.text)
+            if "$" in label:        # a half-typed $...$ must not break the whole canvas
+                try:
+                    from matplotlib.mathtext import MathTextParser
+                    MathTextParser("path").parse(label)
+                except Exception:
+                    label = label.replace("$", r"\$")
+            art = ax.text(sh.x0, sh.y0, label, transform=tf, color=edge, ha="center",
+                          va="center", rotation=float(sh.angle), zorder=z,
+                          fontsize=float(sh.fontsize) * text_scale)
+            self.artist_map[art] = sh
+            return
+        if sh.kind in ("line", "arrow"):
+            if sh.kind == "line":
+                art = Line2D([sh.x0, sh.x1], [sh.y0, sh.y1], transform=tf, color=edge,
+                             lw=lw, linestyle=sh.line_style, zorder=z)
+                ax.add_line(art)
+            else:
+                art = FancyArrowPatch((sh.x0, sh.y0), (sh.x1, sh.y1), transform=tf,
+                                      arrowstyle=sh.arrow_head or "->", color=edge, lw=lw,
+                                      linestyle=sh.line_style, mutation_scale=8 + 2 * lw,
+                                      zorder=z)
+                ax.add_patch(art)
+            self.artist_map[art] = sh
+            return
+
+        # --- closed shapes -------------------------------------------------------
+        if sh.kind == "xspan":
+            tf = (mtf.blended_transform_factory(ax.transData, ax.transAxes)
+                  if not axes_frac else ax.transAxes)
+            box = (l, 0.0 if not axes_frac else 0.0, r, 1.0)
+        elif sh.kind == "yspan":
+            tf = (mtf.blended_transform_factory(ax.transAxes, ax.transData)
+                  if not axes_frac else ax.transAxes)
+            box = (0.0, b, 1.0, t)
+        else:
+            box = (l, b, r, t)
+        bl, bb, br, bt = box
+        w, h = br - bl, bt - bb
+        cx, cy = bl + w / 2.0, bb + h / 2.0
+        rot = float(sh.angle) if sh.kind in ("rect", "ellipse") else 0.0
+
+        fill_rgba = (0, 0, 0, 0)
+        gradient = sh.is_filled and sh.fill_mode in ("linear", "radial")
+        if sh.is_filled and not gradient:
+            fill_rgba = rgba(sh.fill_color, sh.fill_alpha)
+        kw = dict(transform=tf, facecolor=fill_rgba, edgecolor=edge, linewidth=lw,
+                  linestyle=sh.line_style, zorder=z)
+        if sh.kind == "ellipse":
+            patch = Ellipse((cx, cy), w, h, angle=rot, **kw)
+        else:
+            try:
+                patch = Rectangle((bl, bb), w, h, angle=rot, rotation_point="center", **kw)
+            except TypeError:                       # matplotlib < 3.6
+                patch = Rectangle((bl, bb), w, h, angle=rot, **kw)
+        ax.add_patch(patch)
+        self.artist_map[patch] = sh
+
+        if gradient and w != 0 and h != 0:
+            img = gradient_rgba(sh.grad_stops, sh.fill_mode, sh.grad_angle, sh.grad_cx,
+                                sh.grad_cy, sh.grad_radius, reverse=sh.grad_reverse)
+            img[..., 3] *= max(0.0, min(1.0, float(sh.fill_alpha)))
+            im = AxesImage(ax, origin="lower", interpolation="bilinear",
+                           extent=(bl, br, bb, bt), zorder=z - 0.001)
+            im.set_data(img)
+            trans = tf
+            if rot:
+                trans = mtf.Affine2D().rotate_deg_around(cx, cy, rot) + tf
+            im.set_transform(trans)
+            im.set_clip_path(patch)
+            ax.add_artist(im)
+
     def _draw_error_overlay(self, ax, tref, x, y, yerr):
         """Error-bar whiskers on top of whatever :meth:`_draw_trace` already drew --
         independent of ``plot_type``, so "Scatter + errorbar" and "Line + errorbar" are
@@ -873,6 +977,8 @@ class PlotSheet(QWidget):
             if isinstance(ref, ImageRef):
                 continue
             if _contains(art, event):
+                if isinstance(ref, ShapeRef):
+                    return {"kind": "shape", "ref": ref}
                 return {"kind": "trace", "ref": ref}
 
         for text_art, kind, idx in self._text_targets:

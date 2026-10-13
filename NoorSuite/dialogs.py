@@ -1333,3 +1333,394 @@ class ColormapPanel(QWidget):
         if path:
             self._host.import_colormap(path)
             self.refresh()
+
+
+# ------------------------------------------------------------------ shapes (objects)
+class ShapeStyleWidget(QWidget):
+    """Bind to a :class:`~NoorSuite.model.ShapeRef`: geometry, outline, fill (solid or a
+    linear / radial gradient through key colours with per-stop transparency)."""
+
+    changed = pyqtSignal()
+    _FILLED = ("rect", "ellipse", "xspan", "yspan")
+
+    def __init__(self, host=None, parent=None):
+        from .model import FILL_MODE_LABELS, SHAPE_COORD_LABELS
+        super().__init__(parent)
+        self._ref = None
+        self._loading = False
+        self._host = host           # optional: colormap access (see ColormapPanel's host)
+        self._stop_rows: list = []
+
+        form = QFormLayout(self)
+        _tighten(form)
+
+        self.kind_label = QLabel("")
+        form.addRow("Object:", self.kind_label)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("(optional name in the layer list)")
+        self.name_edit.textEdited.connect(self._push)
+        form.addRow("Name:", self.name_edit)
+        self.enabled_check = QCheckBox("Shown on plot")
+        self.enabled_check.toggled.connect(self._push)
+        form.addRow("", self.enabled_check)
+
+        self.coords_combo = QComboBox()
+        self.coords_combo.addItems(SHAPE_COORD_LABELS)
+        self.coords_combo.currentIndexChanged.connect(self._push)
+        form.addRow("Coordinates:", self.coords_combo)
+
+        self.geom_edits = {}
+        for key, label in (("x0", "x (start / left):"), ("x1", "x (end / right):"),
+                           ("y0", "y (start / bottom):"), ("y1", "y (end / top):")):
+            e = QLineEdit()
+            e.editingFinished.connect(self._push)
+            self.geom_edits[key] = e
+            form.addRow(label, e)
+        self.angle_spin = QDoubleSpinBox()
+        self.angle_spin.setRange(-360.0, 360.0)
+        self.angle_spin.setSingleStep(5.0)
+        self.angle_spin.valueChanged.connect(self._push)
+        form.addRow("Rotation (deg):", self.angle_spin)
+
+        self.text_edit = QLineEdit()
+        self.text_edit.textEdited.connect(self._push)
+        form.addRow("Text:", self.text_edit)
+        self.fontsize_spin = QDoubleSpinBox()
+        self.fontsize_spin.setRange(2.0, 80.0)
+        self.fontsize_spin.valueChanged.connect(self._push)
+        form.addRow("Font size:", self.fontsize_spin)
+
+        self.edge_btn = ColorButton(color="#d62728", label="Outline / text colour")
+        self.edge_btn.colorChanged.connect(lambda *_: self._push())
+        form.addRow("Outline:", self.edge_btn)
+        self.width_spin = QDoubleSpinBox()
+        self.width_spin.setRange(0.0, 20.0)
+        self.width_spin.setSingleStep(0.2)
+        self.width_spin.valueChanged.connect(self._push)
+        form.addRow("Line width:", self.width_spin)
+        self.style_combo = QComboBox()
+        self.style_combo.addItems(LINE_STYLE_LABELS)
+        self.style_combo.currentIndexChanged.connect(self._push)
+        form.addRow("Line style:", self.style_combo)
+        self.alpha_spin = QDoubleSpinBox()
+        self.alpha_spin.setRange(0.0, 1.0)
+        self.alpha_spin.setSingleStep(0.1)
+        self.alpha_spin.valueChanged.connect(self._push)
+        form.addRow("Outline opacity:", self.alpha_spin)
+        self.arrow_combo = QComboBox()
+        self._arrow_heads = ["->", "-|>", "<->", "<|-|>", "-[", "simple", "fancy"]
+        self.arrow_combo.addItems(self._arrow_heads)
+        self.arrow_combo.currentIndexChanged.connect(self._push)
+        form.addRow("Arrow head:", self.arrow_combo)
+
+        # ---- fill -------------------------------------------------------------
+        self.fill_check = QCheckBox("Filled")
+        self.fill_check.toggled.connect(self._push)
+        form.addRow("", self.fill_check)
+        self.fill_mode_combo = QComboBox()
+        self.fill_mode_combo.addItems(FILL_MODE_LABELS)
+        self.fill_mode_combo.currentIndexChanged.connect(self._push)
+        form.addRow("Fill:", self.fill_mode_combo)
+        self.fill_btn = ColorButton(color="#d62728", label="Fill colour")
+        self.fill_btn.colorChanged.connect(lambda *_: self._push())
+        form.addRow("Fill colour:", self.fill_btn)
+        self.fill_alpha_spin = QDoubleSpinBox()
+        self.fill_alpha_spin.setRange(0.0, 1.0)
+        self.fill_alpha_spin.setSingleStep(0.05)
+        self.fill_alpha_spin.valueChanged.connect(self._push)
+        form.addRow("Fill opacity:", self.fill_alpha_spin)
+
+        # ---- gradient -----------------------------------------------------------
+        self.grad_box = QWidget()
+        gl = QVBoxLayout(self.grad_box)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.addWidget(QLabel("Gradient key colours (position 0-1, colour, opacity):"))
+        self.stops_layout = QVBoxLayout()
+        self.stops_layout.setSpacing(2)
+        gl.addLayout(self.stops_layout)
+        row = QHBoxLayout()
+        add = QPushButton("+ key colour")
+        add.clicked.connect(self._add_stop)
+        self.reverse_btn = QPushButton("Reverse")
+        self.reverse_btn.setToolTip("Mirror the gradient direction")
+        self.reverse_btn.setCheckable(True)
+        self.reverse_btn.toggled.connect(self._push)
+        row.addWidget(add)
+        row.addWidget(self.reverse_btn)
+        gl.addLayout(row)
+        crow = QHBoxLayout()
+        self.cmap_combo = QComboBox()
+        load = QPushButton("Load colormap")
+        load.setToolTip("Replace the key colours by those of a built-in / custom colormap")
+        load.clicked.connect(self._load_colormap)
+        crow.addWidget(self.cmap_combo, 1)
+        crow.addWidget(load)
+        gl.addLayout(crow)
+        save = QPushButton("Save key colours as colormap...")
+        save.setToolTip("Store these key colours as a reusable colormap")
+        save.clicked.connect(self._save_colormap)
+        gl.addWidget(save)
+        gform = QFormLayout()
+        _tighten(gform)
+        self.grad_angle_spin = QDoubleSpinBox()
+        self.grad_angle_spin.setRange(-360.0, 360.0)
+        self.grad_angle_spin.setSingleStep(15.0)
+        self.grad_angle_spin.valueChanged.connect(self._push)
+        gform.addRow("Direction (deg):", self.grad_angle_spin)
+        self.grad_cx_spin = QDoubleSpinBox()
+        self.grad_cy_spin = QDoubleSpinBox()
+        self.grad_r_spin = QDoubleSpinBox()
+        for sp, lo, hi in ((self.grad_cx_spin, -1, 2), (self.grad_cy_spin, -1, 2),
+                           (self.grad_r_spin, 0.01, 4)):
+            sp.setRange(lo, hi)
+            sp.setSingleStep(0.1)
+            sp.valueChanged.connect(self._push)
+        gform.addRow("Centre x (0-1):", self.grad_cx_spin)
+        gform.addRow("Centre y (0-1):", self.grad_cy_spin)
+        gform.addRow("Radius:", self.grad_r_spin)
+        gl.addLayout(gform)
+        self._gform = gform
+        form.addRow(self.grad_box)
+        self._form = form
+
+    # -- host / colormaps ----------------------------------------------------------
+    def set_host(self, host):
+        self._host = host
+
+    def _colormap_names(self) -> list:
+        if self._host is not None:
+            try:
+                return list(self._host.available_colormap_names())
+            except Exception:
+                pass
+        from .colormap import BUILTIN_NAMES
+        return list(BUILTIN_NAMES)
+
+    def _key_colors(self, name: str) -> list:
+        """Key colours of a colormap: a custom map's own colours, else 5 samples."""
+        spec = None
+        if self._host is not None:
+            try:
+                spec = self._host.resolve_colormap(name)
+            except Exception:
+                spec = None
+        if isinstance(spec, ColorMap) and not spec.builtin and spec.colors:
+            return list(spec.colors)
+        from .colormap import sample
+        return sample(name, 5)
+
+    def _load_colormap(self):
+        name = self.cmap_combo.currentText()
+        if not name or self._ref is None:
+            return
+        from .model import normalize_stops
+        self._ref.grad_stops = normalize_stops(self._key_colors(name))
+        self._set_stops(self._ref.grad_stops)
+        self.changed.emit()
+
+    def _save_colormap(self):
+        if self._ref is None or self._host is None:
+            return
+        name, ok = QInputDialog.getText(self, "Save colormap", "Name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        sm = self._host.active_sheet_model()
+        if sm is None:
+            return
+        sm.colormaps = [c for c in sm.colormaps if c.name != name]
+        sm.colormaps.append(ColorMap(name, [s[1] for s in self._read_stops()]))
+        try:
+            self._host.copy_colormap_to_library(name)
+        except Exception:
+            pass
+        self.cmap_combo.clear()
+        self.cmap_combo.addItems(self._colormap_names())
+        self.cmap_combo.setCurrentText(name)
+
+    # -- key colours ----------------------------------------------------------------
+    def _set_stops(self, stops):
+        was = self._loading
+        self._loading = True
+        try:
+            for row in self._stop_rows:
+                row["w"].setParent(None)
+                row["w"].deleteLater()
+            self._stop_rows = []
+            for pos, color, alpha in stops:
+                self._append_stop_row(pos, color, alpha)
+        finally:
+            self._loading = was
+
+    def _append_stop_row(self, pos, color, alpha):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        p = QDoubleSpinBox()
+        p.setRange(0.0, 1.0)
+        p.setSingleStep(0.05)
+        p.setDecimals(3)
+        p.setValue(float(pos))
+        c = ColorButton(color=color, label="")
+        c.setMinimumWidth(70)
+        a = QDoubleSpinBox()
+        a.setRange(0.0, 1.0)
+        a.setSingleStep(0.1)
+        a.setValue(float(alpha))
+        a.setPrefix("a ")
+        rm = QPushButton("x")
+        rm.setMaximumWidth(26)
+        for wdg in (p, c, a, rm):
+            h.addWidget(wdg)
+        row = {"w": w, "pos": p, "color": c, "alpha": a}
+        p.valueChanged.connect(self._push)
+        a.valueChanged.connect(self._push)
+        c.colorChanged.connect(lambda *_: self._push())
+        rm.clicked.connect(lambda _=False, r=row: self._remove_stop(r))
+        self.stops_layout.addWidget(w)
+        self._stop_rows.append(row)
+
+    def _read_stops(self) -> list:
+        from .model import normalize_stops
+        return normalize_stops([[r["pos"].value(), r["color"].color(), r["alpha"].value()]
+                                for r in self._stop_rows])
+
+    def _add_stop(self):
+        if self._ref is None:
+            return
+        stops = self._read_stops() or [[0.0, "#ffffff", 1.0]]
+        last = stops[-1]
+        stops.append([min(1.0, last[0] + 0.25), last[1], last[2]])
+        self._ref.grad_stops = stops
+        self._set_stops(stops)
+        self.changed.emit()
+
+    def _remove_stop(self, row):
+        if len(self._stop_rows) <= 2 or self._ref is None:
+            return
+        self._stop_rows.remove(row)
+        row["w"].setParent(None)
+        row["w"].deleteLater()
+        self._ref.grad_stops = self._read_stops()
+        self.changed.emit()
+
+    # -- binding --------------------------------------------------------------------
+    def _set_row_visible(self, widget, show: bool, form=None):
+        widget.setVisible(show)
+        lab = (form or self._form).labelForField(widget)
+        if lab is not None:
+            lab.setVisible(show)
+
+    def _update_visibility(self):
+        kind = self._ref.kind if self._ref is not None else "rect"
+        filled_kind = kind in self._FILLED
+        mode_idx = self.fill_mode_combo.currentIndex()
+        geom = {"xspan": ("x0", "x1"), "yspan": ("y0", "y1"),
+                "text": ("x0", "y0")}.get(kind, ("x0", "x1", "y0", "y1"))
+        for k, e in self.geom_edits.items():
+            self._set_row_visible(e, k in geom)
+        self._set_row_visible(self.angle_spin, kind in ("rect", "ellipse", "text"))
+        self._set_row_visible(self.text_edit, kind == "text")
+        self._set_row_visible(self.fontsize_spin, kind == "text")
+        self._set_row_visible(self.arrow_combo, kind == "arrow")
+        self._set_row_visible(self.style_combo, kind != "text")
+        self._set_row_visible(self.width_spin, kind != "text")
+        self.fill_check.setVisible(filled_kind)
+        filled = filled_kind and self.fill_check.isChecked()
+        self._set_row_visible(self.fill_mode_combo, filled)
+        self._set_row_visible(self.fill_btn, filled and mode_idx == 0)
+        self._set_row_visible(self.fill_alpha_spin, filled)
+        self.grad_box.setVisible(filled and mode_idx > 0)
+        lin = mode_idx == 1
+        self._set_row_visible(self.grad_angle_spin, lin, self._gform)
+        for sp in (self.grad_cx_spin, self.grad_cy_spin, self.grad_r_spin):
+            self._set_row_visible(sp, not lin, self._gform)
+
+    def set_shape(self, ref):
+        from .model import FILL_MODES, SHAPE_COORDS, SHAPE_KIND_LABELS, SHAPE_KINDS
+        self._ref = ref
+        self.setEnabled(ref is not None)
+        if ref is None:
+            return
+        self._loading = True
+        try:
+            self.kind_label.setText(
+                dict(zip(SHAPE_KINDS, SHAPE_KIND_LABELS)).get(ref.kind, ref.kind))
+            self.name_edit.setText(ref.name)
+            self.enabled_check.setChecked(ref.enabled)
+            self.coords_combo.setCurrentIndex(
+                SHAPE_COORDS.index(ref.coords) if ref.coords in SHAPE_COORDS else 0)
+            for k, e in self.geom_edits.items():
+                e.setText(f"{getattr(ref, k):g}")
+            self.angle_spin.setValue(float(ref.angle))
+            self.text_edit.setText(ref.text)
+            self.fontsize_spin.setValue(float(ref.fontsize))
+            self.edge_btn.setColor(ref.edge_color)
+            self.width_spin.setValue(float(ref.line_width))
+            self.style_combo.setCurrentIndex(
+                LINE_STYLES.index(ref.line_style) if ref.line_style in LINE_STYLES else 0)
+            self.alpha_spin.setValue(float(ref.alpha))
+            if ref.arrow_head in self._arrow_heads:
+                self.arrow_combo.setCurrentIndex(self._arrow_heads.index(ref.arrow_head))
+            self.fill_check.setChecked(bool(ref.fill))
+            self.fill_mode_combo.setCurrentIndex(
+                FILL_MODES.index(ref.fill_mode) if ref.fill_mode in FILL_MODES else 0)
+            self.fill_btn.setColor(ref.fill_color)
+            self.fill_alpha_spin.setValue(float(ref.fill_alpha))
+            self._set_stops(ref.grad_stops)
+            self.reverse_btn.setChecked(bool(ref.grad_reverse))
+            self.grad_angle_spin.setValue(float(ref.grad_angle))
+            self.grad_cx_spin.setValue(float(ref.grad_cx))
+            self.grad_cy_spin.setValue(float(ref.grad_cy))
+            self.grad_r_spin.setValue(float(ref.grad_radius))
+            self.cmap_combo.clear()
+            self.cmap_combo.addItems(self._colormap_names())
+            self._update_visibility()
+        finally:
+            self._loading = False
+
+    def _push(self, *_):
+        if self._loading or self._ref is None:
+            return
+        from .model import FILL_MODES, SHAPE_COORDS
+        r = self._ref
+        r.name = self.name_edit.text()
+        r.enabled = self.enabled_check.isChecked()
+        r.coords = SHAPE_COORDS[max(0, self.coords_combo.currentIndex())]
+        for k, e in self.geom_edits.items():
+            try:
+                setattr(r, k, float(e.text().replace(",", ".")))
+            except ValueError:
+                pass
+        r.angle = self.angle_spin.value()
+        r.text = self.text_edit.text()
+        r.fontsize = self.fontsize_spin.value()
+        r.edge_color = self.edge_btn.color()
+        r.line_width = self.width_spin.value()
+        r.line_style = LINE_STYLES[max(0, self.style_combo.currentIndex())]
+        r.alpha = self.alpha_spin.value()
+        r.arrow_head = self._arrow_heads[max(0, self.arrow_combo.currentIndex())]
+        r.fill = self.fill_check.isChecked()
+        r.fill_mode = FILL_MODES[max(0, self.fill_mode_combo.currentIndex())]
+        r.fill_color = self.fill_btn.color()
+        r.fill_alpha = self.fill_alpha_spin.value()
+        r.grad_stops = self._read_stops() or r.grad_stops
+        r.grad_reverse = self.reverse_btn.isChecked()
+        r.grad_angle = self.grad_angle_spin.value()
+        r.grad_cx = self.grad_cx_spin.value()
+        r.grad_cy = self.grad_cy_spin.value()
+        r.grad_radius = self.grad_r_spin.value()
+        self._update_visibility()
+        self.changed.emit()
+
+
+class ShapeDialog(_BaseEditDialog):
+    def __init__(self, ref, on_change, parent=None, host=None):
+        from .model import ShapeRef
+        super().__init__(ref, ShapeRef._FIELDS, on_change, parent,
+                         title=f"Object - {ref.display_label}")
+        widget = ShapeStyleWidget(host)
+        widget.set_shape(ref)
+        widget.changed.connect(self._apply)
+        self._content_layout().addWidget(widget)
+        self.resize(430, 620)

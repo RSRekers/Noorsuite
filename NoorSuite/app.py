@@ -34,7 +34,8 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog
 from .colormap import available_specs, load_file, resolve_spec, sample, save_file
 from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
                       ColormapPanel, FigureDialog, FigureStyleWidget, ImageDialog,
-                      LegendDialog, TextDialog, TraceStyleDialog, TraceStyleWidget)
+                      LegendDialog, ShapeDialog, ShapeStyleWidget, TextDialog,
+                      TraceStyleDialog, TraceStyleWidget)
 from . import latex
 from .zotero import label as zotero_label
 from .docview import DocumentTab
@@ -47,7 +48,8 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_DOCUMEN
 from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS,
                     REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
                     SPLIT_LAYOUTS, ColorMap, DataObject, DocumentModel, ImageObject, ImageRef,
-                    ProjectModel, SheetModel, SubplotModel, TraceRef, _new_id,
+                    ProjectModel, SHAPE_KIND_LABELS, SHAPE_KINDS, ShapeRef, SheetModel,
+                    SubplotModel, TraceRef, make_shape, _new_id,
                     aggregate_series, append_notes, apply_sheet_annotations,
                     common_label, copy_subplot_style, duplicate_sheet_model, make_image_ref, merge_tags, resolve_sidecar_names,
                     split_folder_path, split_into_repeats)
@@ -976,10 +978,38 @@ class SciSuiteWindow(QMainWindow):
         self.subplot_traces.itemSelectionChanged.connect(self._on_subplot_trace_selection)
         self.subplot_traces.reordered.connect(self._on_traces_reordered)
         tb.addWidget(self.subplot_traces)
-        hint = QLabel("Ctrl/Shift-click to select several traces above")
+        hint = QLabel("Back-to-front: the last entry is drawn on top. Drag to reorder; "
+                      "Ctrl/Shift-click to select several.")
+        hint.setWordWrap(True)
         hint.setStyleSheet("color: #808080; font-style: italic;")
         tb.addWidget(hint)
-        rm_btn = QPushButton("Remove selected trace(s)")
+        order_row = QHBoxLayout()
+        for text, mode, tip in (("To back", "back", "Send the selection behind everything"),
+                                ("Down", "down", "One layer towards the back"),
+                                ("Up", "up", "One layer towards the front"),
+                                ("To front", "front", "Bring the selection in front of everything")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, m=mode: self._move_layers(m))
+            order_row.addWidget(b)
+        tb.addLayout(order_row)
+        add_row = QHBoxLayout()
+        self.add_object_btn = QPushButton("Add object")
+        self.add_object_btn.setToolTip(
+            "Draw a rectangle, ellipse, line, arrow, highlight band or text on this subplot. "
+            "Objects sit in the same stack as the traces, so they can go behind or in front "
+            "of them; double-click one on the plot (or select it here) to edit it.")
+        add_menu = QMenu(self.add_object_btn)
+        for kind, label in zip(SHAPE_KINDS, SHAPE_KIND_LABELS):
+            add_menu.addAction(label).triggered.connect(
+                lambda _=False, k=kind: self._add_shape(k))
+        self.add_object_btn.setMenu(add_menu)
+        add_row.addWidget(self.add_object_btn)
+        self.dup_object_btn = QPushButton("Duplicate object")
+        self.dup_object_btn.clicked.connect(self._duplicate_selected_shapes)
+        add_row.addWidget(self.dup_object_btn)
+        tb.addLayout(add_row)
+        rm_btn = QPushButton("Remove selected")
         rm_btn.clicked.connect(self._remove_selected_subplot_traces)
         tb.addWidget(rm_btn)
         self.combine_btn = QPushButton("Combine into mean ± error trace...")
@@ -1000,7 +1030,8 @@ class SciSuiteWindow(QMainWindow):
         self.normalize_btn.setEnabled(False)
         self.normalize_btn.clicked.connect(self._normalize_selected_traces_dialog)
         tb.addWidget(self.normalize_btn)
-        layout.addWidget(CollapsibleSection("Active subplot traces (tick = shown)", traces_body))
+        layout.addWidget(CollapsibleSection(
+            "Layers: traces and objects of the active subplot (tick = shown)", traces_body))
 
         self.colormap_panel = ColormapPanel(self)
         self.colormap_panel.applied.connect(self._after_colormap_applied)
@@ -1058,6 +1089,9 @@ class SciSuiteWindow(QMainWindow):
         self.figure_widget = FigureStyleWidget()
         self.figure_widget.changed.connect(self._after_figure_edit)
         self.inspector_tabs.addTab(_in_scroll(self.figure_widget), "Figure")
+        self.shape_widget = ShapeStyleWidget(self)
+        self.shape_widget.changed.connect(self._after_shape_edit)
+        self._SHAPE_TAB = self.inspector_tabs.addTab(_in_scroll(self.shape_widget), "Object")
         self.inspector_tabs.setMinimumHeight(260)
         layout.addWidget(self.inspector_tabs, 1)
         return widget
@@ -1855,7 +1889,18 @@ class SciSuiteWindow(QMainWindow):
         sm = self._active_sheet_model()
         if sm is not None:
             sub = sm.get_active_subplot()
-            for i, ref in enumerate(sub.traces):
+            for i, ref in enumerate(sub.stack()):
+                if isinstance(ref, ShapeRef):
+                    item = QListWidgetItem(f"\u25a1  {ref.display_label}")
+                    item.setToolTip(f"object ({ref.kind}) - double-click on the plot to edit")
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(Qt.CheckState.Checked if ref.enabled
+                                       else Qt.CheckState.Unchecked)
+                    item.setData(Qt.ItemDataRole.UserRole, i)
+                    self.subplot_traces.addItem(item)
+                    if i in prev:
+                        item.setSelected(True)
+                    continue
                 obj = self.repository.get(ref.data_id)
                 oname = obj.name if obj else "(missing)"
                 x_disp = ref.x_col if ref.x_col and ref.x_col != INDEX_COL else "row index"
@@ -1877,9 +1922,10 @@ class SciSuiteWindow(QMainWindow):
             return
         sub = sm.get_active_subplot()
         i = item.data(Qt.ItemDataRole.UserRole)
-        if i is None or i >= len(sub.traces):
+        stack = sub.stack()
+        if i is None or i >= len(stack):
             return
-        sub.traces[i].enabled = item.checkState() == Qt.CheckState.Checked
+        stack[i].enabled = item.checkState() == Qt.CheckState.Checked
         self.render_current_sheet()
         self._refresh_ipc_snapshot()
 
@@ -1887,16 +1933,33 @@ class SciSuiteWindow(QMainWindow):
         sm = self._active_sheet_model()
         if sm is None:
             return []
-        sub = sm.get_active_subplot()
-        refs = []
-        for it in self.subplot_traces.selectedItems():
-            i = it.data(Qt.ItemDataRole.UserRole)
-            if i is not None and i < len(sub.traces):
-                refs.append(sub.traces[i])
-        return refs
+        return [r for r in self._selected_layers() if not isinstance(r, ShapeRef)]
+
+    def _selected_layers(self) -> list:
+        """Selected entries of the layer list (TraceRefs and ShapeRefs), back to front."""
+        sm = self._active_sheet_model()
+        if sm is None:
+            return []
+        stack = sm.get_active_subplot().stack()
+        idx = sorted(it.data(Qt.ItemDataRole.UserRole)
+                     for it in self.subplot_traces.selectedItems()
+                     if it.data(Qt.ItemDataRole.UserRole) is not None)
+        return [stack[i] for i in idx if i < len(stack)]
+
+    def _selected_shapes(self) -> list:
+        return [r for r in self._selected_layers() if isinstance(r, ShapeRef)]
 
     def _on_subplot_trace_selection(self):
         refs = self._selected_trace_refs()
+        shapes = self._selected_shapes()
+        if shapes and not refs:
+            if len(shapes) == 1:
+                self.shape_widget.set_shape(shapes[0])
+            self.inspector_tabs.setCurrentIndex(self._SHAPE_TAB)
+            self.trace_broadcast_btn.setEnabled(False)
+            self.combine_btn.setEnabled(False)
+            self.normalize_btn.setEnabled(False)
+            return
         if len(refs) > 1:
             self.trace_widget.hide()
             self.bulk_widget.show()
@@ -1943,11 +2006,11 @@ class SciSuiteWindow(QMainWindow):
         if sm is None:
             return
         sub = sm.get_active_subplot()
-        idxs = sorted((it.data(Qt.ItemDataRole.UserRole)
-                       for it in self.subplot_traces.selectedItems()), reverse=True)
-        for i in idxs:
-            if i is not None and i < len(sub.traces):
-                del sub.traces[i]
+        for ref in self._selected_layers():
+            if isinstance(ref, ShapeRef):
+                sub.shapes = [s for s in sub.shapes if s is not ref]
+            else:
+                sub.remove_trace(ref)
         self._sync_subplot_trace_list(keep_selection=False)
         self.render_current_sheet()
         self._refresh_ipc_snapshot()
@@ -1961,19 +2024,124 @@ class SciSuiteWindow(QMainWindow):
         sub = sm.get_active_subplot()
         order = [self.subplot_traces.item(i).data(Qt.ItemDataRole.UserRole)
                  for i in range(self.subplot_traces.count())]
-        if sorted(order) != list(range(len(sub.traces))):
+        old = sub.stack()
+        if sorted(order) != list(range(len(old))):
             return
-        old_traces = sub.traces
-        moved = {id(old_traces[it.data(Qt.ItemDataRole.UserRole)])
+        moved = {id(old[it.data(Qt.ItemDataRole.UserRole)])
                  for it in self.subplot_traces.selectedItems()}
-        sub.traces = [old_traces[i] for i in order]
+        self._adopt_stack(sm, sub, [old[i] for i in order], moved)
+
+    def _adopt_stack(self, sm, sub, new_stack, moved_ids=()):
+        """Install a reordered traces+objects stack, recolour the traces by position (the
+        colour cycle follows the order, as for a freshly added trace) and re-select."""
+        sub.set_stack(new_stack)
         for i, ref in enumerate(sub.traces):
-            ref.color = self._color_for_index(sm, i)   # colour follows the new order
+            ref.color = self._color_for_index(sm, i)
         self._sync_subplot_trace_list(keep_selection=False)
-        for i in range(self.subplot_traces.count()):
-            if id(sub.traces[i]) in moved:
+        for i, it in enumerate(sub.stack()):
+            if id(it) in moved_ids:
                 self.subplot_traces.item(i).setSelected(True)
         self.render_current_sheet()
+        self._refresh_ipc_snapshot()
+
+    def _move_layers(self, mode: str):
+        """Bring the selected traces / objects to the front / back or one step up / down."""
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        sub = sm.get_active_subplot()
+        stack = sub.stack()
+        sel = {id(r) for r in self._selected_layers()}
+        if not sel:
+            return
+        if mode == "front":
+            new = [r for r in stack if id(r) not in sel] + [r for r in stack if id(r) in sel]
+        elif mode == "back":
+            new = [r for r in stack if id(r) in sel] + [r for r in stack if id(r) not in sel]
+        else:
+            new = list(stack)
+            rng = range(len(new) - 2, -1, -1) if mode == "up" else range(1, len(new))
+            step = 1 if mode == "up" else -1
+            for i in rng:
+                if id(new[i]) in sel and id(new[i + step]) not in sel:
+                    new[i], new[i + step] = new[i + step], new[i]
+        self._adopt_stack(sm, sub, new, sel)
+
+    # -- objects (shapes) -------------------------------------------------------------
+    def _default_shape_geometry(self, sub, kind) -> dict:
+        """A visible starting geometry: the central part of the current view."""
+        xl, yl = (0.0, 1.0), (0.0, 1.0)
+        cs = self.current_sheet()
+        sm = self._active_sheet_model()
+        if cs is not None and sm is not None:
+            try:
+                ax = cs._axes[sm.subplots.index(sub)]
+                xl, yl = ax.get_xlim(), ax.get_ylim()
+            except Exception:
+                pass
+
+        def at(lim, frac, scale):
+            lo, hi = float(lim[0]), float(lim[1])
+            if scale == "log" and lo > 0 and hi > 0:
+                return float(10 ** (np.log10(lo) + frac * (np.log10(hi) - np.log10(lo))))
+            return lo + frac * (hi - lo)
+
+        x0, x1 = at(xl, 0.35, sub.x_scale), at(xl, 0.65, sub.x_scale)
+        y0, y1 = at(yl, 0.35, sub.y_scale), at(yl, 0.65, sub.y_scale)
+        if kind == "text":
+            return {"x0": at(xl, 0.5, sub.x_scale), "y0": at(yl, 0.5, sub.y_scale)}
+        return {"x0": x0, "x1": x1, "y0": y0, "y1": y1}
+
+    def _add_shape(self, kind: str):
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        sub = sm.get_active_subplot()
+        sh = make_shape(kind, self._default_shape_geometry(sub, kind))
+        if kind in ("line", "arrow"):
+            sh.fill = False
+            sh.edge_color = "#000000"
+        if kind == "text":
+            sh.edge_color = "#000000"
+        sh.layer_pos = len(sub.traces)                 # on top
+        sub.shapes.append(sh)
+        self._sync_subplot_trace_list(keep_selection=False)
+        pos = sub.stack().index(sh)
+        self.subplot_traces.item(pos).setSelected(True)
+        self.render_current_sheet()
+        self._refresh_ipc_snapshot()
+
+    def _duplicate_selected_shapes(self):
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        sub = sm.get_active_subplot()
+        new = []
+        for sh in self._selected_shapes():
+            c = ShapeRef.from_dict(sh.to_dict())
+            c.name = (sh.name or sh.display_label) + " (copy)"
+            c.layer_pos = sh.layer_pos
+            sub.shapes.insert(sub.shapes.index(sh) + 1, c)
+            new.append(c)
+        if not new:
+            return
+        self._sync_subplot_trace_list(keep_selection=False)
+        stack = sub.stack()
+        for c in new:
+            self.subplot_traces.item(stack.index(c)).setSelected(True)
+        self.render_current_sheet()
+        self._refresh_ipc_snapshot()
+
+    def _after_shape_edit(self):
+        self.render_current_sheet()
+        # refresh the names in the list without losing the selection
+        sm = self._active_sheet_model()
+        if sm is not None:
+            keep = {id(r) for r in self._selected_layers()}
+            self._sync_subplot_trace_list(keep_selection=False)
+            for i, it in enumerate(sm.get_active_subplot().stack()):
+                if id(it) in keep:
+                    self.subplot_traces.item(i).setSelected(True)
         self._refresh_ipc_snapshot()
 
     # -------------------------------------------------------- subplot arrangement
@@ -2191,7 +2359,11 @@ class SciSuiteWindow(QMainWindow):
         if cs is None or not hit:
             return
         kind = hit.get("kind")
-        if kind == "trace":
+        if kind == "shape":
+            ref = hit.get("ref")
+            if ref is not None:
+                ShapeDialog(ref, self._after_element_edit, self, host=self).exec()
+        elif kind == "trace":
             ref = hit.get("ref")
             if ref is not None:
                 TraceStyleDialog(ref, self._after_element_edit, self).exec()
@@ -2214,14 +2386,17 @@ class SciSuiteWindow(QMainWindow):
     def _on_canvas_right_click(self, hit: dict, gui_event):
         """Right-click a trace directly on the plot: quick delete (or edit) without
         going to the "Active subplot traces" list."""
-        if not hit or hit.get("kind") != "trace":
+        if not hit or hit.get("kind") not in ("trace", "shape"):
             return
         ref = hit.get("ref")
         if ref is None:
             return
+        is_shape = isinstance(ref, ShapeRef)
         menu = QMenu(self)
-        edit_act = menu.addAction("Edit style...")
-        del_act = menu.addAction("Delete trace")
+        edit_act = menu.addAction("Edit object..." if is_shape else "Edit style...")
+        front_act = menu.addAction("Bring to front")
+        back_act = menu.addAction("Send to back")
+        del_act = menu.addAction("Delete object" if is_shape else "Delete trace")
         if gui_event is not None:
             try:
                 pos = gui_event.globalPosition().toPoint()
@@ -2232,8 +2407,24 @@ class SciSuiteWindow(QMainWindow):
         action = menu.exec(pos)
         if action == del_act:
             self._delete_trace_ref(ref)
+        elif action in (front_act, back_act):
+            self._select_layer(ref)
+            self._move_layers("front" if action == front_act else "back")
         elif action == edit_act:
-            TraceStyleDialog(ref, self._after_element_edit, self).exec()
+            if is_shape:
+                ShapeDialog(ref, self._after_element_edit, self, host=self).exec()
+            else:
+                TraceStyleDialog(ref, self._after_element_edit, self).exec()
+
+    def _select_layer(self, ref):
+        """Make ``ref`` (a trace or object of the active subplot) the list selection."""
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        self.subplot_traces.clearSelection()
+        for i, it in enumerate(sm.get_active_subplot().stack()):
+            if it is ref:
+                self.subplot_traces.item(i).setSelected(True)
 
     def _delete_trace_ref(self, ref):
         """Remove one TraceRef, wherever it lives in the active sheet's subplots."""
@@ -2241,8 +2432,11 @@ class SciSuiteWindow(QMainWindow):
         if sm is None:
             return
         for sub in sm.subplots:
+            if isinstance(ref, ShapeRef) and ref in sub.shapes:
+                sub.shapes = [s for s in sub.shapes if s is not ref]
+                break
             if ref in sub.traces:
-                sub.traces.remove(ref)
+                sub.remove_trace(ref)
                 break
         self._sync_subplot_trace_list()
         self.render_current_sheet()
@@ -2919,6 +3113,7 @@ class SciSuiteWindow(QMainWindow):
                 ps.notes_edit.setPlainText(sm.notes)
         self._render_sheet(sm.sheet_id)
         self.sync_active_subplot_inspector()
+        self._sync_subplot_trace_list()
         self._refresh_ipc_snapshot()
 
     def _handle_organize(self, payload: dict):

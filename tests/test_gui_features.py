@@ -497,3 +497,60 @@ def test_thin_picker_records_are_completed_from_zotero_and_cites_stay_before_end
     src = tab.source()
     assert src.index("\\cite{naik2023}", src.index("Cited")) < src.rindex("\\end{document}")
     assert src.rstrip().endswith("\\end{document}")
+
+
+def test_objects_share_the_layer_list_with_traces(win):
+    from PyQt6.QtCore import Qt
+    from NoorSuite.model import ShapeRef
+    win.handle_incoming_ipc({"action": "append_dataframe", "name": "d",
+                             "columns": {"x": [1., 2., 3.], "y": [1., 4., 9.]},
+                             "column_order": ["x", "y"]})
+    win.handle_incoming_ipc({"action": "add_to_sheet", "data_name": "d", "x_col": "x",
+                             "y_cols": ["y"], "sheet": "__new__", "subplot_index": 0})
+    sm = next(reversed(win.sheets.values()))
+    win._open_sheet_tab(sm.sheet_id)
+    sub = sm.subplots[0]
+
+    win._add_shape("rect")
+    win._add_shape("arrow")
+    assert win.subplot_traces.count() == 3                     # trace + 2 objects
+    assert [type(i).__name__ for i in sub.stack()] == ["TraceRef", "ShapeRef", "ShapeRef"]
+    # the freshly added object is the selection and drives the Object inspector tab
+    assert win.inspector_tabs.currentIndex() == win._SHAPE_TAB
+    assert win.shape_widget._ref is sub.shapes[1]
+
+    # select the rectangle and send it behind the trace
+    win.subplot_traces.clearSelection()
+    win.subplot_traces.item(1).setSelected(True)
+    win._move_layers("back")
+    assert isinstance(sub.stack()[0], ShapeRef) and sub.shapes[0].kind == "rect"
+    assert sub.shapes[0].layer_pos == 0
+    # ... and one step up again: it sits between nothing and the trace -> above the trace
+    win._move_layers("up")
+    assert [type(i).__name__ for i in sub.stack()] == ["TraceRef", "ShapeRef", "ShapeRef"]
+    win._move_layers("front")
+    assert sub.stack()[-1].kind == "rect"
+
+    # editing through the widget re-renders and keeps the geometry in the model
+    sh = sub.shapes[-1]
+    win.shape_widget.set_shape(sh)
+    win.shape_widget.fill_mode_combo.setCurrentIndex(1)       # linear gradient
+    win.shape_widget._add_stop()
+    assert sh.fill_mode == "linear" and len(sh.grad_stops) == 3
+    ax = win.open_tabs[sm.sheet_id]._axes[0]
+    assert len(ax.get_images()) == 1
+
+    # toggling the tick in the list hides the object
+    for i, it in enumerate(sub.stack()):
+        if it is sh:
+            win.subplot_traces.item(i).setCheckState(Qt.CheckState.Unchecked)
+    assert sh.enabled is False
+    assert len(win.open_tabs[sm.sheet_id]._axes[0].get_images()) == 0
+
+    # remove the selected objects (shapes only), the trace stays
+    win.subplot_traces.clearSelection()
+    for i, it in enumerate(sub.stack()):
+        if isinstance(it, ShapeRef):
+            win.subplot_traces.item(i).setSelected(True)
+    win._remove_selected_subplot_traces()
+    assert sub.shapes == [] and len(sub.traces) == 1
