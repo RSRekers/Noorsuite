@@ -185,6 +185,18 @@ Any PDF viewer works as well (the exported PDF is the talk). To run it on anothe
 writes `main.tex`, the theme, figures and a `README.txt`; `xelatex main.tex` (or `tectonic main.tex`) builds the
 PDF there.
 
+**Effects.** Beamer overlays work as usual and are exported: `\pause`, `\item<2->`, `\begin{itemize}[<+->]`,
+`\uncover<3->{...}`, `\only<2>{...}`, `\begin{block}<2->`, `\setbeamercovered{transparent}` (dims what has not appeared).
+The *Effects* menu in the document toolbar inserts them (reveal a list item by item, highlight the current item,
+selection appears from step n, dimming, slide transitions `\transfade` / `\transdissolve` / `\transwipe` ... for one
+or all slides). In the PDF every step is one page, so *Present* shows them click by click (a short cross-fade is
+used when `\transfade` / `\transdissolve` is in the text). The PowerPoint export turns the steps into click
+animations (Appear, Fade or Wipe, chosen at export) and the `\trans...` commands into slide transitions.
+
+**Find and replace.** Ctrl+F in the LaTeX editor opens a search bar (all matches highlighted, count, F3 / Shift+F3 for
+next / previous, Esc closes); Ctrl+H adds the replace row. Options: match case, whole words, regular expression
+(`\1` in the replacement refers to a group). *Replace all* is one undo step.
+
 **PowerPoint export.** *Export PowerPoint...* (or `python -m NoorSuite latex pptx --doc Talk --out talk.pptx`) writes
 native, editable slides: frame titles in title placeholders, bullet lists with their levels, paragraphs, sheets and
 figure files as pictures, tables as PowerPoint tables, columns in the two-content layout, the footer

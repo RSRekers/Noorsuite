@@ -158,6 +158,11 @@ Write frames: `\begin{frame}{Title} ... \end{frame}`; a figure frame is
 Layouts for presentations: `"beamer"` (plain), `"beamer-clean"` (NoorSuite's neutral theme), `"user:<name>"`
 (imported corporate templates, kept in the user's home folder - never put them into a repository).
 
+Effects (tell the user): Beamer overlays (`\pause`, `\item<2->`, `[<+->]`, `\uncover<n->{..}`, `\only<n>{..}`,
+`\setbeamercovered{transparent}`) and `\transfade` / `\transdissolve` / `\transwipe` are supported; the document
+toolbar's *Effects* menu inserts them, the PowerPoint export turns them into click animations (`--effect
+appear|fade|wipe`) and slide transitions. The LaTeX editor has Ctrl+F find / Ctrl+H replace.
+
 Running / exporting a talk (tell the user): *Present* (F11) in the document tab runs the PDF full screen;
 *Export PowerPoint...* or `{{PYTHON}} -m NoorSuite latex pptx --doc "Talk" --out talk.pptx` makes an editable .pptx
 (needs `python-pptx`; the imported corporate template's master / layouts are reused); *Export LaTeX folder...*

@@ -33,8 +33,8 @@ from PyQt6.QtPdf import QPdfDocument, QPdfLinkModel
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
                              QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
                              QListView, QListWidget, QListWidgetItem, QMessageBox,
-                             QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QTabWidget,
-                             QToolBar, QVBoxLayout, QWidget)
+                             QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
+                             QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from . import latex, zotero
 from .fuzzy import smart_score
@@ -534,8 +534,12 @@ class PresentationView(QWidget):
 
     closed = pyqtSignal(int)             # the page that was showing when the show ended
 
-    def __init__(self, pdf_path: str, start: int = 0, parent=None):
+    def __init__(self, pdf_path: str, start: int = 0, parent=None, fade: bool = False):
         super().__init__(parent)
+        self._fade = fade                # short cross-fade between slides
+        self._blend = 1.0
+        self._prev_img = None
+        self._anim = None
         self.setWindowFlag(Qt.WindowType.Window, True)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setStyleSheet("background: black;")
@@ -558,9 +562,34 @@ class PresentationView(QWidget):
     def go(self, page: int):
         n = self.page_count()
         if n:
-            self._page = max(0, min(int(page), n - 1))
+            new = max(0, min(int(page), n - 1))
+            if self._fade and new != self._page and self.isVisible() \
+                    and self._doc.status() == QPdfDocument.Status.Ready:
+                self._start_fade(new)
+            self._page = new
             self._cover = None
             self.update()
+
+    def _start_fade(self, new: int):
+        from PyQt6.QtCore import QVariantAnimation
+        try:
+            self._prev_img = self._image()
+        except Exception:
+            self._prev_img = None
+            return
+        self._blend = 0.0
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setDuration(220)
+
+        def tick(v):
+            self._blend = float(v)
+            if self._blend >= 1.0:
+                self._prev_img = None
+            self.update()
+        self._anim.valueChanged.connect(tick)
+        self._anim.start()
 
     def _image(self):
         w, h = max(1, self.width()), max(1, self.height())
@@ -582,6 +611,11 @@ class PresentationView(QWidget):
         if self._cover is None and self._doc.status() == QPdfDocument.Status.Ready \
                 and self.page_count():
             img = self._image()
+            if self._prev_img is not None and self._blend < 1.0:
+                old = self._prev_img
+                p.drawImage((self.width() - old.width()) // 2,
+                            (self.height() - old.height()) // 2, old)
+                p.setOpacity(self._blend)
             p.drawImage((self.width() - img.width()) // 2, (self.height() - img.height()) // 2,
                         img)
         p.end()
@@ -951,6 +985,13 @@ class DocumentTab(QWidget):
                             "template's master and layouts when the theme comes from one)")
         pptx_act.triggered.connect(self.export_pptx)
         toolbar.addAction(pptx_act)
+        fx = QToolButton()
+        fx.setText("Effects")
+        fx.setToolTip("Overlays and slide transitions (Beamer): content that appears step by "
+                      "step, dimming, transitions. Exported to PowerPoint as click animations.")
+        fx.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        fx.setMenu(self._effects_menu(fx))
+        toolbar.addWidget(fx)
         docx_act = QAction("Export Word...", self)
         docx_act.setToolTip("Word (.docx) through pandoc: figures as 300 dpi PNGs, numbered "
                             "references, equations as native Word equations")
@@ -980,8 +1021,25 @@ class DocumentTab(QWidget):
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("LaTeX output appears here.")
         self.log.setMaximumBlockCount(5000)
+        from .findbar import FindBar
+        self.findbar = FindBar(self.editor)
+        edit_box = QWidget()
+        eb = QVBoxLayout(edit_box)
+        eb.setContentsMargins(0, 0, 0, 0)
+        eb.setSpacing(0)
+        eb.addWidget(self.editor, 1)
+        eb.addWidget(self.findbar)
+        for keys, fn in (("Ctrl+F", lambda: self.findbar.open_find(False)),
+                         ("Ctrl+H", lambda: self.findbar.open_find(True)),
+                         ("F3", lambda: self.findbar.step(False)),
+                         ("Shift+F3", lambda: self.findbar.step(True))):
+            act = QAction(self)
+            act.setShortcut(QKeySequence(keys))
+            act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            act.triggered.connect(fn)
+            self.addAction(act)
         mid = QSplitter(Qt.Orientation.Vertical)
-        mid.addWidget(self.editor)
+        mid.addWidget(edit_box)
         mid.addWidget(self.log)
         mid.setStretchFactor(0, 4)
         mid.setStretchFactor(1, 1)
@@ -1669,11 +1727,83 @@ class DocumentTab(QWidget):
             shutil.copyfile(self._pdf, path)
             self.status_label.setText(f"  exported {Path(path).name}")
 
+    # -- effects (overlays, transitions) --------------------------------------------------
+    def _effects_menu(self, parent) -> QMenu:
+        m = QMenu(parent)
+        m.addAction("Next content appears on click  (\\pause)",
+                    lambda: self.insert_text("\\pause\n"))
+        m.addAction("Reveal this list item by item", self.reveal_list)
+        m.addAction("Reveal item by item, current item highlighted",
+                    lambda: self.reveal_list("[<+-| alert@+>]"))
+        m.addSeparator()
+        m.addAction("Selection appears from step...", lambda: self.wrap_overlay("uncover"))
+        m.addAction("Selection only on step...", lambda: self.wrap_overlay("only"))
+        m.addAction("Item appears from step  (\\item<2->)",
+                    lambda: self.insert_text("\\item<2-> "))
+        m.addSeparator()
+        m.addAction("Dim content that has not appeared yet",
+                    lambda: self.add_preamble_line("\\setbeamercovered{transparent}"))
+        sub = m.addMenu("Slide transition (this slide)")
+        sub_all = m.addMenu("Slide transition (all slides)")
+        for label, cmd in (("Fade", "\\transfade"), ("Dissolve", "\\transdissolve"),
+                           ("Wipe", "\\transwipe"), ("Split", "\\transsplitverticalin"),
+                           ("Blinds", "\\transblindshorizontal"),
+                           ("Uncover", "\\transuncover")):
+            sub.addAction(label, lambda c=cmd: self.insert_text(c + "\n"))
+            sub_all.addAction(label, lambda c=cmd: self.add_preamble_line(c))
+        return m
+
+    def reveal_list(self, option: str = "[<+->]"):
+        """Add the overlay option to the list around the cursor (or insert a new list)."""
+        src, pos = self.source(), self.editor.textCursor().position()
+        best = None
+        for m in re.finditer(r"\\begin\{(itemize|enumerate|description)\}(\s*\[[^\]]*\])?", src):
+            end = src.find("\\end{" + m.group(1) + "}", m.end())
+            if m.start() <= pos <= (end if end >= 0 else len(src)):
+                best = m                              # the innermost list wins (later start)
+        if best is None:
+            self.insert_text("\\begin{itemize}" + option + "\n  \\item First\n  \\item Second\n"
+                             "\\end{itemize}\n")
+            return
+        cur = self.editor.textCursor()
+        cur.beginEditBlock()
+        cur.setPosition(best.start() + len("\\begin{" + best.group(1) + "}"))
+        cur.setPosition(best.end(), cur.MoveMode.KeepAnchor)
+        cur.insertText(option)
+        cur.endEditBlock()
+
+    def wrap_overlay(self, cmd: str):
+        step, ok = QInputDialog.getInt(
+            self, "Overlay step", "Appears with click number:", 2, 1, 50)
+        if not ok:
+            return
+        spec = f"<{step}->" if cmd == "uncover" else f"<{step}>"
+        cur = self.editor.textCursor()
+        text = cur.selectedText().replace("\u2029", "\n") or "text"
+        cur.insertText(f"\\{cmd}{spec}{{{text}}}")
+
+    def add_preamble_line(self, line: str):
+        """A line in the preamble (before ``\begin{document}``), once."""
+        src = self.source()
+        if line in src:
+            return
+        b = re.search(r"\\begin\{document\}", src)
+        if b is None:
+            return
+        cur = self.editor.textCursor()
+        pos, ins = cur.position(), line + "\n"
+        cur.setPosition(b.start())
+        cur.insertText(ins)
+        cur.setPosition(pos + len(ins) if pos >= b.start() else pos)
+        self.editor.setTextCursor(cur)
+        self.status_label.setText(f"  added {line}")
+
     def present(self):
         """Full-screen show of the current PDF (built first if it is stale)."""
         if not self._ensure_built():
             return
-        self._presenter = PresentationView(self._pdf, 0)
+        self._presenter = PresentationView(
+            self._pdf, 0, fade=bool(re.search(r"\\trans(?:fade|dissolve)\b", self.source())))
         self._presenter.closed.connect(lambda _p: setattr(self, "_presenter", None))
         self._presenter.showFullScreen()
         self._presenter.setFocus()
@@ -1702,13 +1832,21 @@ class DocumentTab(QWidget):
             if not assets_mod.export_png(asset, dest):
                 raise RuntimeError("figure file unreadable")
 
+        effect = "appear"
+        if re.search(r"\\pause\b|<[^<>\s]*->|\\(?:uncover|only|visible)<", self.source()):
+            label, ok = QInputDialog.getItem(
+                self, "Export PowerPoint", "Animation of content that appears step by step:",
+                ["Appear", "Fade", "Wipe"], 0, False)
+            if not ok:
+                return
+            effect = label.lower()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             ok, notes = pptxexport.export_pptx(
                 self.host.expand_document_tables(self.source())[0], path,
                 self.host.document_sheets(), self.host.document_assets(),
                 lambda sm, p: self.host.export_sheet_raster(sm, p, 200), asset_png,
-                self.workdir / "pptx")
+                self.workdir / "pptx", effect=effect)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Export PowerPoint", str(exc))

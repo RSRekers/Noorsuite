@@ -58,6 +58,176 @@ def _group(text: str, i: int):
                 return text[i + 1:j], j + 1
     return None
 
+# --------------------------------------------------------------------------- overlays (effects)
+# Beamer overlay commands are turned into private marker characters first; the block parser then
+# reads them in document order and gives every list item / paragraph / picture / table a *step*
+# (0 = there from the start, k = appears with the k-th click).
+_MARK = re.compile("\x02|\x05|\x07|\x03\\d+\x04|\x06\\d+\x04")
+_TRANS = {"fade": "fade", "dissolve": "dissolve", "wipe": "wipe", "split": "split",
+          "blinds": "blinds", "uncover": "pull", "cover": "cover", "glitter": "fade",
+          "box": "wipe", "replace": "fade"}
+_TRANS_RE = re.compile(r"\\trans(fade|dissolve|wipe|split[a-z]*|blinds[a-z]*|uncover|glitter|box|"
+                       r"replace)\b\s*(?:\[[^\]]*\])?")
+_ENV_NAMES = r"(?:itemize|enumerate|description|block|alertblock|exampleblock|column|columns|" \
+             r"center|figure|tabular)"
+
+
+def _spec_step(spec: str):
+    """Overlay specification -> ``"inc"`` (``+``), a step number, or None."""
+    spec = spec.strip()
+    if spec.startswith("+"):
+        return "inc"
+    m = re.match(r"(\d+)", spec)
+    return int(m.group(1)) if m else None
+
+
+def _match_end(text: str, begin: int, name: str):
+    """(start, end) of the ``\\end{name}`` that closes the ``\\begin{name}`` at ``begin``."""
+    depth = 0
+    for t in re.finditer(r"\\begin\{" + re.escape(name) + r"\}|\\end\{" + re.escape(name) + r"\}",
+                         text[begin:]):
+        depth += 1 if t.group(0).startswith("\\begin") else -1
+        if depth == 0:
+            return begin + t.start(), begin + t.end()
+    return None
+
+
+def _incremental_items(inner: str) -> str:
+    """``\\x02`` in front of every top-level ``\\item`` (the ``[<+->]`` list option)."""
+    out, depth = [], 0
+    for tok in re.split(r"(\\begin\{(?:itemize|enumerate|description)\}|"
+                        r"\\end\{(?:itemize|enumerate|description)\}|\\item\b)", inner):
+        if tok.startswith("\\begin"):
+            depth += 1
+        elif tok.startswith("\\end"):
+            depth -= 1
+        out.append(tok)
+        if tok == "\\item" and depth == 0:
+            out.append("\x07")
+    return "".join(out)
+
+
+def _overlays(text: str) -> str:
+    """Overlay commands -> marker characters (see :data:`_MARK`)."""
+    # \begin{itemize}[<+->] : every top-level item is one click
+    pat = re.compile(r"\\begin\{(itemize|enumerate|description)\}\s*\[\s*<\s*\+[^\]]*\]")
+    while True:
+        m = pat.search(text)
+        if not m:
+            break
+        head = "\\begin{" + m.group(1) + "}"
+        end = _match_end(text, m.start(), m.group(1))
+        if end is None:
+            text = text[:m.start()] + head + text[m.end():]
+            continue
+        text = (text[:m.start()] + head + _incremental_items(text[m.end():end[0]])
+                + text[end[0]:])
+    text = re.sub(r"(\\begin\{(?:itemize|enumerate|description)\})\s*\[\s*<[^\]]*>\s*\]", r"\1", text)
+    # \item<2-> / \item<+->
+    def item(m):
+        k = _spec_step(m.group(1))
+        if k == "inc":
+            return "\\item\x07"
+        return "\\item" + (f"\x03{k}\x04" if k else "")
+    text = re.sub(r"\\item\s*<([^<>]*)>", item, text)
+    # \uncover<2->{...} \only<2>{...} \visible<2->{...} \onslide<2->
+    out, pos = [], 0
+    for m in re.finditer(r"\\(?:uncover|only|visible|onslide|temporal)\s*<([^<>]*)>", text):
+        if m.start() < pos:
+            continue
+        out.append(text[pos:m.start()])
+        k = _spec_step(m.group(1))
+        g = _group(text, m.end()) if m.end() < len(text) and text[m.end()] == "{" else None
+        scoped = bool(k)
+        if k == "inc":
+            out.append("\x07")
+            k, scoped = None, True
+        if g is not None:
+            out.append((f"\x03{k}\x04" if k else "") + g[0] + ("\x05" if scoped else ""))
+            pos = g[1]
+        else:
+            out.append(f"\x03{k}\x04" if k else "")
+            pos = m.end()
+    out.append(text[pos:])
+    text = "".join(out)
+    # \begin{block}<2-> ... \end{block}: the whole environment appears with that step
+    pat = re.compile(r"\\begin\{(" + _ENV_NAMES + r")\}\s*<([^<>]*)>")
+    while True:
+        m = pat.search(text)
+        if not m:
+            break
+        k = _spec_step(m.group(2))
+        end = _match_end(text, m.start(), m.group(1))
+        body = "\\begin{" + m.group(1) + "}"
+        if end is None or k is None:
+            text = text[:m.start()] + body + text[m.end():]
+            continue
+        lead = "\x07" if k == "inc" else f"\x03{k}\x04"
+        text = (text[:m.start()] + lead + body + text[m.end():end[1]] + "\x05"
+                + text[end[1]:])
+    # \pause, \pause[3]
+    text = re.sub(r"\\pause\b\s*\[(\d+)\]", lambda m: f"\x06{m.group(1)}\x04", text)
+    return re.sub(r"\\pause\b", "\x02", text)
+
+
+class _Steps:
+    """Running appearance step while the blocks of a frame are read in order."""
+
+    def __init__(self):
+        self.n = 0                       # Beamer's overlay counter (the + in <+->)
+        self.hide = 0                    # everything after a pause starts here
+        self.floors: list = []           # scoped steps: item<2->, uncover<3->{..}
+
+    def current(self) -> int:
+        return self.floors[-1] if self.floors else self.hide
+
+    def feed(self, text: str):
+        """Consume the markers of ``text`` -> (clean text, step of its first visible content)."""
+        out, first, pos = [], None, 0
+
+        def seg(piece):
+            nonlocal first
+            if piece.strip() and first is None:
+                first = self.current()
+            out.append(piece)
+
+        for m in _MARK.finditer(text):
+            seg(text[pos:m.start()])
+            tok = m.group(0)
+            if tok == "\x02":
+                self.n += 1
+                self.hide = self.n
+            elif tok == "\x07":
+                self.n += 1
+                self.floors.append(self.n)
+            elif tok == "\x05":
+                if self.floors:
+                    self.floors.pop()
+            elif tok[0] == "\x03":
+                self.floors.append(int(tok[1:-1]))
+            else:
+                self.n = self.hide = int(tok[1:-1])
+            pos = m.end()
+        seg(text[pos:])
+        return "".join(out), (first if first is not None else self.current())
+
+
+def _tail(step: int) -> tuple:
+    return (step,) if step > 0 else ()
+
+
+def transition_of(text: str):
+    """The first ``\\trans...`` command of ``text`` -> kind ("fade", "wipe", ...) or None."""
+    m = _TRANS_RE.search(text)
+    if not m:
+        return None
+    word = m.group(1)
+    for k in ("split", "blinds"):
+        if word.startswith(k):
+            return k
+    return word
+
+
 
 def _math(m: str) -> str:
     m = re.sub(r"\\(?:mathrm|mathbf|mathit|text|textrm|mathsf|boldsymbol)\s*\{([^{}]*)\}", r"\1", m)
@@ -137,6 +307,9 @@ def parse_presentation(source: str) -> dict:
             frames.append({"kind": "title", "title": meta["title"]})
             continue
         parsed = _parse_with_items(body)
+        if not parsed.get("transition"):                 # \transfade before the frame
+            before = _TRANS_RE.findall(code[:m.start()])
+            parsed["transition"] = transition_of("\\trans" + before[-1]) if before else None
         if head["title"] and not parsed["title"]:
             parsed["title"] = head["title"]
         parsed["subtitle"] = parsed["subtitle"] or head["subtitle"]
@@ -192,7 +365,9 @@ def _parse_with_items(body: str) -> dict:
             if g:
                 out[key] = plain(g[0])
         text = _strip_cmd(text, name)
-    out["blocks"] = _blocks(text)
+    out["transition"] = transition_of(text)
+    text = _TRANS_RE.sub("", text)
+    out["blocks"] = _blocks(_overlays(text))
     return out
 
 
@@ -225,22 +400,30 @@ def _find_env(text: str, start: int = 0):
     return None
 
 
-def _blocks(text: str) -> list:
+def _blocks(text: str, st: "_Steps | None" = None) -> list:
+    st = st or _Steps()
     blocks = []
 
     def add_text(chunk: str):
         pos = 0
         for m in _FIG_CMD.finditer(chunk):
             _text_blocks(chunk[pos:m.start()])
-            blocks.append(("picture", m.group(1), m.group(3).strip(), m.group(2) or ""))
+            blocks.append(("picture", m.group(1), m.group(3).strip(), m.group(2) or "")
+                          + _tail(st.current()))
             pos = m.end()
         _text_blocks(chunk[pos:])
 
     def _text_blocks(chunk):
-        t = plain(chunk)
-        for para in re.split(r"\n\s*\n|\n", t):
-            if para.strip():
-                blocks.append(("text", para.strip()))
+        if not _MARK.search(chunk):
+            for para in re.split(r"\n\s*\n|\n", plain(chunk)):
+                if para.strip():
+                    blocks.append(("text", para.strip()) + _tail(st.current()))
+            return
+        for line in re.split(r"\n", chunk):          # overlays: one step per line
+            clean, step = st.feed(line)
+            for para in re.split(r"\n", plain(clean)):
+                if para.strip():
+                    blocks.append(("text", para.strip()) + _tail(step))
 
     pos = 0
     while True:
@@ -252,25 +435,31 @@ def _blocks(text: str) -> list:
         add_text(text[pos:bs])
         inner = text[be:es]
         if name in ("itemize", "enumerate", "description"):
-            blocks.append(("list", _list_items(inner, name == "enumerate", 0)))
+            steps: list = []
+            items = _list_items(inner, name == "enumerate", 0, st, steps)
+            blocks.append(("list", items, steps))
         elif name == "columns":
-            cols = []
-            for cm in re.finditer(r"\\begin\{column\}\s*\{[^{}]*\}(.*?)\\end\{column\}", inner, re.S):
-                cols.append(_blocks(cm.group(1)))
+            cols, p = [], 0
+            for cm in re.finditer(r"\\begin\{column\}\s*\{[^{}]*\}(.*?)\\end\{column\}", inner,
+                                  re.S):
+                st.feed(inner[p:cm.start()])
+                p = cm.end()
+                cols.append(_blocks(cm.group(1), st))
+            st.feed(inner[p:])
             blocks.append(("columns", cols))
         elif name == "tabular":
             g = _group(inner, 0)
             rows = _parse_tabular(inner[g[1]:] if g else inner)
             if rows:
-                blocks.append(("table", rows))
+                blocks.append(("table", rows) + _tail(st.current()))
         elif name in ("block", "alertblock", "exampleblock"):
             g = _group(inner, 0)
             if g:
-                blocks.append(("text", "**" + plain(g[0])))
+                blocks.append(("text", "**" + plain(g[0])) + _tail(st.current()))
                 inner = inner[g[1]:]
-            blocks.extend(_blocks(inner))
+            blocks.extend(_blocks(inner, st))
         else:                                # figure / center: transparent
-            blocks.extend(_blocks(_drop_caption(inner, blocks)))
+            blocks.extend(_blocks(_drop_caption(inner, blocks), st))
         pos = ee
     return blocks
 
@@ -285,8 +474,12 @@ def _drop_caption(inner: str, blocks: list) -> str:
     return inner[:m.start()] + inner[m.end() + len(g[0]) + 2:] + "\n\n" + g[0]
 
 
-def _list_items(inner: str, ordered: bool, level: int) -> list:
-    """Items of one list level (nested lists become deeper items)."""
+def _list_items(inner: str, ordered: bool, level: int, st: "_Steps | None" = None,
+                steps: "list | None" = None) -> list:
+    """Items of one list level (nested lists become deeper items); ``steps`` receives the
+    appearance step of every item, in the same order."""
+    st = st or _Steps()
+    steps = steps if steps is not None else []
     items = []
     # split on \item at depth 0 (nested lists are kept whole inside their item)
     parts, depth, cur = [], 0, ""
@@ -304,25 +497,36 @@ def _list_items(inner: str, ordered: bool, level: int) -> list:
         else:
             cur += tok
     parts.append(cur)
-    for part in parts[1:] if len(parts) > 1 else parts:
+    for idx, part in enumerate(parts):
+        if idx == 0 and len(parts) > 1:
+            st.feed(part)                    # text (markers) in front of the first \item
+            continue
+        floors = len(st.floors)
         m = re.search(r"\\begin\{(itemize|enumerate|description)\}", part)
         if m:
             head = part[:m.start()]
             env = _find_env(part, m.start())
-            nested = _list_items(part[env[2]:env[3]], env[0] == "enumerate", level + 1) if env else []
-            tail = part[env[4]:] if env else ""
-            t = plain(head + " " + tail)
+            clean_h, step_h = st.feed(head)
+            nested_steps: list = []
+            nested = _list_items(part[env[2]:env[3]], env[0] == "enumerate", level + 1, st,
+                                 nested_steps) if env else []
+            clean_t, step_t = st.feed(part[env[4]:] if env else "")
+            t = plain(clean_h + " " + clean_t)
             if t:
                 items.append((level, t, ordered))
+                steps.append(step_h if clean_h.strip() else step_t)
             items.extend(nested)
+            steps.extend(nested_steps)
         else:
-            t = plain(part)
+            clean, step = st.feed(part)
+            t = plain(clean)
             if t:
                 items.append((level, t, ordered))
+                steps.append(step)
+        del st.floors[floors:]
     return items
 
 
-# --------------------------------------------------------------------------- PPTX writer
 def reference_for(source: str):
     """``(reference.pptx path | None, mapping dict)`` of the imported theme the document uses."""
     code = _COMMENT.sub("", source)
@@ -347,7 +551,8 @@ def _need_pptx():
 
 
 def export_pptx(source: str, out_path, sheets, assets, sheet_png, asset_png, workdir,
-                reference: str | None = None, mapping: dict | None = None):
+                reference: str | None = None, mapping: dict | None = None,
+                effect: str = "appear"):
     """Write ``source`` (a beamer document, tables already expanded) as ``out_path``.
     Returns ``(ok, notes)``."""
     _need_pptx()
@@ -412,8 +617,11 @@ def export_pptx(source: str, out_path, sheets, assets, sheet_png, asset_png, wor
             only_layout if all(b[0] in ("picture", "table") for b in fr["blocks"])
             and fr["blocks"] else content_layout)
         slide = prs.slides.add_slide(layout)
-        _fill_content(slide, fr, picture_file, notes, cols)
+        anims: list = []
+        _fill_content(slide, fr, picture_file, notes, cols, anims)
         _add_slide_number(slide, layout)
+        _transition(slide, fr.get("transition"))
+        _animate(slide, anims, effect)
         if fr.get("note"):
             slide.notes_slide.notes_text_frame.text = fr["note"]
     prs.save(str(out_path))
@@ -516,10 +724,11 @@ def _place_picture(slide, path, box, frac=None):
     if frac and frac[0] == "frac":
         w2, h2 = _fit(path, int(bw * min(1.0, frac[1])), bh)
         w, h = w2, h2
-    slide.shapes.add_picture(str(path), left + (bw - w) // 2, top + (bh - h) // 2, w, h)
+    return slide.shapes.add_picture(str(path), left + (bw - w) // 2, top + (bh - h) // 2,
+                                    w, h)
 
 
-def _fill_content(slide, fr, picture_file, notes, cols):
+def _fill_content(slide, fr, picture_file, notes, cols, anims=None):
     from pptx.util import Emu
     phs = _placeholders(slide)
     title = next((p for p in phs if _is_title(p)), None)
@@ -545,26 +754,29 @@ def _fill_content(slide, fr, picture_file, notes, cols):
         if not f.has_text_frame or not f.text_frame.text:
             _remove(f)
     blocks = fr["blocks"]
+    anims = anims if anims is not None else []
 
     def area_of(ph):
         return (ph.left, ph.top, ph.width, ph.height)
 
     def render(blocks_, ph, box):
         """Blocks into one placeholder (text) and free shapes (pictures / tables)."""
-        lines = []
+        lines, line_steps = [], []
         pics = []
         tables = []
         for b in blocks_:
             if b[0] == "list":
                 lines.extend((lvl, txt) for lvl, txt, _o in b[1])
+                line_steps.extend(b[2] if len(b) > 2 else [0] * len(b[1]))
             elif b[0] == "text":
                 lines.append(b[1])
+                line_steps.append(b[2] if len(b) > 2 else 0)
             elif b[0] == "picture":
                 f = picture_file(b[1], b[2])
                 if f is not None:
-                    pics.append((f, _width_fraction(b[3])))
+                    pics.append((f, _width_fraction(b[3]), b[4] if len(b) > 4 else 0))
             elif b[0] == "table":
-                tables.append(b[1])
+                tables.append((b[1], b[2] if len(b) > 2 else 0))
         left, top, width, height = box
         text_w = width
         if lines and (pics or tables):
@@ -573,6 +785,9 @@ def _fill_content(slide, fr, picture_file, notes, cols):
             if lines:
                 ph.left, ph.top, ph.width, ph.height = left, top, text_w, height
                 _set_text(ph, lines)
+                for i, k in enumerate(line_steps):
+                    if k > 0:
+                        anims.append((ph, i, k))
             else:
                 _remove(ph)
         shapes_left = left + (text_w + int(width * 0.02) if lines and (pics or tables) else 0)
@@ -582,9 +797,11 @@ def _fill_content(slide, fr, picture_file, notes, cols):
             cell_w = shapes_w // len(items)
             cell = (shapes_left + i * cell_w, top, cell_w, height)
             if kind == "pic":
-                _place_picture(slide, obj[0], cell, obj[1])
+                shp, k = _place_picture(slide, obj[0], cell, obj[1]), obj[2]
             else:
-                _place_table(slide, obj, cell)
+                shp, k = _place_table(slide, obj[0], cell), obj[1]
+            if k > 0:
+                anims.append((shp, None, k))
 
     if cols and len(cols[1]) >= 2 and len(main) >= 2:
         for ph, cb in zip(main[:2], cols[1][:2]):
@@ -623,6 +840,7 @@ def _place_table(slide, rows, box):
             for p in cell.text_frame.paragraphs:
                 for r in p.runs:
                     r.font.size = Pt(14)
+    return shape
 
 
 def _add_slide_number(slide, layout, even_title=True):
@@ -644,3 +862,91 @@ def _add_slide_number(slide, layout, even_title=True):
         f'type="slidenum"><a:rPr lang="en-US"/><a:t>&#8249;#&#8250;</a:t></a:fld>'
         f'<a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>')
     slide.shapes._spTree.append(sp)
+
+
+# --------------------------------------------------------------------------- effects
+_P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_EFFECTS = {                                   # name -> (presetID, subtype, animEffect filter)
+    "appear": (1, 0, None),
+    "fade": (10, 0, "fade"),
+    "wipe": (22, 8, "wipe(left)"),
+}
+_TRANSITIONS = {
+    "fade": "<p:fade/>", "dissolve": "<p:dissolve/>", "wipe": '<p:wipe dir="l"/>',
+    "split": '<p:split orient="vert" dir="out"/>', "blinds": '<p:blinds dir="horz"/>',
+    "pull": '<p:pull dir="l"/>', "cover": '<p:cover dir="l"/>',
+}
+
+
+def _transition(slide, kind):
+    """Slide transition from a Beamer ``\\trans...`` command."""
+    if not kind or kind not in _TRANSITIONS:
+        return
+    from lxml import etree
+    el = etree.fromstring(f'<p:transition xmlns:p="{_P_NS}" spd="med">{_TRANSITIONS[kind]}'
+                          f'</p:transition>')
+    slide._element.append(el)
+
+
+def _animate(slide, anims, effect="appear"):
+    """Click animations: ``anims`` = [(shape, paragraph index | None, step)]; every distinct
+    step is one click, all items of the same step appear together."""
+    if not anims:
+        return
+    from lxml import etree
+    pid, sub, filt = _EFFECTS.get(effect, _EFFECTS["appear"])
+    counter = [2]
+
+    def nid():
+        counter[0] += 1
+        return counter[0]
+
+    def target(shape, para):
+        if para is None:
+            return f'<p:spTgt spid="{shape.shape_id}"/>'
+        return (f'<p:spTgt spid="{shape.shape_id}"><p:txEl><p:pRg st="{para}" end="{para}"/>'
+                f'</p:txEl></p:spTgt>')
+
+    def one(shape, para, first):
+        t = target(shape, para)
+        node = "clickEffect" if first else "withEffect"
+        x = (f'<p:par><p:cTn id="{nid()}" presetID="{pid}" presetClass="entr" '
+             f'presetSubtype="{sub}" fill="hold" grpId="0" nodeType="{node}"><p:stCondLst>'
+             f'<p:cond delay="0"/></p:stCondLst><p:childTnLst><p:set><p:cBhvr>'
+             f'<p:cTn id="{nid()}" dur="1" fill="hold"><p:stCondLst><p:cond delay="0"/>'
+             f'</p:stCondLst></p:cTn><p:tgtEl>{t}</p:tgtEl><p:attrNameLst>'
+             f'<p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to>'
+             f'<p:strVal val="visible"/></p:to></p:set>')
+        if filt:
+            x += (f'<p:animEffect transition="in" filter="{filt}"><p:cBhvr><p:cTn id="{nid()}" '
+                  f'dur="500"/><p:tgtEl>{t}</p:tgtEl></p:cBhvr></p:animEffect>')
+        return x + "</p:childTnLst></p:cTn></p:par>"
+
+    clicks = []
+    for step in sorted({k for _, _, k in anims}):
+        outer, inner = nid(), nid()
+        effs = "".join(one(shp, para, i == 0) for i, (shp, para, k)
+                       in enumerate([a for a in anims if a[2] == step]))
+        clicks.append(
+            f'<p:par><p:cTn id="{outer}" fill="hold"><p:stCondLst><p:cond delay="indefinite"/>'
+            f'</p:stCondLst><p:childTnLst><p:par><p:cTn id="{inner}" fill="hold"><p:stCondLst>'
+            f'<p:cond delay="0"/></p:stCondLst><p:childTnLst>{effs}</p:childTnLst></p:cTn>'
+            f'</p:par></p:childTnLst></p:cTn></p:par>')
+    builds, seen = [], set()
+    for shp, para, _k in anims:
+        if shp.shape_id in seen or not getattr(shp, "has_text_frame", False):
+            continue
+        seen.add(shp.shape_id)
+        whole = para is None
+        builds.append(f'<p:bldP spid="{shp.shape_id}" grpId="0"'
+                      + ("" if whole else ' build="p"') + "/>")
+    xml = (f'<p:timing xmlns:p="{_P_NS}"><p:tnLst><p:par><p:cTn id="1" dur="indefinite" '
+           f'restart="never" nodeType="tmRoot"><p:childTnLst><p:seq concurrent="1" '
+           f'nextAc="seek"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>'
+           + "".join(clicks) +
+           '</p:childTnLst></p:cTn><p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl>'
+           '<p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst><p:nextCondLst><p:cond evt="onNext" '
+           'delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst></p:seq>'
+           '</p:childTnLst></p:cTn></p:par></p:tnLst>'
+           + (f'<p:bldLst>{"".join(builds)}</p:bldLst>' if builds else "") + '</p:timing>')
+    slide._element.append(etree.fromstring(xml))

@@ -643,6 +643,17 @@ title/x_label/y_label + trace labels).
   dropped; slide-number placeholders are cloned onto every slide; unused placeholders are removed so no
   "Click to add text" boxes remain. Callers pass `sheet_png` / `asset_png` (window host or headless).
 - Pictures are fitted into the body placeholder's rectangle; text + picture splits the area 46 / 54.
+- Effects: `_overlays(text)` turns `\pause`, `\item<n->`, `[<+->]`, `\uncover/\only/\visible<n>{..}`,
+  `\begin{env}<n>` into private marker characters (`\x02` pause, `\x07` scoped `+`, `\x03n\x04` ... `\x05`
+  scoped step, `\x06n\x04` pause[n]); `_Steps.feed` reads them in document order (counter `n`, hide level
+  after `\pause`, scoped `floors`). Blocks get a trailing step only when > 0 (`("text", s, step)`, list =
+  `("list", items, steps)`), so older shapes still compare equal. `export_pptx(effect=)` -> `_animate`
+  (p:timing, one click per distinct step; paragraph targets for list items, `bldP build="p"`),
+  `_transition` (`\trans...` in the frame or before it). Unspecified content after `[<+->]` stays visible
+  (Beamer counter vs. pause level are two variables).
+- `PresentationView(fade=True)` cross-fades slides (set by `\transfade` / `\transdissolve` in the text).
+- `findbar.FindBar` (Ctrl+F / Ctrl+H / F3 in `DocumentTab`): Python `re` over `toPlainText()` (UTF-16 offsets
+  handled), highlights as `ExtraSelection`s, replace-all as one edit block back to front.
 - `PresentationView` = frameless full-screen QPdfDocument viewer (keys documented in the class);
   `DocumentTab.present` builds first (`_ensure_built`).
 - `latex.write_bundle` writes a `README.txt` (compile + run instructions).

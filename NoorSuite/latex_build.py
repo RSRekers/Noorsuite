@@ -97,7 +97,7 @@ def _pptx(pm, dm, a) -> int:
     work = Path(tempfile.mkdtemp(prefix="noorsuite_pptx_"))
     try:
         ok, notes = pptxexport.export_pptx(expanded, out.resolve(), pm.sheets, pm.assets,
-                                           sheet_png, asset_png, work)
+                                           sheet_png, asset_png, work, effect=a.effect)
         for n in notes:
             print("note:", n, file=sys.stderr)
         print(f"exported {dm.name!r} -> {out}")
@@ -153,6 +153,8 @@ def main(argv) -> int:
     ap.add_argument("--doc", help="document name or id (default: the first one)")
     ap.add_argument("--out", help="build: output PDF path (default: <document name>.pdf)")
     ap.add_argument("--folder", help="export: destination folder")
+    ap.add_argument("--effect", choices=["appear", "fade", "wipe"], default="appear",
+                    help="pptx: entrance effect of overlay content (pause, item<2->, ...)")
     a = ap.parse_args(argv)
 
     if a.command == "engine":
