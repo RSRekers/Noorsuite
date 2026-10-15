@@ -143,6 +143,22 @@ class SlideCanvas(QWidget):
     def _paint_object(self, p: QPainter, obj: dict):
         g, k = to_mm(obj), obj["kind"]
         s = self._scale
+        if k.startswith("ph-"):                      # master placeholder: dashed labelled box
+            c = self.to_px(g["cx"], g["cy"])
+            r = QRectF(c.x() - g["w"] * s / 2, c.y() - g["h"] * s / 2, g["w"] * s, g["h"] * s)
+            p.save()
+            p.setPen(QPen(QColor("#e67e22"), 1.6, Qt.PenStyle.DashLine))
+            p.setBrush(QColor(230, 126, 34, 34))
+            p.drawRect(r)
+            f = QFont()
+            f.setPixelSize(11)
+            f.setBold(True)
+            p.setFont(f)
+            p.setPen(QColor("#c0630f"))
+            p.drawText(r.adjusted(4, 2, -4, -2), int(Qt.AlignmentFlag.AlignLeft
+                                                     | Qt.AlignmentFlag.AlignTop), obj.get("arg", ""))
+            p.restore()
+            return
         pen = QPen(_color(obj.get("line", "000000")), max(0.5, float(obj.get("lw", 1)) * MM_PER_PT * s))
         none_line = obj.get("line") == "none"
         dash = obj.get("dash", "solid")
@@ -244,6 +260,8 @@ class SlideCanvas(QWidget):
                     continue
                 x, y = self._global(g, hx * g["w"] / 2, hy * g["h"] / 2)
                 out.append((f"s{hx}{hy}", self.to_px(x, y)))
+        if obj["kind"].startswith("ph-"):
+            return out                                # placeholders: move / resize only
         # rotation handle: above the top edge, in the rotated frame
         off = ROTATE_OFFSET_PX / self._scale
         x, y = self._global(g, 0, -g["h"] / 2 - off)

@@ -214,3 +214,80 @@ def test_text_formatting_wraps_the_selection(win):
     assert tab.editor.toPlainText() == r"\textbf{hello} world"
     tab.editor.undo()
     assert tab.editor.toPlainText() == "hello world"
+
+
+CLEAN = "\n".join([
+    r"\documentclass[aspectratio=1610,11pt,t]{beamer}", r"\usetheme{noorclean}",
+    r"\usepackage{noorsuite}", r"\title{T}\author{A}\date{D}", r"\begin{document}",
+    r"\begin{frame}[plain]\titlepage\end{frame}",
+    r"\begin{frame}{Results here}", r"\begin{itemize}\item First point\end{itemize}",
+    r"\framesource{Source: me}", r"\end{frame}", r"\end{document}", ""])
+
+
+def test_master_objects_and_placeholders_in_the_text():
+    src = so.add_object(CLEAN, so.MASTER, {"kind": "rect", "x": 0, "y": 9.9, "w": 16, "h": 0.1,
+                                           "fill": "C8553D", "line": "none", "arg": ""})
+    assert r"\noormasterobj[x=0,y=9.9,w=16,h=0.1,fill=C8553D,line=none]{rect}{}" in src
+    assert src.index(r"\noormasterobj") < src.index(r"\begin{document}")
+    objs = so.objects_in(src, so.MASTER)
+    assert len(objs) == 1 and objs[0]["master"] and objs[0]["fill"] == "C8553D"
+    assert so.objects_in(src, 1) == []                               # frames are separate
+    src = so.delete_object(src, so.MASTER, 0)
+    assert r"\noormasterobj" not in src
+    phs = so.placeholders(CLEAN, (16.0, 10.0))
+    assert [p["kind"] for p in phs] == ["ph-title", "ph-body", "ph-number", "ph-source"]
+    phs[0]["x"], phs[0]["y"], phs[0]["w"], phs[0]["size"] = 2.0, 1.0, 11.0, 24.0
+    phs[2]["x"], phs[2]["y"], phs[2]["color"] = 14.0, 0.4, "FFFFFF"
+    out = so.write_placeholders(CLEAN, phs)
+    setup = so.read_setup(out)
+    assert setup["title-x"] == "2" and setup["title-size"] == "24" and setup["num-color"] == "FFFFFF"
+    assert so.has_placeholders(out)
+    again = so.placeholders(out, (16.0, 10.0))
+    assert again[0]["x"] == 2.0 and again[2]["color"] == "FFFFFF"
+
+
+@pytest.mark.skipif(latex.find_engine() is None, reason="no LaTeX engine installed")
+def test_master_layout_keys_compile_and_are_detected(win, tmp_path):
+    ids, dm, tab = _doc_win(win, 1)
+    src = so.write_placeholders(CLEAN, [
+        {**p, "x": 2.0 if p["kind"] == "ph-title" else p["x"]} for p in so.placeholders(
+            CLEAN, (16.0, 10.0))])
+    src = so.add_object(src, so.MASTER, {"kind": "ellipse", "x": 14, "y": 0.2, "w": 1.5, "h": 0.6,
+                                         "fill": "88ccff", "arg": ""})
+    latex.prepare_workdir(tmp_path, src)
+    res = latex.build_pdf(tmp_path)
+    assert res.ok, res.log[-800:]
+    # the editor measures the theme's own layout in the compiled PDF
+    tab.editor.setPlainText(CLEAN)
+    latex.prepare_workdir(tab.workdir, CLEAN)
+    res = latex.build_pdf(tab.workdir)
+    assert res.ok, res.log[-800:]
+    tab._pdf = res.pdf
+    tab.built_source = CLEAN
+    ed = tab.slide_editor
+    ed.set_frame(so.MASTER)
+    kinds = [o["kind"] for o in ed.canvas.objs]
+    assert kinds == ["ph-title", "ph-body", "ph-number", "ph-source"]
+    title = ed.canvas.objs[0]
+    assert 0.5 < title["x"] < 1.5 and title["y"] < 2.0           # noorclean: x 0.9, bar at the top
+    # moving a placeholder through the panel writes the layout line and keeps the others
+    ed.canvas.select(0)
+    ed.sp["x"].setValue(3.0)
+    ed.sp["x"].editingFinished.emit() if False else None
+    setup = so.read_setup(tab.source())
+    assert setup.get("title-x") == "3" and "num-x" in setup and "src-x" in setup
+    ed.add_object("rect")
+    assert any(o.get("master") for o in so.objects_in(tab.source(), so.MASTER))
+
+
+@pytest.mark.skipif(latex.find_engine() is None or "tectonic" not in str(latex.find_engine()).lower(),
+                    reason="needs tectonic")
+def test_second_build_is_a_single_tex_pass(tmp_path):
+    first = CLEAN.replace("First point", r"First \noorobj[x=1,y=5,w=2,h=1]{rect}{x}")
+    latex.prepare_workdir(tmp_path, first)
+    r1 = latex.build_pdf(tmp_path)
+    assert r1.ok and r1.log.count("Running TeX") == 2                 # positions need a second run
+    latex.prepare_workdir(tmp_path, first.replace("Results here", "Other title"))
+    r2 = latex.build_pdf(tmp_path)
+    assert r2.ok and r2.log.count("Running TeX") == 1                 # aux of the last build reused
+    assert (tmp_path / "out" / "main.synctex.gz").is_file()

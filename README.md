@@ -204,6 +204,18 @@ preview), text to edit the label. Objects are plain `\noorobj[x=..,y=..,w=..,h=.
 frame (positions in cm from the top-left corner), so everything stays editable in the text, in undo and in the
 PowerPoint export (native shapes, connectors, pictures, text boxes).
 
+**Master layout.** Choose *Master layout (all slides)* at the top of the slide editor's frame list to edit the
+template itself: the title, body text area, slide number and source line are dashed placeholder boxes (their
+starting positions are measured in the compiled PDF) that you drag and resize, with font size and colour in the
+side panel; rectangles, ellipses, lines, text, graphs and SVG logos you add there appear on every slide
+(`\noormasterobj` lines in the preamble). The first change takes the four placeholders over and writes them into
+the `\noorslide{title-x=..,title-y=..,title-w=..,body-x=..,body-y=..,body-w=..,num-x=..,num-y=..,src-x=..}` line,
+so what the editor shows is what LaTeX produces.
+
+**Build speed.** With tectonic, a rebuild reuses the auxiliary files of the previous one and runs TeX a second
+time only when positions / numbers changed (half the time for ordinary text edits; first build and structural
+changes still take two passes). `NOORSUITE_SLOW_BUILD=1` switches back to tectonic's own rerun logic.
+
 **Slide setup.** *Slide setup...* in the slide editor writes one `\noorslide{...}` line: title shift / size, space
 above the body, left / right text margins, and *slide number on the title slide* (position and size). It works on top
 of whatever theme the document uses.

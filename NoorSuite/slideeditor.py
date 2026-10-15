@@ -146,6 +146,7 @@ class SlideEditor(QWidget):
 
         self.frame_combo = QComboBox()
         self.frame_combo.currentIndexChanged.connect(self._frame_chosen)
+        self._detected = None                  # layout measured in the compiled PDF
         prev_b, next_b = QToolButton(), QToolButton()
         prev_b.setText("\u25C0")
         next_b.setText("\u25B6")
@@ -208,6 +209,7 @@ class SlideEditor(QWidget):
         s.setRange(lo, hi)
         s.setDecimals(2)
         s.setSingleStep(step)
+        s.setKeyboardTracking(False)        # commit on Enter / focus-out, not on every digit
         s.valueChanged.connect(self._props_edited)
         return s
 
@@ -270,18 +272,32 @@ class SlideEditor(QWidget):
             f.addRow(b)
         self.props.setEnabled(False)
 
+    @staticmethod
+    def _focused(w) -> bool:
+        return w.hasFocus() or (hasattr(w, "lineEdit") and w.lineEdit() is not None
+                                and w.lineEdit().hasFocus())
+
     def _show_props(self, index, obj):
         self._loading = True
         try:
             k = obj["kind"]
-            self.kind_label.setText(k)
+            ph = k.startswith("ph-")
+            self.kind_label.setText(self._label_for(k))
             line = k in ("line", "arrow")
             for key in ("x", "y", "w", "h", "x2", "y2", "angle", "lw", "opacity", "size"):
-                self.sp[key].setValue(float(obj.get(key, 0)))
-            for key in ("w", "h", "angle"):
+                if not self._focused(self.sp[key]):          # never overwrite what is being typed
+                    self.sp[key].setValue(float(obj.get(key, 0)))
+            for key in ("w", "h"):
                 self.sp[key].setEnabled(not line)
+            self.sp["angle"].setEnabled(not line and not ph)
             for key in ("x2", "y2"):
                 self.sp[key].setEnabled(line)
+            for wdg in (self.fill_btn, self.fill2_btn, self.grad_combo, self.line_btn,
+                        self.dash_combo, self.align_combo, self.sp["lw"], self.sp["opacity"]):
+                wdg.setEnabled(not ph)
+            self.sp["size"].setEnabled(k in ("rect", "ellipse", "text", "ph-title", "ph-number",
+                                             "ph-source"))
+            self.color_btn.setEnabled(k not in ("line", "arrow", "sheet", "file", "ph-body"))
             self.fill_btn.set_value(obj.get("fill", "none"))
             self.fill2_btn.set_value(obj.get("fill2", "") or "none")
             self.line_btn.set_value(obj.get("line", "000000"))
@@ -289,8 +305,9 @@ class SlideEditor(QWidget):
             self.grad_combo.setCurrentText(obj.get("grad", "vertical"))
             self.align_combo.setCurrentText(obj.get("align", "center"))
             self.dash_combo.setCurrentText(obj.get("dash", "solid"))
-            if self.text_edit.toPlainText() != obj.get("arg", ""):
-                self.text_edit.setPlainText(obj.get("arg", "") if k not in ("sheet", "file") else "")
+            if not self.text_edit.hasFocus() and self.text_edit.toPlainText() != obj.get("arg", ""):
+                self.text_edit.setPlainText(
+                    obj.get("arg", "") if k not in ("sheet", "file") and not ph else "")
             has_text = k in ("rect", "ellipse", "text")
             self.text_edit.setEnabled(has_text)
             self.edit_btn.setText({"sheet": "Open graph in NoorSuite", "file": "Edit in Inkscape"
@@ -298,6 +315,12 @@ class SlideEditor(QWidget):
             self.edit_btn.setVisible(k in ("sheet", "file") or has_text)
         finally:
             self._loading = False
+
+    @staticmethod
+    def _label_for(kind: str) -> str:
+        if kind.startswith("ph-"):
+            return "master placeholder: " + so.PH_LABELS.get(kind[3:], kind[3:])
+        return kind
 
     def _on_selected(self, index):
         self.props.setEnabled(index >= 0)
@@ -313,6 +336,9 @@ class SlideEditor(QWidget):
         obj = dict(self.canvas.objs[i])
         for k in ("x", "y", "w", "h", "x2", "y2", "angle", "lw", "opacity", "size"):
             obj[k] = round(self.sp[k].value(), 2)
+        if obj["kind"].startswith("ph-"):
+            obj["color"] = self.color_btn.value() if self.color_btn.value() != "none" else ""
+            return obj
         obj["fill"] = self.fill_btn.value()
         f2 = self.fill2_btn.value()
         obj["fill2"] = "" if f2 == "none" else f2
@@ -342,6 +368,14 @@ class SlideEditor(QWidget):
 
     def _commit(self, index, obj):
         src = self.tab.source()
+        if obj["kind"].startswith("ph-"):
+            phs = [dict(o) for o in self.canvas.objs if o["kind"].startswith("ph-")]
+            for i, o in enumerate(phs):
+                if o["kind"] == obj["kind"]:
+                    phs[i] = obj
+            self.tab.apply_source(so.write_placeholders(src, phs))
+            self.refresh()
+            return
         items = so.objects_in(src, self.frame)
         if not 0 <= index < len(items):
             return
@@ -408,7 +442,8 @@ class SlideEditor(QWidget):
 
     def delete_object(self, index):
         src = self.tab.source()
-        if 0 <= index < len(so.objects_in(src, self.frame)):
+        if 0 <= index < len(so.objects_in(src, self.frame)) and not \
+                self.canvas.objs[index]["kind"].startswith("ph-"):
             self.tab.apply_source(so.delete_object(src, self.frame, index))
             self.canvas.sel = -1
             self.refresh(select=-1)
@@ -416,7 +451,7 @@ class SlideEditor(QWidget):
     def duplicate_object(self, index):
         src = self.tab.source()
         items = so.objects_in(src, self.frame)
-        if not 0 <= index < len(items):
+        if not 0 <= index < len(items) or self.canvas.objs[index]["kind"].startswith("ph-"):
             return
         obj = dict(items[index])
         obj.pop("span", None)
@@ -432,7 +467,8 @@ class SlideEditor(QWidget):
     def reorder_object(self, index, delta):
         src = self.tab.source()
         n = len(so.objects_in(src, self.frame))
-        if 0 <= index < n and 0 <= index + delta < n:
+        if 0 <= index < n and 0 <= index + delta < n and not \
+                self.canvas.objs[index]["kind"].startswith("ph-"):
             self.tab.apply_source(so.move_object(src, self.frame, index, delta))
             self.refresh(select=index + delta)
 
@@ -480,17 +516,23 @@ class SlideEditor(QWidget):
             return None
 
     def set_frame(self, i: int):
+        """``i == -1``: the master layout (placeholders + objects drawn on every slide)."""
         n = len(so.frames(self.tab.source()))
-        if n:
-            self.frame = max(0, min(i, n - 1))
+        if n or i == so.MASTER:
+            self.frame = so.MASTER if i == so.MASTER else max(0, min(i, n - 1))
             self.canvas.sel = -1
             self.refresh(select=-1)
 
     def _frame_chosen(self, i):
-        if not self._loading and i >= 0 and i != self.frame:
-            self.set_frame(i)
+        if self._loading or i < 0:
+            return
+        want = i - 1                           # item 0 is the master layout
+        if want != self.frame:
+            self.set_frame(want)
 
     def follow_cursor(self):
+        if self.frame == so.MASTER:
+            return
         pos = self.tab.editor.textCursor().position()
         i = so.frame_at(self.tab.source(), pos)
         if i >= 0 and i != self.frame:
@@ -504,18 +546,111 @@ class SlideEditor(QWidget):
                 self._doc.load(path)
             self._doc_path = path
 
-    def _frame_page(self, built: str):
-        """PDF page (0-based) that shows the complete frame, or None."""
-        if self._doc.status() != QPdfDocument.Status.Ready:
-            return None
+    def _sample_frame(self, built: str):
+        """A content frame (with a title) to show the master on."""
         from . import pptxexport
         try:
             parsed = pptxexport.parse_presentation(built)
         except Exception:
             return None
+        for i, f in enumerate(parsed["frames"]):
+            if f["kind"] != "title" and f.get("title"):
+                return i
+        return None
+
+    def _frame_page(self, built: str, frame=None):
+        """PDF page (0-based) that shows the complete frame, or None."""
+        if self._doc.status() != QPdfDocument.Status.Ready:
+            return None
+        from . import pptxexport
+        frame = self.frame if frame is None else frame
+        try:
+            parsed = pptxexport.parse_presentation(built)
+        except Exception:
+            return None
         rows = pptxexport.page_map(parsed, self._doc.pageCount())
-        pages = [p for p, r in enumerate(rows) if r[0] == self.frame]
+        pages = [p for p, r in enumerate(rows) if r[0] == frame]
         return pages[-1] if pages else None
+
+    def _detect_layout(self, built: str) -> dict:
+        """Where the theme put title / body / number / source on a sample slide, measured in the
+        compiled PDF (cm): the starting point of the placeholders."""
+        from . import pptxexport
+        out = {}
+        try:
+            parsed = pptxexport.parse_presentation(built)
+            fi = self._sample_frame(built)
+            if fi is None:
+                return out
+            page = self._frame_page(built, fi)
+            if page is None:
+                return out
+            fr = parsed["frames"][fi]
+            text = self._doc.getAllText(page).text()
+            k = 2.54 / 72.0
+
+            def rect(s):
+                s = s.strip()
+                i = text.find(s) if s else -1
+                if i < 0:
+                    return None
+                r = self._doc.getSelectionAtIndex(page, i, len(s)).boundingRectangle()
+                return (r.x() * k, r.y() * k, r.width() * k, r.height() * k)
+            pw = self._page_mm()[0] / 10
+            t = rect(fr.get("title") or "")
+            if t:
+                out["title"] = {"x": round(t[0], 2), "y": round(t[1], 2),
+                                "w": round(max(t[2] + 0.4, pw - 2 * t[0] - 1.6), 2),
+                                "h": round(t[3], 2),
+                                "size": float(max(10, min(48, round(t[3] / k / 1.25))))}
+            first = None
+            for b in fr["blocks"]:
+                if b[0] == "list" and b[1]:
+                    first = (b[1][0][1], 0.7)
+                    break
+                if b[0] == "text":
+                    first = (b[1].lstrip("*"), 0.0)
+                    break
+            if first:
+                r = rect(first[0][:24])
+                if r:
+                    ph = self._page_mm()[1] / 10
+                    out["body"] = {"x": round(max(0.0, r[0] - first[1]), 2),
+                                   "y": round(max(0.0, r[1] - 0.15), 2),
+                                   "w": round(pw - 2 * max(0.0, r[0] - first[1]), 2),
+                                   "h": round(ph - r[1] - 1.0, 2)}
+            num = str(page + 1)
+            stripped = text.rstrip()
+            if stripped.endswith(num):
+                i = len(stripped) - len(num)
+                rr = self._doc.getSelectionAtIndex(page, i, len(num)).boundingRectangle()
+                out["number"] = {"x": round(rr.x() * k, 2), "y": round(rr.y() * k, 2),
+                                 "w": round(max(0.8, rr.width() * k + 0.3), 2),
+                                 "h": round(rr.height() * k, 2),
+                                 "size": float(max(6, min(30, round(rr.height() / 1.25)))),
+                                 "color": self._contrast_color(page, rr)}
+            if fr.get("source"):
+                r = rect(fr["source"][:30])
+                if r:
+                    out["source"] = {"x": round(r[0], 2), "y": round(r[1], 2),
+                                     "w": round(pw - 2 * r[0], 2), "h": round(r[3], 2),
+                                     "size": float(max(6, min(20, round(r[3] / k / 1.25))))}
+        except Exception:
+            return out
+        return out
+
+    def _contrast_color(self, page: int, r) -> str:
+        """White text on a dark patch of the page, black on a light one."""
+        try:
+            pts = self._doc.pagePointSize(page)
+            img = self._doc.render(page, QSize(int(pts.width()), int(pts.height())))
+            x = int(max(0, min(img.width() - 1, r.x() - 2)))
+            y = int(max(0, min(img.height() - 1, r.y() + r.height() / 2)))
+            c = img.pixelColor(x, y)
+            lum = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+            return "FFFFFF" if lum < 128 else "000000"
+        except Exception:
+            return "000000"
 
     def refresh(self, select=None):
         """Re-read the source and redraw (``select``: object index to select, -1 none)."""
@@ -523,24 +658,33 @@ class SlideEditor(QWidget):
         frs = so.frames(src)
         self._loading = True
         try:
-            titles = frame_titles(src)
-            if [self.frame_combo.itemText(i) for i in range(self.frame_combo.count())] != \
-                    [f"{i + 1}: {t}" for i, t in enumerate(titles)]:
+            titles = ["\u2605 Master layout (all slides)"] + [
+                f"{i + 1}: {t}" for i, t in enumerate(frame_titles(src))]
+            if [self.frame_combo.itemText(i) for i in range(self.frame_combo.count())] != titles:
                 self.frame_combo.clear()
-                self.frame_combo.addItems([f"{i + 1}: {t}" for i, t in enumerate(titles)])
-            self.frame = max(0, min(self.frame, len(frs) - 1)) if frs else 0
-            if frs:
-                self.frame_combo.setCurrentIndex(self.frame)
+                self.frame_combo.addItems(titles)
+            if self.frame != so.MASTER:
+                self.frame = max(0, min(self.frame, len(frs) - 1)) if frs else 0
+            self.frame_combo.setCurrentIndex(self.frame + 1)
         finally:
             self._loading = False
-        objs = so.objects_in(src, self.frame) if frs else []
+        master = self.frame == so.MASTER
+        objs = so.objects_in(src, self.frame) if (frs or master) else []
+        n_real = len(objs)
         self._load_pdf()
         built = getattr(self.tab, "built_source", None)
         bg, dirty, cover = None, None, []
         same_layout = built is not None and len(so.frames(built)) == len(frs) \
             and self._doc.status() == QPdfDocument.Status.Ready
+        phs = []
+        if master:
+            detected = self._detect_layout(built) if same_layout and not so.has_placeholders(
+                src) else None
+            pw, ph = (v / 10 for v in self._page_mm())
+            phs = so.placeholders(src, (pw, ph), detected)
+            objs = objs + phs
         if same_layout:
-            page = self._frame_page(built)
+            page = self._frame_page(built, self._sample_frame(built) if master else None)
             if page is not None:
                 pw, ph = self._page_mm()
                 px = QSize(max(200, int(self.canvas.width() * 1.2)),
@@ -550,12 +694,13 @@ class SlideEditor(QWidget):
                 old = so.objects_in(built, self.frame)
                 fmt = lambda o: so.format_object(o)                              # noqa: E731
                 dirty = set()
-                for i, o in enumerate(objs):
+                for i, o in enumerate(objs[:n_real]):
                     if i >= len(old) or fmt(o) != fmt(old[i]):
                         dirty.add(i)
                 for i, o in enumerate(old):
-                    if i >= len(objs) or fmt(o) != fmt(objs[i]):
+                    if i >= n_real or fmt(o) != fmt(objs[i]):
                         cover.append(self._cover_for(o, img))
+                dirty.update(range(n_real, len(objs)))                    # placeholders
         self.canvas.set_state(objs, self._page_mm(), bg, dirty, cover,
                               keep_selection=select is None)
         if select is not None:

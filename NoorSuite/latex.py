@@ -143,7 +143,28 @@ STY = r"""\NeedsTeXFormat{LaTeX2e}
   title-dx/.store in=\noos@tdx, title-dy/.store in=\noos@tdy, title-size/.store in=\noos@tsize,
   body-top/.store in=\noos@btop, margin-left/.store in=\noos@ml, margin-right/.store in=\noos@mr,
   number-on-title/.store in=\noos@numt, number-x/.store in=\noos@nx, number-y/.store in=\noos@ny,
-  number-size/.store in=\noos@nsize}
+  number-size/.store in=\noos@nsize,
+  title-x/.store in=\noos@tx, title-y/.store in=\noos@ty, title-w/.store in=\noos@tw,
+  title-color/.store in=\noos@tcol, body-x/.store in=\noos@bx, body-y/.store in=\noos@by,
+  body-w/.store in=\noos@bw, num-x/.store in=\noos@px, num-y/.store in=\noos@py,
+  num-size/.store in=\noos@psize, num-color/.store in=\noos@pcol,
+  src-x/.store in=\noos@sx, src-y/.store in=\noos@sy, src-w/.store in=\noos@sw,
+  src-size/.store in=\noos@ssize}
+\def\noos@tx{}\def\noos@ty{}\def\noos@tw{}\def\noos@tcol{}\def\noos@bx{}\def\noos@by{}\def\noos@bw{}
+\def\noos@px{}\def\noos@py{}\def\noos@psize{10}\def\noos@pcol{}
+\def\noos@sx{}\def\noos@sy{}\def\noos@sw{}\def\noos@ssize{8}
+\gdef\noo@source{}
+\AtBeginDocument{%
+  \ifdefined\framesource
+    \let\noo@oldfs\framesource
+    \renewcommand{\framesource}[1]{\gdef\noo@source{#1}\noo@oldfs{#1}}%
+  \else
+    \newcommand{\framesource}[1]{\gdef\noo@source{#1}}%
+  \fi}
+\AtBeginEnvironment{frame}{\gdef\noo@source{}}
+\gdef\noo@masterlist{}
+\newcommand{\noormasterobj}[3][]{\g@addto@macro\noo@masterlist{\noorobj[#1]{#2}{#3}}}
+\AtBeginDocument{\ifdefempty{\noo@masterlist}{}{\addtobeamertemplate{background}{}{\noo@masterlist}}}
 \def\noos@tdx{0}\def\noos@tdy{0}\def\noos@tsize{}\def\noos@btop{0}\def\noos@ml{}\def\noos@mr{}%
 \def\noos@numt{false}\def\noos@nx{}\def\noos@ny{}\def\noos@nsize{10}
 \newcommand{\noorslide}[1]{%
@@ -155,6 +176,44 @@ STY = r"""\NeedsTeXFormat{LaTeX2e}
   \addtobeamertemplate{frametitle}%
     {\begingroup\tikzset{every node/.append style={xshift=\noos@tdx cm,yshift=-\noos@tdy cm}}}%
     {\endgroup\vspace*{\noos@btop cm}}%
+  \ifdefempty{\noos@tx}{}{%
+    \ifdefempty{\noos@tw}{\def\noos@tw{12}}{}%
+    \ifdefempty{\noos@ty}{\def\noos@ty{0.3}}{}%
+    \ifdefempty{\noos@by}{\def\noos@fth{1.9}}{\def\noos@fth{\noos@by}}%
+    \ifdefempty{\noos@tcol}{\def\noos@tcolcmd{\usebeamercolor[fg]{frametitle}}}{%
+      \definecolor{noos@tc}{HTML}{\noos@tcol}\def\noos@tcolcmd{\color{noos@tc}}}%
+    \setbeamertemplate{frametitle}{%
+      \nointerlineskip
+      \vbox to \noos@fth cm{%
+        \begin{tikzpicture}[remember picture,overlay]
+          \node[anchor=north west,inner sep=0pt,text width=\noos@tw cm]
+            at ([shift={(\noos@tx cm,-\noos@ty cm)}]current page.north west)
+            {\hyphenpenalty=10000\raggedright\usebeamerfont{frametitle}\noos@tcolcmd
+             \insertframetitle};
+        \end{tikzpicture}\vss}}}%
+  \ifdefempty{\noos@bx}{}{%
+    \setbeamersize{text margin left=\noos@bx cm}%
+    \ifdefempty{\noos@bw}{}{%
+      \edef\noos@rm{\the\dimexpr\paperwidth-\noos@bx cm-\noos@bw cm\relax}%
+      \setbeamersize{text margin right=\noos@rm}}}%
+  \ifboolexpr{test{\ifdefempty{\noos@px}} and test{\ifdefempty{\noos@sx}}}{}{%
+    \ifdefempty{\noos@pcol}{\definecolor{noos@pc}{HTML}{000000}}{%
+      \definecolor{noos@pc}{HTML}{\noos@pcol}}%
+    \ifdefempty{\noos@sw}{\def\noos@sw{10}}{}%
+    \setbeamertemplate{footline}{%
+      \nointerlineskip
+      \begin{tikzpicture}[remember picture,overlay]
+        \ifdefempty{\noos@px}{}{%
+          \node[anchor=north west,inner sep=0pt,text=noos@pc,
+            font=\fontsize{\noos@psize pt}{\noos@psize pt}\selectfont]
+            at ([shift={(\noos@px cm,-\noos@py cm)}]current page.north west)
+            {\insertframenumber};}%
+        \ifdefempty{\noos@sx}{}{%
+          \node[anchor=north west,inner sep=0pt,text width=\noos@sw cm,
+            font=\fontsize{\noos@ssize pt}{\noos@ssize pt}\selectfont]
+            at ([shift={(\noos@sx cm,-\noos@sy cm)}]current page.north west)
+            {\noo@source};}%
+      \end{tikzpicture}}}%
   \ifdefstring{\noos@numt}{true}{%
     \addtobeamertemplate{title page}{}{%
       \begin{tikzpicture}[remember picture,overlay]
@@ -645,6 +704,61 @@ def prepare_workdir(workdir, source: str) -> Path:
     return wd
 
 
+_CARRIED = ("aux", "nav", "out", "toc", "snm", "bbl")
+
+
+def _read_aux(out: Path) -> dict:
+    data = {}
+    for ext in _CARRIED:
+        f = out / f"main.{ext}"
+        if f.is_file():
+            try:
+                data[ext] = f.read_bytes()
+            except OSError:
+                pass
+    return data
+
+
+def _build_tectonic_incremental(engine, wd: Path, out: Path, timeout, flags, log, t0):
+    """tectonic with its own rerun logic costs two full TeX runs every time (beamer: ~2.6 s
+    each).  Here the auxiliary files of the previous build are fed to a single run and another
+    run happens only when they changed (new figure position, label, page count ...): an ordinary
+    text edit is one pass.  Returns a BuildResult, or None to fall back to the classic path."""
+    prev = _read_aux(out)
+    for _ in range(4):
+        for ext, data in prev.items():                    # TeX reads them from the working dir
+            try:
+                (wd / f"main.{ext}").write_bytes(data)
+            except OSError:
+                return None
+        cmd = [engine, "-X", "compile", "--only-cached", "--synctex", "--keep-intermediates",
+               "--reruns", "0", "--outdir", "out", "main.tex"]
+        try:
+            res = subprocess.run(cmd, cwd=wd, capture_output=True, text=True, timeout=timeout,
+                                 encoding="utf-8", errors="replace", **flags)
+            if res.returncode != 0:                       # package not cached yet: go online
+                cmd = [c for c in cmd if c != "--only-cached"]
+                res = subprocess.run(cmd, cwd=wd, capture_output=True, text=True,
+                                     timeout=timeout, encoding="utf-8", errors="replace",
+                                     **flags)
+        except subprocess.TimeoutExpired:
+            return BuildResult(False, log="\n".join(log) + "\nLaTeX run timed out.",
+                               engine=engine, seconds=time.time() - t0)
+        except OSError:
+            return None
+        log.append(f"$ {' '.join(cmd)}\n{res.stdout}{res.stderr}")
+        if res.returncode != 0:
+            return BuildResult(False, log="\n".join(log), engine=engine,
+                               seconds=time.time() - t0)
+        new = _read_aux(out)
+        if new.get("aux") == prev.get("aux") and new.get("out") == prev.get("out"):
+            break                                          # the run saw its own fixed point
+        prev = new
+    pdf = out / "main.pdf"
+    return BuildResult(pdf.is_file(), str(pdf) if pdf.is_file() else "", "\n".join(log),
+                       engine, time.time() - t0)
+
+
 def build_pdf(workdir, engine=None, timeout=300) -> BuildResult:
     """Compile ``<workdir>/main.tex``. Figures must already be in ``noorsuite-figures/``."""
     engine = engine or find_engine()
@@ -659,6 +773,15 @@ def build_pdf(workdir, engine=None, timeout=300) -> BuildResult:
     t0, log = time.time(), []
     flags = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
     commands = engine_commands(engine, "main.tex", "out")
+    if Path(engine).stem.lower() == "tectonic" and os.environ.get("NOORSUITE_SLOW_BUILD") != "1":
+        try:
+            tex = (wd / "main.tex").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            tex = ""
+        if not re.search(r"\\bibliography\s*\{", tex):     # BibTeX needs tectonic's own loop
+            fast = _build_tectonic_incremental(engine, wd, out, timeout, flags, log, t0)
+            if fast is not None:
+                return fast
     for cmd in commands:
         is_bibtex = Path(cmd[0]).stem.lower() == "bibtex"
         try:

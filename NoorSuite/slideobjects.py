@@ -26,7 +26,8 @@ ALWAYS = ("x", "y")                                  # written even when 0
 
 _BEGIN = re.compile(r"\\begin\{frame\}")
 _END = re.compile(r"\\end\{frame\}")
-_OBJ = re.compile(r"\\noorobj\s*")
+_OBJ = re.compile(r"\\noor(?:master)?obj\s*")
+MASTER = -1                                          # "frame" index of the master layout
 
 
 def frames(source: str) -> list:
@@ -110,6 +111,8 @@ def parse_object(text: str, start: int):
         obj[k] = float(v) if k in NUMERIC and _isnum(v) else v
     obj["kind"] = kind[0].strip()
     obj["arg"] = content[0]
+    if m.group(0).startswith("\\noormasterobj"):
+        obj["master"] = True
     return obj, content[1]
 
 
@@ -121,12 +124,21 @@ def _isnum(v) -> bool:
         return False
 
 
+def _preamble_span(source: str) -> tuple:
+    b = re.search(r"\\begin\{document\}", source)
+    return (0, b.start() if b else len(source))
+
+
 def objects_in(source: str, frame: int) -> list:
-    """Objects of one frame in drawing order: dicts with ``span`` (absolute text offsets)."""
-    fr = frames(source)
-    if not 0 <= frame < len(fr):
-        return []
-    s, e = fr[frame]
+    """Objects of one frame in drawing order: dicts with ``span`` (absolute text offsets).
+    ``frame == MASTER`` -> the ``\\noormasterobj`` lines of the preamble (drawn on every slide)."""
+    if frame == MASTER:
+        s, e = _preamble_span(source)
+    else:
+        fr = frames(source)
+        if not 0 <= frame < len(fr):
+            return []
+        s, e = fr[frame]
     out = []
     pos = s
     while True:
@@ -173,7 +185,8 @@ def format_object(obj: dict) -> str:
         if k == "fill2" and not v:
             continue
         parts.append(f"{k}={_num(float(v)) if k in NUMERIC and _isnum(v) else v}")
-    return f"\\noorobj[{','.join(parts)}]{{{kind}}}{{{obj.get('arg', '')}}}"
+    macro = "noormasterobj" if obj.get("master") else "noorobj"
+    return f"\\{macro}[{','.join(parts)}]{{{kind}}}{{{obj.get('arg', '')}}}"
 
 
 def replace_object(source: str, frame: int, index: int, obj: dict) -> str:
@@ -183,6 +196,11 @@ def replace_object(source: str, frame: int, index: int, obj: dict) -> str:
 
 
 def add_object(source: str, frame: int, obj: dict) -> str:
+    if frame == MASTER:
+        obj = dict(obj, master=True)
+        b = re.search(r"\\begin\{document\}", source)
+        pos = b.start() if b else len(source)
+        return source[:pos] + format_object(obj) + "\n" + source[pos:]
     fr = frames(source)
     s, e = fr[frame]
     close = source.rfind("\\end{frame}", s, e)
@@ -226,7 +244,9 @@ def slide_size_mm(source: str) -> tuple:
 
 # ---------------------------------------------------------------------- slide setup line
 SETUP_KEYS = ("title-dx", "title-dy", "title-size", "body-top", "margin-left", "margin-right",
-              "number-on-title", "number-x", "number-y", "number-size")
+              "number-on-title", "number-x", "number-y", "number-size",
+              "title-x", "title-y", "title-w", "title-color", "body-x", "body-y", "body-w",
+              "num-x", "num-y", "num-size", "num-color", "src-x", "src-y", "src-w", "src-size")
 _SETUP = re.compile(r"\\noorslide\s*(?=\{)")
 
 
@@ -257,3 +277,76 @@ def write_setup(source: str, values: dict) -> str:
     anchor = re.search(r"^\\title\b|^\\begin\{document\}", source, re.M)
     pos = anchor.start() if anchor else len(source)
     return source[:pos] + line + "\n" + source[pos:]
+
+
+# ---------------------------------------------------------------------- master placeholders
+PLACEHOLDERS = ("title", "body", "number", "source")
+_PH_KEYS = {
+    "title": {"x": "title-x", "y": "title-y", "w": "title-w", "size": "title-size",
+              "color": "title-color"},
+    "body": {"x": "body-x", "y": "body-y", "w": "body-w"},
+    "number": {"x": "num-x", "y": "num-y", "size": "num-size", "color": "num-color"},
+    "source": {"x": "src-x", "y": "src-y", "w": "src-w", "size": "src-size"},
+}
+PH_LABELS = {"title": "Frame title", "body": "Body text area", "number": "Slide number",
+             "source": "Source line"}
+
+
+def placeholder_defaults(page_cm) -> dict:
+    pw, ph = page_cm
+    return {
+        "title": {"x": 0.9, "y": 0.35, "w": round(pw - 1.8 - 1.6, 2), "h": 1.2, "size": 20.0,
+                  "color": ""},
+        "body": {"x": 0.9, "y": 1.9, "w": round(pw - 1.8, 2), "h": round(ph - 1.9 - 1.1, 2),
+                 "size": 0.0, "color": ""},
+        "number": {"x": round(pw - 1.5, 2), "y": round(ph - 0.9, 2), "w": 1.0, "h": 0.5,
+                   "size": 10.0, "color": "000000"},
+        "source": {"x": 0.9, "y": round(ph - 0.85, 2), "w": round(pw - 3.2, 2), "h": 0.5,
+                   "size": 8.0, "color": ""},
+    }
+
+
+def has_placeholders(source: str) -> bool:
+    setup = read_setup(source)
+    return any(k in setup for k in ("title-x", "body-x", "num-x", "src-x"))
+
+
+def placeholders(source: str, page_cm, detected: dict | None = None) -> list:
+    """The four layout placeholders as pseudo objects (kind ``ph-title`` ...): values from the
+    ``\\\\noorslide`` line, else ``detected`` (measured in the compiled PDF), else defaults."""
+    setup = read_setup(source)
+    base = placeholder_defaults(page_cm)
+    out = []
+    for name in PLACEHOLDERS:
+        g = dict(base[name])
+        if detected and name in detected:
+            g.update(detected[name])
+        for field, key in _PH_KEYS[name].items():
+            if key in setup and setup[key] != "":
+                g[field] = setup[key] if field == "color" else float(setup[key])
+        out.append({"kind": f"ph-{name}", "x": float(g["x"]), "y": float(g["y"]),
+                    "w": float(g["w"]), "h": float(g["h"]), "angle": 0.0,
+                    "size": float(g.get("size", 0) or 0), "color": g.get("color", "") or "",
+                    "arg": PH_LABELS[name], "fill": "none", "line": "000000", "lw": 1.0,
+                    "opacity": 1.0, "align": "left", "dash": "dashed", "x2": 0.0, "y2": 0.0,
+                    "fill2": "", "grad": "vertical"})
+    return out
+
+
+def write_placeholders(source: str, objs: list) -> str:
+    """Store all placeholder geometries in the ``\\\\noorslide`` line (the first edit takes the whole
+    layout over, so what the editor shows is what LaTeX produces)."""
+    setup = read_setup(source)
+    for o in objs:
+        name = o["kind"][3:]
+        if name not in _PH_KEYS:
+            continue
+        for field, key in _PH_KEYS[name].items():
+            v = o.get(field)
+            if v in (None, ""):
+                setup.pop(key, None)
+                continue
+            setup[key] = v if field == "color" else _num(float(v))
+    if "body-y" in setup:                               # title box height = where the body starts
+        pass
+    return write_setup(source, setup)

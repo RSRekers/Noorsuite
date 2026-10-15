@@ -163,6 +163,9 @@ Slide objects (tell the user): the document tab's *Slide editor* places and edit
 lines (cm from the top-left); *Slide setup...* writes `\noorslide{title-dx=,title-size=,body-top=,margin-left=,
 number-on-title=true,...}`. Figures in any document take `[width=,angle=,xshift=,yshift=]`.
 
+Master layout (tell the user): in the slide editor pick *Master layout (all slides)* to drag the title / body / number /
+source placeholders and add logos or decorations that appear on every slide.
+
 Presenter view (tell the user): Shift+F11 in the document tab = console with current / next slide, notes
 (`\note{..}`), timer + target time, laser pointer (L); the audience view goes full screen on a second monitor.
 Double-click in the PDF preview jumps to the matching line of the text (SyncTeX).

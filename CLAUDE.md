@@ -675,6 +675,19 @@ title/x_label/y_label + trace labels).
 - `\noorslide{title-dx,title-dy,title-size,body-top,margin-left,margin-right,number-on-title,number-x,number-y,
   number-size}` (beamer only): title shift = `every node` shift inside the frametitle template, number on the title
   slide = addition to the `title page` template (plain frames have no footline).
+- Master layout: `slideobjects.MASTER` (-1) = "frame" index of the preamble's `\noormasterobj` lines (drawn in
+  an `addtobeamertemplate{background}` *after* the theme background); `placeholders(source, page_cm, detected)`
+  -> pseudo objects `ph-title/body/number/source` (values: `\noorslide` keys `title-x/y/w/size/color`,
+  `body-x/y/w`, `num-x/y/size/color`, `src-x/y/w/size`, else `SlideEditor._detect_layout` = text rectangles
+  measured with `QPdfDocument.getAllText` + `getSelectionAtIndex` on a sample frame, else defaults);
+  `write_placeholders` writes all four groups at the first edit. In `noorsuite.sty` any of those keys replaces
+  the theme's frametitle / footline template (`\noo@source` is fed by a wrapped `\framesource`); `body-y` is the
+  height of the title box = where the body starts.
+- Build speed: `latex._build_tectonic_incremental` copies `out/main.{aux,nav,out,toc,snm,bbl}` of the last build
+  next to `main.tex`, runs `tectonic --reruns 0 --keep-intermediates` and repeats only while aux / out change
+  (fixed point = same result as tectonic's own loop, verified pixel-identical); documents with `\bibliography{`
+  keep the classic path. SpinBoxes of the slide editor have keyboard tracking off and `_show_props` never
+  overwrites a focused field (typing used to lose characters / the caret).
 - `\noorsheet` / `\noorfile` accept `xshift`, `yshift` (pgfkeys filter, rest goes to includegraphics);
   `figureopts.py` finds calls and rewrites width / height / scale / angle / xshift / yshift (`FigureTransformDialog`,
   PDF-preview right-click, editor context menu). `textformat.wrap` backs the Format menu.
