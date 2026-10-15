@@ -664,6 +664,20 @@ title/x_label/y_label + trace labels).
   main.tex (boxes are skipped: they carry the paragraph's end line), `match_line` maps a build-copy line to
   the editor line (exact text match nearest to the guess, else difflib). Engines get `--synctex` /
   `-synctex=1` (`latex.engine_commands`); `PdfPreview.sourceRequested` -> `DocumentTab.jump_to_source`.
+- Slide objects: `slideobjects.py` (Qt-free: `objects_in(source, frame)`, `format_object`, `replace/add/delete/
+  move_object`, `read_setup/write_setup`, `slide_size_mm`) <-> `\noorobj[...]{kind}{arg}` lines in `noorsuite.sty`
+  (TikZ overlay, `remember picture`, 2 passes; kinds rect ellipse line arrow text sheet file; defaults in
+  `slideobjects.DEFAULTS` mirror the macro, text kind = no border, left). `slidecanvas.SlideCanvas` = painter widget
+  (handles, local rotated frame maths; visual angle counter-clockwise like TikZ), `slideeditor.SlideEditor` = frame
+  navigator + toolbar + property panel; `DocumentTab.right_tabs` (PDF preview | Slide editor), `apply_source` =
+  minimal-diff edit (keeps cursor / scroll). Objects that differ from `DocumentTab.built_source` are painted by Qt
+  and the old place is covered with the sampled page colour, unchanged ones come from the PDF.
+- `\noorslide{title-dx,title-dy,title-size,body-top,margin-left,margin-right,number-on-title,number-x,number-y,
+  number-size}` (beamer only): title shift = `every node` shift inside the frametitle template, number on the title
+  slide = addition to the `title page` template (plain frames have no footline).
+- `\noorsheet` / `\noorfile` accept `xshift`, `yshift` (pgfkeys filter, rest goes to includegraphics);
+  `figureopts.py` finds calls and rewrites width / height / scale / angle / xshift / yshift (`FigureTransformDialog`,
+  PDF-preview right-click, editor context menu). `textformat.wrap` backs the Format menu.
 - `findbar.FindBar` (Ctrl+F / Ctrl+H / F3 in `DocumentTab`): Python `re` over `toPlainText()` (UTF-16 offsets
   handled), highlights as `ExtraSelection`s, replace-all as one edit block back to front.
 - `PresentationView` = frameless full-screen QPdfDocument viewer (keys documented in the class);

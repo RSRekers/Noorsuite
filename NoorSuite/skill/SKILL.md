@@ -158,6 +158,11 @@ Write frames: `\begin{frame}{Title} ... \end{frame}`; a figure frame is
 Layouts for presentations: `"beamer"` (plain), `"beamer-clean"` (NoorSuite's neutral theme), `"user:<name>"`
 (imported corporate templates, kept in the user's home folder - never put them into a repository).
 
+Slide objects (tell the user): the document tab's *Slide editor* places and edits free objects on a slide
+(rectangle, ellipse, line, arrow, text, graphs, SVG / pictures) as `\noorobj[x=,y=,w=,h=,angle=,fill=,...]{kind}{content}`
+lines (cm from the top-left); *Slide setup...* writes `\noorslide{title-dx=,title-size=,body-top=,margin-left=,
+number-on-title=true,...}`. Figures in any document take `[width=,angle=,xshift=,yshift=]`.
+
 Presenter view (tell the user): Shift+F11 in the document tab = console with current / next slide, notes
 (`\note{..}`), timer + target time, laser pointer (L); the audience view goes full screen on a second monitor.
 Double-click in the PDF preview jumps to the matching line of the text (SyncTeX).

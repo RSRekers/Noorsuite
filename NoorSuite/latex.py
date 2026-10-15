@@ -34,31 +34,142 @@ DEFAULT_FIG_CM = (12.0, 8.0)      # figure size for sheets that have no explicit
 LINK_SCHEME = "noorsuite://sheet/"
 
 STY = r"""\NeedsTeXFormat{LaTeX2e}
-\ProvidesPackage{noorsuite}[2026/10/12 NoorSuite sheets as figures]
+\ProvidesPackage{noorsuite}[2026/10/15 NoorSuite sheets as figures, slide objects]
 \RequirePackage{graphicx}
+\RequirePackage{etoolbox}
+\RequirePackage{pgfkeys}
 \makeatletter
 \@ifpackageloaded{hyperref}{}{\RequirePackage{hyperref}}
-\makeatother
-% \noorsheet[includegraphics options]{sheet-id-or-slug}
+% ---- figures: \noorsheet[includegraphics options, xshift=, yshift=]{sheet-id-or-slug}
+\newsavebox{\noor@box}
+\pgfkeys{/noorfig/.cd,
+  xshift/.store in=\noor@xs, yshift/.store in=\noor@ys,
+  .unknown/.code={\ifx\pgfkeyscurrentvalue\pgfkeysnovalue
+      \edef\noor@rest{\noor@rest,\pgfkeyscurrentname}%
+    \else\edef\noor@rest{\noor@rest,\pgfkeyscurrentname=\pgfkeyscurrentvalue}\fi}}
+% \noor@fig{options}{link target}{file}
+\newcommand{\noor@fig}[3]{%
+  \begingroup
+  \hypersetup{pdfborder={0 0 0},colorlinks=false}%
+  \def\noor@xs{0pt}\def\noor@ys{0pt}\def\noor@rest{}%
+  \pgfkeys{/noorfig/.cd,#1}%
+  \ifdim\noor@xs=0pt\ifdim\noor@ys=0pt
+    \href{noorsuite://sheet/#2}{\expandafter\includegraphics\expandafter[\noor@rest]{#3}}%
+  \else\noor@shifted{#2}{#3}\fi\else\noor@shifted{#2}{#3}\fi
+  \endgroup}
+\newcommand{\noor@shifted}[2]{%
+  \sbox\noor@box{\href{noorsuite://sheet/#1}{\expandafter\includegraphics\expandafter[\noor@rest]{#2}}}%
+  \raisebox{\noor@ys}{\makebox[\wd\noor@box][l]{\hspace*{\noor@xs}\usebox\noor@box}}}
 \newcommand{\noorsheet}[2][]{%
-  \begingroup
-  \hypersetup{pdfborder={0 0 0},colorlinks=false}%
   \IfFileExists{noorsuite-figures/#2.pdf}%
-    {\href{noorsuite://sheet/#2}{\includegraphics[#1]{noorsuite-figures/#2.pdf}}}%
-    {\fbox{\texttt{missing NoorSuite sheet \detokenize{#2}}}}%
-  \endgroup}
-% \noorfile[includegraphics options]{asset-id-or-name}: an imported SVG / PDF / PNG / JPG
+    {\noor@fig{#1}{#2}{noorsuite-figures/#2.pdf}}%
+    {\fbox{\texttt{missing NoorSuite sheet \detokenize{#2}}}}}
+% \noorfile[options]{asset-id-or-name}: an imported SVG / PDF / PNG / JPG
 \newcommand{\noorfile}[2][]{%
-  \begingroup
-  \hypersetup{pdfborder={0 0 0},colorlinks=false}%
   \IfFileExists{noorsuite-figures/asset-#2.pdf}%
-    {\href{noorsuite://sheet/asset:#2}{\includegraphics[#1]{noorsuite-figures/asset-#2.pdf}}}%
+    {\noor@fig{#1}{asset:#2}{noorsuite-figures/asset-#2.pdf}}%
     {\IfFileExists{noorsuite-figures/asset-#2.png}%
-      {\href{noorsuite://sheet/asset:#2}{\includegraphics[#1]{noorsuite-figures/asset-#2.png}}}%
+      {\noor@fig{#1}{asset:#2}{noorsuite-figures/asset-#2.png}}%
       {\IfFileExists{noorsuite-figures/asset-#2.jpg}%
-        {\href{noorsuite://sheet/asset:#2}{\includegraphics[#1]{noorsuite-figures/asset-#2.jpg}}}%
-        {\fbox{\texttt{missing NoorSuite file \detokenize{#2}}}}}}%
+        {\noor@fig{#1}{asset:#2}{noorsuite-figures/asset-#2.jpg}}%
+        {\fbox{\texttt{missing NoorSuite file \detokenize{#2}}}}}}}
+% ---- slide objects (presentations only):
+%   \noorobj[x=,y=,w=,h=,angle=,fill=,...]{kind}{content}   positions in cm from the top-left corner
+\@ifclassloaded{beamer}{%
+\RequirePackage{tikz}
+\usetikzlibrary{calc,shapes.geometric,arrows.meta}
+\pgfkeys{/noorobj/.cd,
+  x/.store in=\noo@x, y/.store in=\noo@y, w/.store in=\noo@w, h/.store in=\noo@h,
+  x2/.store in=\noo@xb, y2/.store in=\noo@yb, angle/.store in=\noo@ang,
+  fill/.store in=\noo@fill, fill2/.store in=\noo@fillb, grad/.store in=\noo@grad,
+  line/.store in=\noo@line, lw/.store in=\noo@lw, opacity/.store in=\noo@op,
+  size/.store in=\noo@size, color/.store in=\noo@col, align/.store in=\noo@align,
+  dash/.store in=\noo@dash}
+\newcommand{\noo@reset}{%
+  \def\noo@x{0}\def\noo@y{0}\def\noo@w{4}\def\noo@h{2}\def\noo@xb{4}\def\noo@yb{2}%
+  \def\noo@ang{0}\def\noo@fill{none}\def\noo@fillb{}\def\noo@grad{vertical}%
+  \def\noo@line{000000}\def\noo@lw{1}\def\noo@op{1}\def\noo@size{18}\def\noo@col{000000}%
+  \def\noo@align{center}\def\noo@dash{solid}}
+\newcommand{\noorobj}[3][]{%
+  \begingroup
+  \noo@reset\def\noo@kind{#2}%
+  \ifdefstring{\noo@kind}{text}{\def\noo@line{none}\def\noo@align{left}}{}%
+  \pgfkeys{/noorobj/.cd,#1}%
+  \pgfmathsetmacro\noo@cx{\noo@x+\noo@w/2}%
+  \pgfmathsetmacro\noo@cy{\noo@y+\noo@h/2}%
+  \pgfmathsetmacro\noo@bs{1.2*\noo@size}%
+  \ifdefstring{\noo@line}{none}{\definecolor{noo@linec}{HTML}{000000}}{\definecolor{noo@linec}{HTML}{\noo@line}}%
+  \definecolor{noo@textc}{HTML}{\noo@col}%
+  \ifdefstring{\noo@fill}{none}{\def\noo@fillopt{fill=none}}{%
+    \definecolor{noo@fillc}{HTML}{\noo@fill}%
+    \ifdefempty{\noo@fillb}{\def\noo@fillopt{fill=noo@fillc}}{%
+      \definecolor{noo@fillbc}{HTML}{\noo@fillb}%
+      \ifdefstring{\noo@grad}{horizontal}{%
+        \def\noo@fillopt{left color=noo@fillc,right color=noo@fillbc}}{%
+      \ifdefstring{\noo@grad}{radial}{%
+        \def\noo@fillopt{shading=radial,inner color=noo@fillc,outer color=noo@fillbc}}{%
+        \def\noo@fillopt{top color=noo@fillc,bottom color=noo@fillbc}}}}}%
+  \ifdefstring{\noo@line}{none}{\def\noo@drawopt{draw=none}}{\def\noo@drawopt{draw=noo@linec}}%
+  \ifdefstring{\noo@align}{center}{\def\noo@alignopt{align=center}}{%
+    \ifdefstring{\noo@align}{right}{\def\noo@alignopt{align=right}}{\def\noo@alignopt{align=left}}}%
+  \begin{tikzpicture}[remember picture,overlay]
+  \ifboolexpr{test{\ifdefstring{\noo@kind}{line}} or test{\ifdefstring{\noo@kind}{arrow}}}{%
+    \ifdefstring{\noo@kind}{arrow}{\def\noo@tip{-{Stealth[length=3mm,width=2.2mm]}}}{\def\noo@tip{}}%
+    \tikzset{noo@own/.style/.expanded={\noo@drawopt,line width=\noo@lw pt,\noo@dash,opacity=\noo@op,\noo@tip}}%
+    \draw[noo@own]
+      ([shift={(\noo@x cm,-\noo@y cm)}]current page.north west) --
+      ([shift={(\noo@xb cm,-\noo@yb cm)}]current page.north west);%
+  }{%
+  \ifboolexpr{test{\ifdefstring{\noo@kind}{sheet}} or test{\ifdefstring{\noo@kind}{file}}}{%
+    \node[anchor=center,inner sep=0pt,rotate=\noo@ang,opacity=\noo@op]
+      at ([shift={(\noo@cx cm,-\noo@cy cm)}]current page.north west)
+      {\ifdefstring{\noo@kind}{sheet}%
+        {\noorsheet[width=\noo@w cm,height=\noo@h cm]{#3}}%
+        {\noorfile[width=\noo@w cm,height=\noo@h cm]{#3}}};%
+  }{%
+    \ifdefstring{\noo@kind}{ellipse}{\def\noo@shape{ellipse}}{\def\noo@shape{rectangle}}%
+    \tikzset{noo@own/.style/.expanded={shape=\noo@shape,anchor=center,inner sep=2pt,\noo@drawopt,
+      line width=\noo@lw pt,\noo@dash,\noo@fillopt,opacity=\noo@op,minimum width=\noo@w cm,
+      minimum height=\noo@h cm,text width=\dimexpr\noo@w cm-4pt\relax,\noo@alignopt,rotate=\noo@ang,
+      text=noo@textc,font=\noexpand\fontsize{\noo@size pt}{\noo@bs pt}\noexpand\selectfont}}%
+    \node[noo@own]
+      at ([shift={(\noo@cx cm,-\noo@cy cm)}]current page.north west) {#3};%
+  }}%
+  \end{tikzpicture}%
   \endgroup}
+% ---- slide setup: \noorslide{title-dx=,title-dy=,title-size=,body-top=,margin-left=,margin-right=,
+%      number-on-title=true,number-x=,number-y=,number-size=}
+\pgfkeys{/noorslide/.cd,
+  title-dx/.store in=\noos@tdx, title-dy/.store in=\noos@tdy, title-size/.store in=\noos@tsize,
+  body-top/.store in=\noos@btop, margin-left/.store in=\noos@ml, margin-right/.store in=\noos@mr,
+  number-on-title/.store in=\noos@numt, number-x/.store in=\noos@nx, number-y/.store in=\noos@ny,
+  number-size/.store in=\noos@nsize}
+\def\noos@tdx{0}\def\noos@tdy{0}\def\noos@tsize{}\def\noos@btop{0}\def\noos@ml{}\def\noos@mr{}%
+\def\noos@numt{false}\def\noos@nx{}\def\noos@ny{}\def\noos@nsize{10}
+\newcommand{\noorslide}[1]{%
+  \pgfkeys{/noorslide/.cd,#1}%
+  \ifdefempty{\noos@ml}{}{\setbeamersize{text margin left=\noos@ml cm}}%
+  \ifdefempty{\noos@mr}{}{\setbeamersize{text margin right=\noos@mr cm}}%
+  \ifdefempty{\noos@tsize}{}{\pgfmathsetmacro\noos@tbs{1.2*\noos@tsize}%
+    \setbeamerfont{frametitle}{size=\fontsize{\noos@tsize pt}{\noos@tbs pt}\selectfont}}%
+  \addtobeamertemplate{frametitle}%
+    {\begingroup\tikzset{every node/.append style={xshift=\noos@tdx cm,yshift=-\noos@tdy cm}}}%
+    {\endgroup\vspace*{\noos@btop cm}}%
+  \ifdefstring{\noos@numt}{true}{%
+    \addtobeamertemplate{title page}{}{%
+      \begin{tikzpicture}[remember picture,overlay]
+        \ifdefempty{\noos@nx}%
+          {\node[anchor=south east,inner sep=0pt,font=\fontsize{\noos@nsize pt}{\noos@nsize pt}%
+            \selectfont] at ([shift={(-0.8cm,0.5cm)}]current page.south east) {\insertframenumber};}%
+          {\node[anchor=center,inner sep=0pt,font=\fontsize{\noos@nsize pt}{\noos@nsize pt}%
+            \selectfont] at ([shift={(\noos@nx cm,-\noos@ny cm)}]current page.north west)
+            {\insertframenumber};}%
+      \end{tikzpicture}}}{}}
+}{%
+\newcommand{\noorobj}[3][]{}
+\newcommand{\noorslide}[1]{}
+}
+\makeatother
 \endinput
 """
 

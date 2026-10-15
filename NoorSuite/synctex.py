@@ -86,30 +86,33 @@ def locate(data: dict, page: int, x: float, y: float, names=("main.tex",)):
 
 
 def match_line(build_lines: list, source_lines: list, line: int) -> int:
-    """0-based editor line that corresponds to 1-based ``line`` of the build copy."""
+    """0-based editor line that corresponds to 1-based ``line`` of the build copy.
+
+    The two texts are aligned as a whole (difflib over the stripped lines), so repeated lines
+    (item, centering ...) and blocks the build copy inserted (preamble additions, expanded
+    tables, the numbered reference list) do not throw the position off."""
     if not source_lines:
         return 0
-    idx = min(max(line - 1, 0), len(build_lines) - 1) if build_lines else 0
-    text = build_lines[idx].strip() if build_lines else ""
-    guess = min(idx, len(source_lines) - 1)
-    if not text:                                  # blank / structural line: search outward
-        for off in range(1, 12):
-            for j in (idx + off, idx - off):
-                if 0 <= j < len(build_lines) and build_lines[j].strip():
-                    text, idx = build_lines[j].strip(), j
-                    break
-            if text:
-                break
-    stripped = [s.strip() for s in source_lines]
-    exact = [i for i, s in enumerate(stripped) if s == text and text]
-    if exact:
-        return min(exact, key=lambda i: abs(i - guess))
-    best, score = guess, 0.0
-    lo, hi = max(0, guess - 80), min(len(stripped), guess + 80)
-    for i in range(lo, hi):
-        if not stripped[i]:
+    if not build_lines:
+        return min(max(line - 1, 0), len(source_lines) - 1)
+    idx = min(max(line - 1, 0), len(build_lines) - 1)
+    b = [t.strip() for t in build_lines]
+    s = [t.strip() for t in source_lines]
+    last = len(s) - 1
+    sm = difflib.SequenceMatcher(None, b, s, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if not (i1 <= idx < i2):
             continue
-        r = difflib.SequenceMatcher(None, text, stripped[i]).quick_ratio()
-        if r > score:
-            best, score = i, r
-    return best
+        if tag == "equal":
+            return min(j1 + (idx - i1), last)
+        if j2 <= j1:                        # the build copy added this line: stay next to it
+            return min(max(j1 - 1, 0), last)
+        best, score = None, -1.0
+        for j in range(j1, j2):             # replaced block: the most similar line in it
+            r = difflib.SequenceMatcher(None, b[idx], s[j]).ratio()
+            if r > score:
+                best, score = j, r
+        if score < 0.3:                     # nothing alike: keep the relative position
+            best = j1 + int((idx - i1) * (j2 - j1) / max(1, i2 - i1))
+        return min(best, last)
+    return min(idx, last)

@@ -330,12 +330,17 @@ def parse_presentation(source: str) -> dict:
 
     meta = {"title": cmd("title"), "author": cmd("author"), "date": cmd("date"),
             "institute": cmd("institute")}
+    from . import slideobjects as _so
+    meta["setup"] = _so.read_setup(code)
+    meta["page_cm"] = tuple(v / 10 for v in _so.slide_size_mm(code))
     frames, notes = [], []
     for m in _FRAME.finditer(code):
         head, body = _frame_head(m.group(1))
         is_title = bool(re.search(r"\\titlepage\b", body))
         if is_title:
-            frames.append({"kind": "title", "title": meta["title"]})
+            tf = _parse_with_items(body)
+            frames.append({"kind": "title", "title": meta["title"],
+                           "objects": tf.get("objects", [])})
             continue
         parsed = _parse_with_items(body)
         if not parsed.get("transition"):                 # \transfade before the frame
@@ -380,8 +385,22 @@ def _frame_head(raw: str):
 
 def _parse_with_items(body: str) -> dict:
     # replace each \item by a marker so the generic splitter can attach text to the right item
-    out = {"blocks": [], "source": "", "note": "", "title": None, "subtitle": None}
+    out = {"blocks": [], "source": "", "note": "", "title": None, "subtitle": None,
+           "objects": []}
     text = _COMMENT.sub("", body)
+    from . import slideobjects as _so                 # free objects: not part of the text flow
+    pos = 0
+    while True:
+        m = re.compile(r"\\noorobj\b").search(text, pos)
+        if not m:
+            break
+        got = _so.parse_object(text, m.start())
+        if got is None:
+            pos = m.end()
+            continue
+        out["objects"].append(got[0])
+        text = text[:m.start()] + text[got[1]:]
+        pos = m.start()
     # pull out the simple single-purpose commands first
     for name, key in (("framesource", "source"), ("note", "note")):
         for m in list(re.finditer(r"\\" + name + r"\s*(?:\[[^\]]*\])?\s*(?=\{)", text)):
@@ -645,7 +664,9 @@ def export_pptx(source: str, out_path, sheets, assets, sheet_png, asset_png, wor
 
     for fr in P["frames"]:
         if fr["kind"] == "title":
-            _title_slide(prs, title_layout, P["meta"], title_idx, notes)
+            tslide = _title_slide(prs, title_layout, P["meta"], title_idx, notes)
+            _title_number(tslide, title_layout, P["meta"])
+            _add_objects(tslide, fr.get("objects", []), prs, P["meta"], picture_file)
             continue
         cols = next((b for b in fr["blocks"] if b[0] == "columns"), None)
         layout = two_layout if cols and len(cols[1]) >= 2 else (
@@ -655,6 +676,7 @@ def export_pptx(source: str, out_path, sheets, assets, sheet_png, asset_png, wor
         anims: list = []
         _fill_content(slide, fr, picture_file, notes, cols, anims)
         _add_slide_number(slide, layout)
+        _add_objects(slide, fr.get("objects", []), prs, P["meta"], picture_file)
         _transition(slide, fr.get("transition"))
         _animate(slide, anims, effect)
         if fr.get("note"):
@@ -985,3 +1007,151 @@ def _animate(slide, anims, effect="appear"):
            '</p:childTnLst></p:cTn></p:par></p:tnLst>'
            + (f'<p:bldLst>{"".join(builds)}</p:bldLst>' if builds else "") + '</p:timing>')
     slide._element.append(etree.fromstring(xml))
+
+
+# --------------------------------------------------------------------------- free objects
+def _hex(value, default="000000") -> str:
+    v = str(value or "").lstrip("#")
+    return v if re.fullmatch(r"[0-9a-fA-F]{6}", v) else default
+
+
+def _set_alpha(fill_or_line_fore_color_parent, opacity: float):
+    """Opacity on the solid fill (DrawingML ``alpha``)."""
+    from lxml import etree
+    try:
+        clr = fill_or_line_fore_color_parent._xPr.find(
+            ".//{http://schemas.openxmlformats.org/drawingml/2006/main}srgbClr")
+    except Exception:
+        clr = None
+    if clr is not None:
+        a = etree.SubElement(clr, "{http://schemas.openxmlformats.org/drawingml/2006/main}alpha")
+        a.set("val", str(int(max(0.0, min(1.0, opacity)) * 100000)))
+
+
+def _title_number(slide, layout, meta):
+    """``number-on-title``: make sure the title slide shows its number (field box when the
+    title layout has no number placeholder)."""
+    if str(meta.get("setup", {}).get("number-on-title", "")).lower() != "true":
+        return
+    from pptx.enum.shapes import PP_PLACEHOLDER as T
+    if any(p.placeholder_format.type == T.SLIDE_NUMBER for p in layout.placeholders):
+        return
+    from lxml import etree
+    from pptx.util import Emu, Pt
+    prs = slide.part.package.presentation_part.presentation
+    setup = meta.get("setup", {})
+    pw_cm = meta.get("page_cm", (16.0, 10.0))[0]
+    k = prs.slide_width / (pw_cm * 360000)
+    size = float(setup.get("number-size", 10) or 10)
+    x = float(setup["number-x"]) * 360000 * k if setup.get("number-x") else prs.slide_width * 0.9
+    y = float(setup["number-y"]) * 360000 * k if setup.get("number-y") else prs.slide_height * 0.93
+    tb = slide.shapes.add_textbox(Emu(int(x)), Emu(int(y)), Emu(int(prs.slide_width * 0.08)),
+                                  Emu(int(prs.slide_height * 0.05)))
+    p = tb.text_frame.paragraphs[0]._p
+    for r in list(p):
+        p.remove(r)
+    ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    fld = etree.SubElement(p, f"{{{ns}}}fld")
+    fld.set("id", "{B6F15528-21DE-4FAA-801E-634DDDAF4B2B}")
+    fld.set("type", "slidenum")
+    rpr = etree.SubElement(fld, f"{{{ns}}}rPr")
+    rpr.set("lang", "en-US")
+    rpr.set("sz", str(int(size * 100)))
+    t = etree.SubElement(fld, f"{{{ns}}}t")
+    t.text = "1"
+
+
+def _add_objects(slide, objs, prs, meta, picture_file):
+    """The ``\\noorobj`` objects of a frame as native PowerPoint shapes / pictures / lines."""
+    if not objs:
+        return
+    from pptx.dml.color import RGBColor
+    from pptx.enum.dml import MSO_LINE
+    from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
+    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    from pptx.util import Emu, Pt
+    from lxml import etree
+    pw_cm, ph_cm = meta.get("page_cm", (16.0, 10.0))
+    kx = prs.slide_width / (pw_cm * 360000)
+    ky = prs.slide_height / (ph_cm * 360000)
+
+    def emu(v, k):
+        return Emu(int(float(v) * 360000 * k))
+
+    def style_line(shape, o):
+        ln = shape.line
+        if o.get("line") == "none":
+            ln.fill.background()
+        else:
+            ln.color.rgb = RGBColor.from_string(_hex(o.get("line")).upper())
+            ln.width = Pt(float(o.get("lw", 1)))
+            dash = {"dashed": MSO_LINE.DASH, "dotted": MSO_LINE.ROUND_DOT}.get(o.get("dash"))
+            if dash is not None:
+                ln.dash_style = dash
+
+    def style_text(shape, o):
+        tf = shape.text_frame
+        tf.word_wrap = True
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        text = plain(o.get("arg", ""))
+        if not text:
+            return
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            para = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            para.text = line
+            para.alignment = {"left": PP_ALIGN.LEFT, "right": PP_ALIGN.RIGHT}.get(
+                o.get("align"), PP_ALIGN.CENTER)
+            for r in para.runs:
+                r.font.size = Pt(float(o.get("size", 18)))
+                r.font.color.rgb = RGBColor.from_string(_hex(o.get("color")).upper())
+
+    for o in objs:
+        kind = o["kind"]
+        try:
+            if kind in ("line", "arrow"):
+                c = slide.shapes.add_connector(
+                    MSO_CONNECTOR.STRAIGHT, emu(o["x"], kx), emu(o["y"], ky),
+                    emu(o["x2"], kx), emu(o["y2"], ky))
+                style_line(c, o)
+                if kind == "arrow":
+                    ln = c.line._get_or_add_ln()
+                    tail = etree.SubElement(
+                        ln, "{http://schemas.openxmlformats.org/drawingml/2006/main}tailEnd")
+                    tail.set("type", "triangle")
+                continue
+            l, t = emu(o["x"], kx), emu(o["y"], ky)
+            w, h = emu(o["w"], kx), emu(o["h"], ky)
+            if kind in ("sheet", "file"):
+                f = picture_file("noorsheet" if kind == "sheet" else "noorfile", o.get("arg", ""))
+                if f is None:
+                    continue
+                pic = slide.shapes.add_picture(str(f), l, t, w, h)
+                pic.rotation = -float(o.get("angle", 0))
+                continue
+            if kind == "text":
+                shp = slide.shapes.add_textbox(l, t, w, h)
+            else:
+                shp = slide.shapes.add_shape(
+                    MSO_SHAPE.OVAL if kind == "ellipse" else MSO_SHAPE.RECTANGLE, l, t, w, h)
+                fill = o.get("fill", "none")
+                if fill == "none":
+                    shp.fill.background()
+                elif o.get("fill2"):
+                    shp.fill.gradient()
+                    stops = shp.fill.gradient_stops
+                    stops[0].color.rgb = RGBColor.from_string(_hex(fill).upper())
+                    stops[1].color.rgb = RGBColor.from_string(_hex(o["fill2"]).upper())
+                    shp.fill.gradient_angle = {"horizontal": 0, "vertical": 270}.get(
+                        o.get("grad"), 0)
+                else:
+                    shp.fill.solid()
+                    shp.fill.fore_color.rgb = RGBColor.from_string(_hex(fill).upper())
+                    if float(o.get("opacity", 1)) < 1:
+                        _set_alpha(shp.fill, float(o["opacity"]))
+                style_line(shp, o)
+                shp.shadow.inherit = False
+            style_text(shp, o)
+            shp.rotation = -float(o.get("angle", 0))
+        except Exception:                      # one odd object must not break the export
+            continue

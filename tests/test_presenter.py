@@ -116,3 +116,17 @@ def test_presenter_console_follows_the_show(app, tmp_path):
     assert con.timer_label.text() == "01:00"
     con.close()
     assert not view.isVisible()
+
+
+def test_line_mapping_survives_repeated_lines_and_inserted_blocks():
+    body = []
+    for n in range(40):
+        body += [r"\begin{itemize}", rf"\item entry number {n}", r"\end{itemize}", r"\centering", ""]
+    src = [r"\documentclass{article}", r"\begin{document}"] + body + [r"\end{document}"]
+    build = ([r"\documentclass{article}"] + [r"\usepackage{x}"] * 5 + src[1:30]
+             + ["% table expanded", r"\begin{tabular}{c}", "1 \\\\", r"\end{tabular}"] + src[30:])
+    for want in (7, 33, 90, 150, 190):                      # 0-based editor lines
+        line = next(i for i, t in enumerate(build) if t == src[want] and
+                    (i, t) and build[:i].count(t) == src[:want].count(t)) + 1
+        assert synctex.match_line(build, src, line) == want
+    assert synctex.match_line(build, src, 36) in range(25, 33)      # inserted table: next to it

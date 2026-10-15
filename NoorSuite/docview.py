@@ -108,6 +108,17 @@ class LatexEditor(QPlainTextEdit):
     text dropped from the project tree / figure list is inserted at the drop position."""
 
     sheetRequested = pyqtSignal(str)
+    transformRequested = pyqtSignal(int)          # line number of a figure call
+
+    def contextMenuEvent(self, event):
+        menu = self.createStandardContextMenu()
+        cur = self.cursorForPosition(event.pos())
+        line = cur.blockNumber()
+        if _NOOR_LINE_RE.search(cur.block().text()):
+            menu.addSeparator()
+            menu.addAction("Transform figure (size, rotation, shift)...",
+                           lambda: self.transformRequested.emit(line))
+        menu.exec(event.globalPos())
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -160,6 +171,13 @@ class _PageLabel(QLabel):
         self.setToolTip("Double-click to edit this figure in NoorSuite" if hit
                         else "Double-click: jump to this place in the text")
 
+    def contextMenuEvent(self, event):
+        key = self._preview.link_at(self._index, event.pos())
+        if key:
+            scale = self._preview._px_per_pt()
+            self._preview.figureMenuRequested.emit(key, self._index, event.pos().x() / scale,
+                                                   event.pos().y() / scale, event.globalPos())
+
     def mouseDoubleClickEvent(self, event):
         key = self._preview.link_at(self._index, event.position())
         if key:
@@ -176,6 +194,7 @@ class PdfPreview(QScrollArea):
 
     sheetRequested = pyqtSignal(str)
     sourceRequested = pyqtSignal(int, float, float)       # page (0-based), x, y in points
+    figureMenuRequested = pyqtSignal(str, int, float, float, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1055,6 +1074,19 @@ class DocumentTab(QWidget):
                             "template's master and layouts when the theme comes from one)")
         pptx_act.triggered.connect(self.export_pptx)
         toolbar.addAction(pptx_act)
+        fmt_btn = QToolButton()
+        fmt_btn.setText("Format")
+        fmt_btn.setToolTip("Format the selection: bold (Ctrl+B), italic (Ctrl+I), underline "
+                           "(Ctrl+U), colour, size, lists, alignment, super / subscript")
+        fmt_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        fmt_btn.setMenu(self._format_menu(fmt_btn))
+        toolbar.addWidget(fmt_btn)
+        for keys, kind in (("Ctrl+B", "bold"), ("Ctrl+I", "italic"), ("Ctrl+U", "underline")):
+            act = QAction(self)
+            act.setShortcut(QKeySequence(keys))
+            act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            act.triggered.connect(lambda _c=False, k=kind: self.format_selection(k))
+            self.addAction(act)
         fx = QToolButton()
         fx.setText("Effects")
         fx.setToolTip("Overlays and slide transitions (Beamer): content that appears step by "
@@ -1139,12 +1171,23 @@ class DocumentTab(QWidget):
         self.panel_act.toggled.connect(self.side.setVisible)
 
         self.preview = PdfPreview()
+        self.built_source = None             # editor text of the last successful build
+        self._compiling_source = None
+        from .slideeditor import SlideEditor
+        self.slide_editor = SlideEditor(self)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.addTab(self.preview, "PDF preview")
+        self.right_tabs.addTab(self.slide_editor, "Slide editor")
+        self.right_tabs.currentChanged.connect(self._right_tab_changed)
+        self.editor.cursorPositionChanged.connect(self._cursor_moved)
         self.preview.sheetRequested.connect(self._open_ref)
         self.preview.sourceRequested.connect(self.jump_to_source)
+        self.preview.figureMenuRequested.connect(self._figure_menu)
+        self.editor.transformRequested.connect(lambda ln: self.transform_figure(ln))
         split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(self.side)
         split.addWidget(mid)
-        split.addWidget(self.preview)
+        split.addWidget(self.right_tabs)
         self.side.setMaximumWidth(380)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
@@ -1466,6 +1509,92 @@ class DocumentTab(QWidget):
         self.status_label.setText(f"  table \"{tm.name}\" saved")
         self._source_timer.start(self.AUTO_DELAY_MS)
 
+    # -- slide editor glue -------------------------------------------------------------------
+    def _right_tab_changed(self, _i):
+        if self.right_tabs.currentWidget() is self.slide_editor:
+            self.slide_editor.follow_cursor()
+            self.slide_editor.refresh()
+
+    def _cursor_moved(self):
+        if self.right_tabs.currentWidget() is self.slide_editor and \
+                not getattr(self, "_applying", False):
+            self.slide_editor.follow_cursor()
+
+    def apply_source(self, new: str):
+        """Replace the text by ``new`` with the smallest edit (cursor and scroll position stay)."""
+        old = self.source()
+        if new == old:
+            return
+        a = 0
+        n = min(len(old), len(new))
+        while a < n and old[a] == new[a]:
+            a += 1
+        b = 0
+        while b < n - a and old[len(old) - 1 - b] == new[len(new) - 1 - b]:
+            b += 1
+
+        def u16(s, i):
+            return len(s[:i].encode("utf-16-le")) // 2
+        cur = self.editor.textCursor()
+        keep = cur.position()
+        self._applying = True
+        try:
+            cur.beginEditBlock()
+            cur.setPosition(u16(old, a))
+            cur.setPosition(u16(old, len(old) - b), cur.MoveMode.KeepAnchor)
+            cur.insertText(new[a:len(new) - b])
+            cur.endEditBlock()
+        finally:
+            self._applying = False
+        c2 = self.editor.textCursor()
+        c2.setPosition(min(keep, len(self.editor.toPlainText())))
+        self.editor.setTextCursor(c2)
+
+    def _figure_menu(self, key: str, page: int, x: float, y: float, global_pos):
+        menu = QMenu(self)
+        menu.addAction("Edit in NoorSuite / Inkscape", lambda: self._open_ref(key))
+        bare = key[6:] if key.startswith("asset:") else key
+        menu.addAction("Transform (size, rotation, shift)...",
+                       lambda: self.transform_figure(self._line_at(page, x, y), bare))
+        menu.exec(global_pos)
+
+    def _line_at(self, page: int, x: float, y: float):
+        """Editor line (0-based) behind a preview point, or None."""
+        from . import synctex
+        data = synctex.parse(self.workdir / "out" / "main.synctex.gz")
+        if data is None:
+            return None
+        line = synctex.locate(data, page + 1, x, y)
+        if line is None:
+            return None
+        try:
+            build = (self.workdir / "main.tex").read_text(encoding="utf-8").split("\n")
+        except OSError:
+            build = []
+        return synctex.match_line(build, self.source().split("\n"), line)
+
+    def transform_figure(self, line, key=None):
+        """Dialog for size / rotation / shift of the figure call on ``line`` (or the one with
+        ``key`` closest to it); rewrites its options."""
+        from . import figureopts
+        src = self.source()
+        calls = figureopts.find_calls(src)
+        if key:
+            slug_ok = lambda c: c["key"] == key or latex.slug(c["key"]) == latex.slug(key)  # noqa: E731
+            calls = [c for c in calls if slug_ok(c)]
+            if not calls:
+                self.status_label.setText("  this object is a free slide object - use the "
+                                          "Slide editor tab to move / scale / rotate it")
+                return
+        if not calls:
+            return
+        pick = min(calls, key=lambda c: abs(c["line"] - (line if line is not None else 0))) \
+            if line is not None else calls[0]
+        dlg = figureopts.FigureTransformDialog(pick, self)
+        if dlg.exec():
+            self.apply_source(figureopts.replace_call(src, pick, dlg.updates()))
+            self.status_label.setText("  figure options updated")
+
     def jump_to_source(self, page: int, x: float, y: float):
         """Preview double-click -> the matching line in the editor (through SyncTeX)."""
         from . import synctex
@@ -1740,6 +1869,7 @@ class DocumentTab(QWidget):
             self.status_label.setText("  no LaTeX engine found")
             return
         self._building = True
+        self._compiling_source = self.source()
         self.compile_act.setEnabled(False)
         t0 = time.time()
         style_id = self.bib_style_id()
@@ -1794,7 +1924,10 @@ class DocumentTab(QWidget):
         note = (", " + "; ".join(notes)) if notes else ""
         if res.ok:
             self._pdf = res.pdf
+            self.built_source = self._compiling_source
             self.preview.load(res.pdf)
+            if self.right_tabs.currentWidget() is self.slide_editor:
+                self.slide_editor.refresh()
             cites = bool(zotero.cite_keys(self.source()))
             fmt = f"; references: {res.style['id']}" if cites and getattr(res, "style", None) \
                 else ""
@@ -1825,6 +1958,49 @@ class DocumentTab(QWidget):
         if path:
             shutil.copyfile(self._pdf, path)
             self.status_label.setText(f"  exported {Path(path).name}")
+
+    # -- text formatting ------------------------------------------------------------------
+    def _format_menu(self, parent) -> QMenu:
+        from . import textformat
+        m = QMenu(parent)
+        for label, kind in (("Bold", "bold"), ("Italic", "italic"), ("Underline", "underline"),
+                            ("Emphasis", "emph"), ("Highlight (alert)", "alert"),
+                            ("Typewriter", "mono"), ("Small caps", "smallcaps"),
+                            ("Superscript", "sup"), ("Subscript", "sub"), ("Inline math", "math")):
+            m.addAction(label, lambda k=kind: self.format_selection(k))
+        m.addSeparator()
+        m.addAction("Colour...", self._format_color)
+        size = m.addMenu("Size")
+        for name in textformat.SIZES:
+            size.addAction(name, lambda n=name: self.format_selection("size", n))
+        m.addSeparator()
+        m.addAction("Centre", lambda: self.format_selection("center"))
+        m.addAction("Left-aligned block", lambda: self.format_selection("left"))
+        m.addAction("Right-aligned block", lambda: self.format_selection("right"))
+        m.addAction("Bullet list (one item per line)", lambda: self.format_selection("itemize"))
+        m.addAction("Numbered list (one item per line)",
+                    lambda: self.format_selection("enumerate"))
+        return m
+
+    def _format_color(self):
+        from PyQt6.QtWidgets import QColorDialog
+        col = QColorDialog.getColor(QColor("#C0392B"), self, "Text colour")
+        if col.isValid():
+            self.format_selection("color", col.name())
+
+    def format_selection(self, kind: str, arg: str = ""):
+        from . import textformat
+        cur = self.editor.textCursor()
+        text = cur.selectedText().replace("\u2029", "\n")
+        new = textformat.wrap(kind, text, arg)
+        cur.beginEditBlock()
+        cur.insertText(new)
+        if not text:                      # nothing selected: select the placeholder
+            cur.setPosition(cur.position() - len(new))
+            cur.setPosition(cur.position() + len(new), cur.MoveMode.KeepAnchor)
+        cur.endEditBlock()
+        self.editor.setTextCursor(cur)
+        self.editor.setFocus()
 
     # -- effects (overlays, transitions) --------------------------------------------------
     def _effects_menu(self, parent) -> QMenu:

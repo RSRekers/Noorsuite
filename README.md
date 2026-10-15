@@ -193,6 +193,27 @@ or all slides). In the PDF every step is one page, so *Present* shows them click
 used when `\transfade` / `\transdissolve` is in the text). The PowerPoint export turns the steps into click
 animations (Appear, Fade or Wipe, chosen at export) and the `\trans...` commands into slide transitions.
 
+**Slide editor.** The *Slide editor* tab next to the PDF preview shows one slide (the compiled page) and lets
+you place and edit free objects like in PowerPoint: rectangle, ellipse, line, arrow, text box, NoorSuite graph and
+SVG / PNG / JPG / PDF pictures. Drag to move, handles to scale (Shift keeps the proportions), the round handle
+rotates (Shift: 15 degree steps), arrow keys nudge, Del removes, Ctrl+D duplicates, Ctrl+[ / ] changes the stacking
+order, *Snap* aligns to the slide centre and a 5 mm grid. A side panel holds the numbers (position, size, rotation),
+fill (solid or two-colour linear / radial gradient), line colour / width / dash, opacity, text colour / size /
+alignment and the label. Double-click a graph to edit it in NoorSuite, an SVG to edit it in Inkscape (also in the PDF
+preview), text to edit the label. Objects are plain `\noorobj[x=..,y=..,w=..,h=..]{kind}{content}` lines inside the
+frame (positions in cm from the top-left corner), so everything stays editable in the text, in undo and in the
+PowerPoint export (native shapes, connectors, pictures, text boxes).
+
+**Slide setup.** *Slide setup...* in the slide editor writes one `\noorslide{...}` line: title shift / size, space
+above the body, left / right text margins, and *slide number on the title slide* (position and size). It works on top
+of whatever theme the document uses.
+
+**Figures in text documents.** Right-click a figure in the PDF preview (or in the editor) -> *Transform...*: width
+(cm or % of the text width), height, scale, rotation and shift (`\noorsheet[width=..,angle=..,xshift=..]{..}`).
+
+**Formatting.** *Format* in the toolbar (and Ctrl+B / I / U) wraps the selection: bold, italic, underline, colour,
+size, super / subscript, highlight, lists, alignment.
+
 **Presenter view.** *Presenter view* (Shift+F11) opens a console next to the full-screen show (on a second
 monitor when there is one): current slide, next slide (or the next step of the same slide), your `\note{...}`
 text, a timer with an optional target time (turns yellow in the last minute, red when over), the clock, and
