@@ -652,6 +652,18 @@ title/x_label/y_label + trace labels).
   `_transition` (`\trans...` in the frame or before it). Unspecified content after `[<+->]` stays visible
   (Beamer counter vs. pause level are two variables).
 - `PresentationView(fade=True)` cross-fades slides (set by `\transfade` / `\transdissolve` in the text).
+- Overlay numbering follows Beamer: `_Steps.n` is the slide counter (starts at 1, `+` uses then increments),
+  *steps* are 0-based clicks (= slide - 1). `parse_presentation` frames carry `steps` (pages the frame makes);
+  `page_map(parsed, page_count)` -> per PDF page `(frame, step, steps)`, falls back to one page per frame
+  when the counts differ.
+- `presenter.PresenterConsole` (Shift+F11, `DocumentTab.present(console=True)`): second window driving
+  `PresentationView` (`pageChanged`, `set_laser` / `laser_at` / `laser_hide` / `toggle_cover`); notes come
+  from the frames' `\note`, timer = elapsed or countdown to the target (QSettings `presenter/target`). With
+  two monitors the audience view fills the other screen, with one it is a normal window.
+- `synctex.py`: `parse(main.synctex.gz)` -> per-page leaf records in bp, `locate(data, page, x, y)` -> line of
+  main.tex (boxes are skipped: they carry the paragraph's end line), `match_line` maps a build-copy line to
+  the editor line (exact text match nearest to the guess, else difflib). Engines get `--synctex` /
+  `-synctex=1` (`latex.engine_commands`); `PdfPreview.sourceRequested` -> `DocumentTab.jump_to_source`.
 - `findbar.FindBar` (Ctrl+F / Ctrl+H / F3 in `DocumentTab`): Python `re` over `toPlainText()` (UTF-16 offsets
   handled), highlights as `ExtraSelection`s, replace-all as one edit block back to front.
 - `PresentationView` = frameless full-screen QPdfDocument viewer (keys documented in the class);

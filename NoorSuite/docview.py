@@ -157,12 +157,17 @@ class _PageLabel(QLabel):
         hit = self._preview.link_at(self._index, event.position())
         self.setCursor(Qt.CursorShape.PointingHandCursor if hit
                        else Qt.CursorShape.ArrowCursor)
-        self.setToolTip("Double-click to edit this figure in NoorSuite" if hit else "")
+        self.setToolTip("Double-click to edit this figure in NoorSuite" if hit
+                        else "Double-click: jump to this place in the text")
 
     def mouseDoubleClickEvent(self, event):
         key = self._preview.link_at(self._index, event.position())
         if key:
             self._preview.sheetRequested.emit(key)
+            return
+        scale = self._preview._px_per_pt()
+        self._preview.sourceRequested.emit(self._index, event.position().x() / scale,
+                                           event.position().y() / scale)
 
 
 class PdfPreview(QScrollArea):
@@ -170,6 +175,7 @@ class PdfPreview(QScrollArea):
     on double-click (``sheetRequested``). Ctrl+wheel zooms, Ctrl+0 fits the width."""
 
     sheetRequested = pyqtSignal(str)
+    sourceRequested = pyqtSignal(int, float, float)       # page (0-based), x, y in points
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -529,13 +535,16 @@ class PresentationView(QWidget):
     """Full-screen slide show of a built presentation PDF.
 
     Keys: Right / Down / PageDown / Space / Enter / N next, Left / Up / PageUp / Backspace / P
-    previous, Home / End first / last, B or . black screen, W or , white screen, a number + Enter
-    jumps, Esc or Q leaves. Mouse: left click next, right click previous."""
+    previous, Home / End first / last, B or . black screen, W or , white screen, L laser pointer,
+    a number + Enter jumps, Esc or Q leaves. Mouse: left click next, right click previous."""
 
     closed = pyqtSignal(int)             # the page that was showing when the show ended
+    pageChanged = pyqtSignal(int)
 
     def __init__(self, pdf_path: str, start: int = 0, parent=None, fade: bool = False):
         super().__init__(parent)
+        self._laser = False              # red pointer that follows the mouse (key L)
+        self._laser_pos = None           # normalised position inside the slide
         self._fade = fade                # short cross-fade between slides
         self._blend = 1.0
         self._prev_img = None
@@ -566,9 +575,45 @@ class PresentationView(QWidget):
             if self._fade and new != self._page and self.isVisible() \
                     and self._doc.status() == QPdfDocument.Status.Ready:
                 self._start_fade(new)
+            changed = new != self._page
             self._page = new
             self._cover = None
             self.update()
+            if changed:
+                self.pageChanged.emit(new)
+
+    def set_laser(self, on: bool):
+        self._laser = bool(on)
+        if not on:
+            self._laser_pos = None
+        self.update()
+
+    def laser_at(self, nx: float, ny: float):
+        if self._laser:
+            self._laser_pos = (nx, ny)
+            self.update()
+
+    def laser_hide(self):
+        self._laser_pos = None
+        self.update()
+
+    def toggle_cover(self, kind: str):
+        self._cover = None if self._cover == kind else kind
+        self.update()
+
+    def _slide_rect(self):
+        from PyQt6.QtCore import QRect
+        img = self._image()
+        return QRect((self.width() - img.width()) // 2, (self.height() - img.height()) // 2,
+                     img.width(), img.height())
+
+    def mouseMoveEvent(self, e):
+        if self._laser and self._doc.status() == QPdfDocument.Status.Ready:
+            r = self._slide_rect()
+            if r.width() and r.height():
+                self._laser_pos = ((e.position().x() - r.x()) / r.width(),
+                                   (e.position().y() - r.y()) / r.height())
+                self.update()
 
     def _start_fade(self, new: int):
         from PyQt6.QtCore import QVariantAnimation
@@ -618,6 +663,21 @@ class PresentationView(QWidget):
                 p.setOpacity(self._blend)
             p.drawImage((self.width() - img.width()) // 2, (self.height() - img.height()) // 2,
                         img)
+            if self._laser and self._laser_pos is not None:
+                from PyQt6.QtCore import QPointF
+                from PyQt6.QtGui import QRadialGradient
+                r = self._slide_rect()
+                c = QPointF(r.x() + self._laser_pos[0] * r.width(),
+                            r.y() + self._laser_pos[1] * r.height())
+                rad = max(10.0, r.height() / 45.0)
+                g = QRadialGradient(c, rad * 2.2)
+                g.setColorAt(0.0, QColor(255, 40, 40, 255))
+                g.setColorAt(0.35, QColor(255, 40, 40, 230))
+                g.setColorAt(1.0, QColor(255, 40, 40, 0))
+                p.setOpacity(1.0)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(g)
+                p.drawEllipse(c, rad * 2.2, rad * 2.2)
         p.end()
 
     def keyPressEvent(self, e):
@@ -642,6 +702,8 @@ class PresentationView(QWidget):
             self.go(0)
         elif k == K.Key_End:
             self.go(self.page_count() - 1)
+        elif t == "l":
+            self.set_laser(not self._laser)
         elif t in ("b", "."):
             self._cover = None if self._cover == "black" else "black"
             self.update()
@@ -978,8 +1040,16 @@ class DocumentTab(QWidget):
         present_act.setShortcut(QKeySequence("F11"))
         present_act.setToolTip("Run the built PDF as a full-screen slide show (F11). Arrow keys / "
                                "space / click: next, B: black screen, Esc: leave")
-        present_act.triggered.connect(self.present)
+        present_act.triggered.connect(lambda: self.present(False))
         toolbar.addAction(present_act)
+        presenter_act = QAction("Presenter view", self)
+        presenter_act.setShortcut(QKeySequence("Shift+F11"))
+        presenter_act.setToolTip(
+            "Slide show with a presenter console: current and next slide, your \\note{...}, a "
+            "timer with target time, a laser pointer (L). The audience goes full screen on a "
+            "second monitor (Shift+F11)")
+        presenter_act.triggered.connect(lambda: self.present(True))
+        toolbar.addAction(presenter_act)
         pptx_act = QAction("Export PowerPoint...", self)
         pptx_act.setToolTip("Editable .pptx of a presentation (uses your imported PowerPoint "
                             "template's master and layouts when the theme comes from one)")
@@ -1070,6 +1140,7 @@ class DocumentTab(QWidget):
 
         self.preview = PdfPreview()
         self.preview.sheetRequested.connect(self._open_ref)
+        self.preview.sourceRequested.connect(self.jump_to_source)
         split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(self.side)
         split.addWidget(mid)
@@ -1394,6 +1465,34 @@ class DocumentTab(QWidget):
             self.insert_text(tables.table_snippet(tm.table_id if key == "" else key, tm.name))
         self.status_label.setText(f"  table \"{tm.name}\" saved")
         self._source_timer.start(self.AUTO_DELAY_MS)
+
+    def jump_to_source(self, page: int, x: float, y: float):
+        """Preview double-click -> the matching line in the editor (through SyncTeX)."""
+        from . import synctex
+        data = synctex.parse(self.workdir / "out" / "main.synctex.gz")
+        if data is None:
+            self.status_label.setText("  no SyncTeX data yet - compile once more")
+            return
+        line = synctex.locate(data, page + 1, x, y)
+        if line is None:
+            self.status_label.setText("  no source position at that point")
+            return
+        try:
+            build = (self.workdir / "main.tex").read_text(encoding="utf-8").split("\n")
+        except OSError:
+            build = []
+        src = self.source().split("\n")
+        target = synctex.match_line(build, src, line)
+        block = self.editor.document().findBlockByNumber(target)
+        if not block.isValid():
+            return
+        cur = self.editor.textCursor()
+        cur.setPosition(block.position())
+        cur.movePosition(cur.MoveOperation.EndOfBlock, cur.MoveMode.KeepAnchor)
+        self.editor.setTextCursor(cur)
+        self.editor.centerCursor()
+        self.editor.setFocus()
+        self.status_label.setText(f"  line {target + 1}")
 
     def _open_ref(self, key: str):
         if key.startswith("table:"):
@@ -1798,15 +1897,46 @@ class DocumentTab(QWidget):
         self.editor.setTextCursor(cur)
         self.status_label.setText(f"  added {line}")
 
-    def present(self):
-        """Full-screen show of the current PDF (built first if it is stale)."""
+    def present(self, console: bool = False):
+        """Full-screen show of the current PDF (built first if it is stale). With ``console``
+        the presenter view (current / next slide, notes, timer, laser) opens as well: the
+        audience goes full screen on a second monitor when there is one."""
         if not self._ensure_built():
             return
-        self._presenter = PresentationView(
+        view = PresentationView(
             self._pdf, 0, fade=bool(re.search(r"\\trans(?:fade|dissolve)\b", self.source())))
-        self._presenter.closed.connect(lambda _p: setattr(self, "_presenter", None))
-        self._presenter.showFullScreen()
-        self._presenter.setFocus()
+        self._presenter = view
+        view.closed.connect(lambda _p: setattr(self, "_presenter", None))
+        if not console:
+            view.showFullScreen()
+            view.setFocus()
+            return
+        from . import pptxexport
+        from .presenter import PresenterConsole
+        try:
+            parsed = pptxexport.parse_presentation(self.source())
+        except Exception:
+            parsed = {"frames": []}
+        pages = pptxexport.page_map(parsed, view.page_count())
+        notes = {i: f.get("note", "") for i, f in enumerate(parsed["frames"]) if f.get("note")}
+        titles = {i: (f.get("title") or "") for i, f in enumerate(parsed["frames"])}
+        con = PresenterConsole(view, self._pdf, pages, notes, titles)
+        self._console = con
+        screens = QApplication.screens()
+        if len(screens) > 1:
+            primary = QApplication.primaryScreen()
+            other = next(s for s in screens if s is not primary)
+            view.setGeometry(other.geometry())
+            view.showFullScreen()
+            con.move(primary.geometry().center() - con.rect().center())
+            con.show()
+        else:                                   # one monitor: the audience window is movable
+            view.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
+            view.setCursor(Qt.CursorShape.ArrowCursor)
+            view.resize(960, 600)
+            view.show()
+            con.show()
+        con.setFocus()
 
     def export_pptx(self):
         """Editable PowerPoint file of a Beamer presentation (see :mod:`NoorSuite.pptxexport`)."""

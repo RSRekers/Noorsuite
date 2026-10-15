@@ -20,11 +20,11 @@ def test_overlay_steps_of_pause_items_and_uncover():
             r"\uncover<5->{\noorsheet{a}}" "\n"
             r"\begin{itemize}\item A\item<7-> B\end{itemize}")
     f = X.parse_presentation(_frame(body))["frames"][0]
-    assert f["blocks"][0][2] == [1, 2]                          # <+-> : one click per item
+    assert f["blocks"][0][2] == [0, 1]                          # <+-> : first item at once, then one click each
     assert f["blocks"][1] == ("text", "Always here")            # not hidden by the list
     assert f["blocks"][2] == ("text", "After pause", 3)         # pause continues the counter
-    assert f["blocks"][3][-1] == 5 and f["blocks"][3][0] == "picture"
-    assert f["blocks"][4][2] == [3, 7]
+    assert f["blocks"][3][-1] == 4 and f["blocks"][3][0] == "picture"
+    assert f["blocks"][4][2] == [3, 6]
 
 
 def test_transition_commands_are_read():
@@ -54,8 +54,8 @@ def test_pptx_gets_click_animations_and_transition(tmp_path):
     assert ok
     slide = list(Presentation(str(out)).slides)[0]
     xml = slide._element.xml
-    assert xml.count('nodeType="clickEffect"') == 3             # item 1, item 2, the picture
-    assert xml.count('<p:pRg') == 4                              # set + animEffect per paragraph
+    assert xml.count('nodeType="clickEffect"') == 2             # item 2 and the picture; item 1 is there at once
+    assert xml.count('<p:pRg') == 2                              # set + animEffect of the one animated paragraph
     assert 'filter="fade"' in xml and "<p:transition" in xml
     assert xml.index("<p:transition") < xml.index("<p:timing")
     # same-step content appears together: appear effect has no animEffect

@@ -158,6 +158,10 @@ Write frames: `\begin{frame}{Title} ... \end{frame}`; a figure frame is
 Layouts for presentations: `"beamer"` (plain), `"beamer-clean"` (NoorSuite's neutral theme), `"user:<name>"`
 (imported corporate templates, kept in the user's home folder - never put them into a repository).
 
+Presenter view (tell the user): Shift+F11 in the document tab = console with current / next slide, notes
+(`\note{..}`), timer + target time, laser pointer (L); the audience view goes full screen on a second monitor.
+Double-click in the PDF preview jumps to the matching line of the text (SyncTeX).
+
 Effects (tell the user): Beamer overlays (`\pause`, `\item<2->`, `[<+->]`, `\uncover<n->{..}`, `\only<n>{..}`,
 `\setbeamercovered{transparent}`) and `\transfade` / `\transdissolve` / `\transwipe` are supported; the document
 toolbar's *Effects* menu inserts them, the PowerPoint export turns them into click animations (`--effect

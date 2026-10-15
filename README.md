@@ -193,6 +193,16 @@ or all slides). In the PDF every step is one page, so *Present* shows them click
 used when `\transfade` / `\transdissolve` is in the text). The PowerPoint export turns the steps into click
 animations (Appear, Fade or Wipe, chosen at export) and the `\trans...` commands into slide transitions.
 
+**Presenter view.** *Presenter view* (Shift+F11) opens a console next to the full-screen show (on a second
+monitor when there is one): current slide, next slide (or the next step of the same slide), your `\note{...}`
+text, a timer with an optional target time (turns yellow in the last minute, red when over), the clock, and
+a **laser pointer** - press `L` or the button and move the mouse over the slide (in the console's slide view or on
+the audience screen). Keys in either window: Right / Space next, Left back, B black screen, L laser, Esc ends.
+Every overlay step (`\pause`, `\item<2->` ...) is one click; the console shows "step 2 / 3".
+
+**Preview to text.** Double-click a word in the PDF preview and the editor jumps to (and selects) that line
+(SyncTeX; compile once after updating). Double-click on a figure still opens it for editing.
+
 **Find and replace.** Ctrl+F in the LaTeX editor opens a search bar (all matches highlighted, count, F3 / Shift+F3 for
 next / previous, Esc closes); Ctrl+H adds the replace row. Options: match case, whole words, regular expression
 (`\1` in the replacement refers to a group). *Replace all* is one undo step.

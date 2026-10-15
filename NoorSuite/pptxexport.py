@@ -174,8 +174,8 @@ class _Steps:
     """Running appearance step while the blocks of a frame are read in order."""
 
     def __init__(self):
-        self.n = 0                       # Beamer's overlay counter (the + in <+->)
-        self.hide = 0                    # everything after a pause starts here
+        self.n = 1                       # Beamer's overlay counter (slide number; the + in <+->)
+        self.hide = 0                    # click index from which everything after a pause shows
         self.floors: list = []           # scoped steps: item<2->, uncover<3->{..}
 
     def current(self) -> int:
@@ -196,20 +196,51 @@ class _Steps:
             tok = m.group(0)
             if tok == "\x02":
                 self.n += 1
-                self.hide = self.n
+                self.hide = self.n - 1
             elif tok == "\x07":
+                self.floors.append(self.n - 1)
                 self.n += 1
-                self.floors.append(self.n)
             elif tok == "\x05":
                 if self.floors:
                     self.floors.pop()
             elif tok[0] == "\x03":
-                self.floors.append(int(tok[1:-1]))
+                self.floors.append(max(0, int(tok[1:-1]) - 1))
             else:
-                self.n = self.hide = int(tok[1:-1])
+                self.n = int(tok[1:-1])
+                self.hide = self.n - 1
             pos = m.end()
         seg(text[pos:])
         return "".join(out), (first if first is not None else self.current())
+
+
+def _max_step(blocks) -> int:
+    top = 0
+    for b in blocks:
+        if b[0] == "list":
+            top = max([top] + list(b[2]))
+        elif b[0] == "columns":
+            for col in b[1]:
+                top = max(top, _max_step(col))
+        elif b[0] == "text" and len(b) > 2:
+            top = max(top, b[2])
+        elif b[0] == "picture" and len(b) > 4:
+            top = max(top, b[4])
+        elif b[0] == "table" and len(b) > 2:
+            top = max(top, b[2])
+    return top
+
+
+def page_map(parsed: dict, page_count: int) -> list:
+    """Per PDF page (0-based) ``(frame index, step, steps of that frame)``; falls back to one page
+    per frame when the counts do not add up (``[plain]`` frames, ``allowframebreaks`` ...)."""
+    frames = parsed["frames"]
+    out = []
+    for i, fr in enumerate(frames):
+        n = int(fr.get("steps", 1)) if fr.get("kind") != "title" else 1
+        out.extend((i, k, n) for k in range(n))
+    if len(out) == page_count:
+        return out
+    return [(min(p, max(0, len(frames) - 1)), 0, 1) for p in range(page_count)]
 
 
 def _tail(step: int) -> tuple:
@@ -368,6 +399,10 @@ def _parse_with_items(body: str) -> dict:
     out["transition"] = transition_of(text)
     text = _TRANS_RE.sub("", text)
     out["blocks"] = _blocks(_overlays(text))
+    top = max([_max_step(out["blocks"])] + [
+        int(n) - 1 for spec in re.findall(r"<([\d,\-|+ @a-z]*)>", text)
+        for n in re.findall(r"\d+", spec)])
+    out["steps"] = max(0, top) + 1                       # PDF pages this frame produces
     return out
 
 

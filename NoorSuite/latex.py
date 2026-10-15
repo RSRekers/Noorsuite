@@ -496,11 +496,11 @@ def engine_commands(engine: str, tex: str, outdir: str) -> list:
     if base == "tectonic":
         # --only-cached: no network round trips for the package bundle (build_pdf retries
         # without it when a package is not cached yet)
-        return [[engine, "-X", "compile", "--only-cached", "--outdir", outdir, tex]]
+        return [[engine, "-X", "compile", "--only-cached", "--synctex", "--outdir", outdir, tex]]
     if base == "latexmk":
         return [[engine, "-pdf", "-interaction=nonstopmode", "-halt-on-error",
-                 f"-outdir={outdir}", tex]]
-    one = [engine, "-interaction=nonstopmode", "-halt-on-error",
+                 "-synctex=1", f"-outdir={outdir}", tex]]
+    one = [engine, "-interaction=nonstopmode", "-halt-on-error", "-synctex=1",
            f"-output-directory={outdir}", tex]
     bibtex = shutil.which("bibtex")
     if bibtex:                   # latex, bibtex, latex, latex: citations + cross-references
