@@ -52,17 +52,20 @@ class OfflineBackend:
 
     def __init__(self, path=None):
         self.path = os.path.abspath(os.path.expanduser(path)) if path else SESSION_FILE
+        self._save_cache: dict = {}          # which sidecar files already hold the big data
         self.project = self._load()
 
     # ------------------------------------------------------------------ persistence
     def _load(self) -> ProjectModel:
         if os.path.exists(self.path):
-            return ProjectModel.load(self.path)
+            pm = ProjectModel.load(self.path)
+            pm.seed_cache(self.path, self._save_cache)
+            return pm
         return ProjectModel()
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        self.project.save(self.path)
+        self.project.save(self.path, self._save_cache)
 
     # ----------------------------------------------------------- IPCClient interface
     def is_alive(self) -> bool:

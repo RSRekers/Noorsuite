@@ -143,6 +143,7 @@ class SlideEditor(QWidget):
         self.canvas.deleteRequested.connect(self.delete_object)
         self.canvas.duplicateRequested.connect(self.duplicate_object)
         self.canvas.reorderRequested.connect(self.reorder_object)
+        self.canvas.pasteRequested.connect(self.paste_picture)
 
         self.frame_combo = QComboBox()
         self.frame_combo.currentIndexChanged.connect(self._frame_chosen)
@@ -168,8 +169,12 @@ class SlideEditor(QWidget):
         fb = QPushButton("SVG / picture...")
         fb.setToolTip("Place an SVG / PDF / PNG / JPG (double-click: edit in Inkscape)")
         fb.clicked.connect(self.add_file)
+        pb = QPushButton("Paste picture")
+        pb.setToolTip("Place the picture on the clipboard on the slide (Ctrl+V in the canvas)")
+        pb.clicked.connect(self.paste_picture)
         tools.addWidget(gb)
         tools.addWidget(fb)
+        tools.addWidget(pb)
         tools.addStretch(1)
         self.snap_check = QCheckBox("Snap")
         self.snap_check.setChecked(True)
@@ -439,6 +444,45 @@ class SlideEditor(QWidget):
         w = min(pw * 0.4, (ph * 0.6) / ratio)
         self.add_object("file", w=round(w, 2), h=round(w * ratio, 2), arg=a.asset_id,
                         x=round((pw - w) / 2, 2), y=round((ph - w * ratio) / 2, 2))
+
+    def paste_picture(self):
+        """Clipboard picture (or copied picture files) -> project asset -> free object."""
+        import time
+        from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+        from PyQt6.QtGui import QGuiApplication, QImage
+        md = QGuiApplication.clipboard().mimeData()
+        made = []                                            # [(asset, aspect ratio)]
+        if md.hasUrls():
+            for u in md.urls():
+                if u.isLocalFile() and u.toLocalFile().lower().endswith(
+                        (".png", ".jpg", ".jpeg", ".svg", ".pdf", ".gif", ".bmp")):
+                    p = u.toLocalFile()
+                    try:
+                        a = self.tab.host.import_asset(p)
+                    except (OSError, ValueError):
+                        continue
+                    img = QImage(p)
+                    made.append((a, img.width() / max(1, img.height()) if not img.isNull() else 1.4))
+        if not made and md.hasImage():
+            image = md.imageData()
+            if isinstance(image, QImage) and not image.isNull():
+                ba = QByteArray()
+                buf = QBuffer(ba)
+                buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                image.save(buf, "PNG")
+                a = self.tab.host.import_asset(
+                    data=bytes(ba), ext="png",
+                    name="Pasted picture " + time.strftime("%Y-%m-%d %H-%M-%S"))
+                made.append((a, image.width() / max(1, image.height())))
+        if not made:
+            QMessageBox.information(self, "Paste picture", "There is no picture on the clipboard.")
+            return
+        pw, ph = (v / 10 for v in self._page_mm())
+        for a, ratio in made:
+            w = min(pw * 0.5, ph * 0.6 * ratio)
+            h = w / ratio
+            self.add_object("file", w=round(w, 2), h=round(h, 2), arg=a.asset_id,
+                            x=round((pw - w) / 2, 2), y=round((ph - h) / 2, 2))
 
     def delete_object(self, index):
         src = self.tab.source()

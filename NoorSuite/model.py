@@ -323,6 +323,9 @@ class ColorMap:
         return cls(d["name"], d.get("colors", []), d.get("builtin", False))
 
 
+SIDECAR_MIN_VALUES = 4096     # data objects with more numbers than this are saved as .npz files
+
+
 class DataObject:
     """A named set of columns in the data pool (typically one pushed DataFrame)."""
 
@@ -340,6 +343,7 @@ class DataObject:
         self.units: dict[str, str] = dict(units or {})
         self.tags = list(tags or [])
         self.source = source
+        self._rev = 0               # bumped whenever the columns change (save / fingerprint caches)
 
     @property
     def nrows(self) -> int:
@@ -369,20 +373,35 @@ class DataObject:
             if col not in self.columns:
                 self.column_order.append(col)
             self.columns[col] = np.asarray(columns[col], dtype=float)
+        self._rev += 1
         if units:
             self.units.update(units)
 
-    def to_dict(self) -> dict:
-        return {
+    def n_values(self) -> int:
+        return sum(len(self.columns[c]) for c in self.column_order)
+
+    def signature(self) -> tuple:
+        """Cheap identity of the data: changes when a column is replaced or added."""
+        return (self._rev, tuple((c, id(self.columns[c]), len(self.columns[c]))
+                                 for c in self.column_order))
+
+    def to_dict(self, sidecar=False) -> dict:
+        """``sidecar=True``: a big object leaves its numbers out (they go to a ``.npz`` next to
+        the project file, see :meth:`ProjectModel.prepare_save`)."""
+        d = {
             "id": self.id,
             "name": self.name,
             "column_order": list(self.column_order),
-            "columns": {c: self.columns[c].tolist() for c in self.column_order},
             "units": dict(self.units),
             "tags": list(self.tags),
             "source": self.source,
             "notes": self.notes,
         }
+        if sidecar and self.n_values() > SIDECAR_MIN_VALUES:
+            d["columns"] = {}
+        else:
+            d["columns"] = {c: self.columns[c].tolist() for c in self.column_order}
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "DataObject":
@@ -1134,7 +1153,7 @@ class SheetModel:
 
     _FIG_FIELDS = ("fig_face_color", "fig_face_alpha", "fig_frame_on",
                    "fig_edge_color", "fig_edge_width", "fig_edge_style",
-                   "fig_width_cm", "fig_height_cm")
+                   "fig_width_cm", "fig_height_cm", "fig_real_points")
 
     def __init__(self, name="Sheet 1", rows=1, cols=1, sheet_id=None):
         self.sheet_id = sheet_id or _new_id()
@@ -1155,6 +1174,10 @@ class SheetModel:
         # on-screen figure still fills its tab like before.
         self.fig_width_cm = None
         self.fig_height_cm = None
+        # True: fonts are real points on the figure's physical size (what you see is what the
+        # document prints). False (older sheets): text sizes follow the figure's size relative to
+        # an 8x6 inch figure and the grid, so small figures do not drown in text.
+        self.fig_real_points = False
 
         self.tags: list[str] = []
         self.colormaps: list[ColorMap] = []   # custom colormaps owned by this sheet
@@ -1222,10 +1245,12 @@ class AssetModel:
         self.data = bytes(data)
         self.version = int(version)
 
-    def to_dict(self) -> dict:
+    def to_dict(self, sidecar=False) -> dict:
         import base64
-        return {"asset_id": self.asset_id, "name": self.name, "ext": self.ext,
-                "version": self.version, "data": base64.b64encode(self.data).decode("ascii")}
+        d = {"asset_id": self.asset_id, "name": self.name, "ext": self.ext,
+             "version": self.version}
+        d["data"] = "" if sidecar else base64.b64encode(self.data).decode("ascii")
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "AssetModel":
@@ -1317,20 +1342,36 @@ class ProjectModel:
         self.tables: list[TableModel] = []         # data tables for documents (optional key)
         self.active_sheet_id = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self, sidecar=False) -> dict:
+        """The JSON-ready project. ``sidecar=True`` leaves big numeric data and imported figure
+        files out (``save`` stores them as binary files next to the project)."""
         return {
             "version": PROJECT_VERSION,
             "active_sheet_id": self.active_sheet_id,
-            "data_objects": [d.to_dict() for d in self.data_objects],
+            "data_objects": [d.to_dict(sidecar) for d in self.data_objects],
             "images": [im.to_dict() for im in self.images],
             "sheets": [s.to_dict() for s in self.sheets],
             "tree": self.tree,
             "colormaps": [c.to_dict() for c in self.colormaps],
             "documents": [dm.to_dict() for dm in self.documents],
             "references": [dict(r) for r in self.references],
-            "assets": [a.to_dict() for a in self.assets],
+            "assets": [a.to_dict(sidecar) for a in self.assets],
             "tables": [t.to_dict() for t in self.tables],
         }
+
+    def signature(self) -> str:
+        """Hash of everything that would be written -- computed from the small parts plus the
+        identity of the big arrays, so an unchanged project is recognised in milliseconds."""
+        import hashlib
+        d = self.to_dict(sidecar=True)
+        for entry, obj in zip(d["data_objects"], self.data_objects):
+            entry["sig"] = repr(obj.signature())
+        for entry, a in zip(d["assets"], self.assets):
+            entry["sig"] = (len(a.data), id(a.data))
+        for entry, im in zip(d["images"], self.images):
+            entry["sig"] = (id(im.data), tuple(im.data.shape))
+        raw = json.dumps(d, sort_keys=True, default=str)
+        return hashlib.blake2b(raw.encode("utf-8"), digest_size=16).hexdigest()
 
     @classmethod
     def from_dict(cls, d: dict) -> "ProjectModel":
@@ -1365,44 +1406,112 @@ class ProjectModel:
     def _assets_dir(path) -> Path:
         return Path(path).with_suffix("")     # report.sciproj -> report/
 
-    def save(self, path) -> None:
-        """Write the project JSON to ``path`` and each image array to ``<stem>/``.
+    def save(self, path, cache=None) -> None:
+        """Write the project to ``path`` (see :meth:`prepare_save`)."""
+        self.prepare_save(path, cache).run()
 
-        Sidecar files are named after the image (``<name>.npy``, see
-        :func:`resolve_sidecar_names`). Any ``*.npy`` in the folder that no current
-        image owns -- left behind by a delete or a rename -- is swept, and an
-        emptied folder is removed.
+    def prepare_save(self, path, cache=None) -> "SavePlan":
+        """Everything that touches the live model, done now (on the GUI thread): the JSON-ready
+        payload and the list of files to write. ``SavePlan.run()`` only does file I/O and can
+        run on another thread.
+
+        * big data objects -> ``<stem>/_data/<id>.npz`` (raw binary, ~8 bytes per number instead
+          of ~25 in JSON), small ones stay inline so tiny projects remain readable;
+        * imported figure files -> ``<stem>/_files/<id>.<ext>`` (no base64 in the JSON);
+        * image arrays -> ``<stem>/<name>.npy`` as before;
+        * a file is rewritten only when its content changed (``cache`` remembers what was
+          written; pass the same dict for every save to the same path);
+        * the JSON is written to a temp file and renamed, so a crash cannot truncate it.
         """
         path = Path(path)
-        payload = self.to_dict()
-        assets = self._assets_dir(path)
+        cache = cache if cache is not None else {}
+        folder = self._assets_dir(path)
+        payload = self.to_dict(sidecar=True)
+        jobs, keep_npy, keep_data, keep_files = [], set(), set(), set()
+        dcache = cache.setdefault("data", {})
+        fcache = cache.setdefault("files", {})
+
         names = resolve_sidecar_names(self.images)
-        if self.images:
-            assets.mkdir(parents=True, exist_ok=True)
-            by_id = {im.id: im for im in self.images}
-            for entry in payload["images"]:
-                obj = by_id[entry["id"]]
-                fname = names[obj.id]
-                target = assets / fname
-                if obj._dirty or not target.exists():
-                    np.save(target, obj.data)
-                    obj._dirty = False
-                entry["array_file"] = f"{assets.name}/{fname}"
-        self._sweep_assets(assets, set(names.values()))
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2)
+        by_id = {im.id: im for im in self.images}
+        for entry in payload["images"]:
+            obj = by_id[entry["id"]]
+            fname = names[obj.id]
+            target = folder / fname
+            keep_npy.add(fname)
+            if obj._dirty or not target.exists():
+                jobs.append(_ImageJob(target, obj))
+            entry["array_file"] = f"{folder.name}/{fname}"
+
+        for entry, obj in zip(payload["data_objects"], self.data_objects):
+            if obj.n_values() <= SIDECAR_MIN_VALUES:
+                continue
+            fname = f"{obj.id}.npz"
+            target = folder / "_data" / fname
+            sig = obj.signature()
+            keep_data.add(fname)
+            entry["data_file"] = f"{folder.name}/_data/{fname}"
+            if dcache.get(obj.id) != sig or not target.is_file():
+                jobs.append(_NpzJob(target, [obj.columns[c] for c in obj.column_order],
+                                    dcache, obj.id, sig))
+
+        for entry, a in zip(payload["assets"], self.assets):
+            if not a.data:
+                continue
+            fname = f"{a.asset_id}.{a.ext}"
+            target = folder / "_files" / fname
+            sig = (a.version, len(a.data), id(a.data))
+            keep_files.add(fname)
+            entry["data_file"] = f"{folder.name}/_files/{fname}"
+            if fcache.get(a.asset_id) != sig or not target.is_file():
+                jobs.append(_BytesJob(target, a.data, fcache, a.asset_id, sig))
+        return SavePlan(path, payload, jobs, folder, keep_npy, keep_data, keep_files)
+
+    def seed_cache(self, path, cache: dict) -> None:
+        """After loading ``path``: remember which sidecar files already hold the data, so the
+        first save does not rewrite them."""
+        folder = self._assets_dir(path)
+        dcache = cache.setdefault("data", {})
+        fcache = cache.setdefault("files", {})
+        for obj in self.data_objects:
+            if obj.n_values() > SIDECAR_MIN_VALUES and (folder / "_data" / f"{obj.id}.npz").is_file():
+                dcache[obj.id] = obj.signature()
+        for a in self.assets:
+            if a.data and (folder / "_files" / f"{a.asset_id}.{a.ext}").is_file():
+                fcache[a.asset_id] = (a.version, len(a.data), id(a.data))
 
     @staticmethod
-    def _sweep_assets(assets: Path, keep: set) -> None:
-        """Delete every ``*.npy`` in ``assets`` not in ``keep``; drop the folder if empty."""
+    def _sweep_assets(assets: Path, keep: set, keep_data=None, keep_files=None) -> None:
+        """Delete every ``*.npy`` in ``assets`` not in ``keep`` (and the ``_data`` / ``_files``
+        sidecars nobody owns any more); drop the folder if it ends up empty."""
         if not assets.is_dir():
             return
+
+        def clean(folder: Path, owned, pattern="*"):
+            if not folder.is_dir():
+                return
+            for f in folder.glob(pattern):
+                if f.is_file() and f.name not in owned:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+            try:
+                next(folder.iterdir())
+            except StopIteration:
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
+            except OSError:
+                pass
         for stale in assets.glob("*.npy"):
             if stale.name not in keep:
                 try:
                     stale.unlink()
                 except OSError:
                     pass
+        clean(assets / "_data", keep_data or set())
+        clean(assets / "_files", keep_files or set())
         try:
             next(assets.iterdir())
         except StopIteration:
@@ -1419,6 +1528,26 @@ class ProjectModel:
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
         project = cls.from_dict(raw)
+        project.missing = []                      # sidecar files the project refers to but not found
+        for obj, entry in zip(project.data_objects, raw.get("data_objects", [])):
+            ref = entry.get("data_file")
+            if not ref:
+                continue
+            if (path.parent / ref).is_file():
+                with np.load(path.parent / ref, allow_pickle=False) as z:
+                    obj.column_order = list(entry.get("column_order", []))
+                    obj.columns = {c: np.asarray(z[f"c{i}"], dtype=float)
+                                   for i, c in enumerate(obj.column_order)}
+            else:
+                project.missing.append(f"data '{obj.name}': {ref}")
+        for a, entry in zip(project.assets, raw.get("assets", [])):
+            ref = entry.get("data_file")
+            if not ref:
+                continue
+            if (path.parent / ref).is_file():
+                a.data = (path.parent / ref).read_bytes()
+            else:
+                project.missing.append(f"figure '{a.name}': {ref}")
         raw_images = {x["id"]: x for x in raw.get("images", [])}
         for img in project.images:
             ref = raw_images.get(img.id, {}).get("array_file")
@@ -1569,6 +1698,43 @@ def duplicate_sheet_model(sm, name=None):
     d["sheet_id"] = _new_id()
     d["name"] = name or f"{sm.name} (copy)"
     return SheetModel.from_dict(d)
+
+
+THIN_MIN_POINTS = 20_000       # shorter lines are always drawn as they are
+
+
+def thin_line(x, y, n_bins: int, visible_fraction: float = 1.0):
+    """Min / max decimation of a long, monotonic line for drawing: every bin of consecutive points
+    keeps its lowest and highest value (plus the first and last point), so spikes and peaks survive
+    and the picture at the resolution of ``n_bins`` columns is the same as with all points.
+
+    Anything that cannot be thinned safely (short, NaN / inf, not monotonic in x) comes back
+    unchanged. ``visible_fraction`` < 1 (explicit axis limits) raises the resolution so a zoomed
+    view still gets about ``n_bins`` bins inside the window."""
+    x = np.asarray(x)
+    y = np.asarray(y)
+    n = len(x)
+    if n < THIN_MIN_POINTS or len(y) != n or n_bins < 16:
+        return x, y
+    f = min(1.0, max(1e-3, float(visible_fraction)))
+    bins = int(min(n // 8, n_bins / f))
+    if n < 4 * bins:
+        return x, y
+    d = np.diff(x)
+    if not (np.all(d >= 0) or np.all(d <= 0)):
+        return x, y
+    if not (np.isfinite(y).all() and np.isfinite(x).all()):
+        return x, y
+    per = n // bins
+    main = per * bins
+    yy = y[:main].reshape(bins, per)
+    base = np.arange(bins) * per
+    idx = [base + yy.argmin(axis=1), base + yy.argmax(axis=1), np.array([0, n - 1])]
+    if main < n:
+        tail = y[main:]
+        idx.append(np.array([main + int(tail.argmin()), main + int(tail.argmax())]))
+    keep = np.unique(np.concatenate(idx))
+    return x[keep], y[keep]
 
 
 # ---------------------------------------------------------------------------
@@ -1731,3 +1897,63 @@ def apply_tick_labels(text, base_ticks=None, base_names=None):
         return None
     numeric.sort(key=lambda p: p[0])
     return [p[0] for p in numeric], [p[1] for p in numeric]
+
+
+# ---------------------------------------------------------------------------
+# Saving: jobs that only touch files (safe on a worker thread)
+# ---------------------------------------------------------------------------
+def _replace_atomic(tmp: Path, target: Path) -> None:
+    import os
+    os.replace(tmp, target)
+
+
+class _ImageJob:
+    def __init__(self, target: Path, img):
+        self.target, self.img = target, img
+
+    def __call__(self):
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        np.save(self.target, self.img.data)
+        self.img._dirty = False
+
+
+class _NpzJob:
+    def __init__(self, target: Path, arrays, cache: dict, key: str, sig):
+        self.target, self.arrays, self.cache, self.key, self.sig = target, arrays, cache, key, sig
+
+    def __call__(self):
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.target.with_name(self.target.name + ".tmp")
+        with open(tmp, "wb") as fh:
+            np.savez(fh, **{f"c{i}": a for i, a in enumerate(self.arrays)})
+        _replace_atomic(tmp, self.target)
+        self.cache[self.key] = self.sig
+
+
+class _BytesJob:
+    def __init__(self, target: Path, data: bytes, cache: dict, key: str, sig):
+        self.target, self.data, self.cache, self.key, self.sig = target, data, cache, key, sig
+
+    def __call__(self):
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.target.with_name(self.target.name + ".tmp")
+        tmp.write_bytes(self.data)
+        _replace_atomic(tmp, self.target)
+        self.cache[self.key] = self.sig
+
+
+class SavePlan:
+    """The file-writing half of a save (see :meth:`ProjectModel.prepare_save`)."""
+
+    def __init__(self, path, payload, jobs, folder, keep_npy, keep_data, keep_files):
+        self.path, self.payload, self.jobs = path, payload, jobs
+        self.folder, self.keep = folder, (keep_npy, keep_data, keep_files)
+
+    def run(self) -> None:
+        for job in self.jobs:
+            job()
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.payload, fh, indent=1)
+        _replace_atomic(tmp, self.path)
+        ProjectModel._sweep_assets(self.folder, *self.keep)

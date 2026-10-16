@@ -163,6 +163,12 @@ Slide objects (tell the user): the document tab's *Slide editor* places and edit
 lines (cm from the top-left); *Slide setup...* writes `\noorslide{title-dx=,title-size=,body-top=,margin-left=,
 number-on-title=true,...}`. Figures in any document take `[width=,angle=,xshift=,yshift=]`.
 
+Editor help (tell the user): the LaTeX editor autocompletes commands / environments / cite keys / labels / sheet keys
+(Tab fills, arrows choose), wraps selected text in brackets / quotes / `$`, closes brackets, adds `\end{env}` after Enter, and
+pastes clipboard pictures (document: figure; presentation: movable slide object). Sheets have one physical size on screen /
+PDF / PNG; *Fonts in real points* (Figure tab) makes point sizes literal. Large projects are stored as binary sidecars
+(`<project>/_data`, `_files`); push numpy arrays (the client already does).
+
 Master layout (tell the user): in the slide editor pick *Master layout (all slides)* to drag the title / body / number /
 source placeholders and add logos or decorations that appear on every slide.
 

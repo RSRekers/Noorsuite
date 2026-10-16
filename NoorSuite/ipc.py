@@ -135,7 +135,12 @@ class IPCBridge(QObject):
             key = payload.get("key")
             for entry in self.snapshot.get("image_full", {}).values():
                 if key in (entry.get("id"), entry.get("name")):
-                    return {"status": "success", **entry}
+                    out = dict(entry)
+                    arr = out.pop("array", None)
+                    if arr is not None:                    # wire format, built per request
+                        import numpy as _np
+                        out["bytes"] = _np.ascontiguousarray(arr).tobytes()
+                    return {"status": "success", **out}
             return {"status": "error", "message": f"no image matching {key!r}"}
         # Anything else is a mutation -> hand it to the GUI thread.
         self.data_received.emit(payload)

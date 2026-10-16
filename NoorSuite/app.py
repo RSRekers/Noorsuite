@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 import os
 import threading
 import time
@@ -817,6 +818,10 @@ class SciSuiteWindow(QMainWindow):
         self.ipc.start()
 
         self._autosave_threads: dict[str, threading.Thread] = {}
+        self._save_caches: dict[str, dict] = {}   # per path: what the sidecar files already hold
+        self._digest_cache: dict = {}             # data id -> (signature, content digest)
+        self._render_hold = 0                     # > 0: renders are collected, done once at the end
+        self._held_sheets: set = set()
         self._autosave_done.connect(self._on_autosave_done)
 
         self._init_ui()
@@ -1648,7 +1653,7 @@ class SciSuiteWindow(QMainWindow):
         self.open_tabs[sheet_id] = ps
         idx = self.tab_widget.addTab(ps, self._sheet_icon, sm.name)
         self.tab_widget.setCurrentIndex(idx)
-        ps.render(self.repository, self.images)
+        self._render_if_needed()
         return ps
 
     def _on_notes_edited(self):
@@ -1701,7 +1706,7 @@ class SciSuiteWindow(QMainWindow):
             self.sync_active_subplot_inspector()
             self._sync_subplot_trace_list(keep_selection=False)
             self._sync_subplot_strip()
-            self.render_current_sheet()
+            self._render_if_needed()
             self.colormap_panel.refresh()
 
     def on_subplot_selection_changed(self, _idx):
@@ -2601,22 +2606,85 @@ class SciSuiteWindow(QMainWindow):
         self._refresh_ipc_snapshot()
 
     # ------------------------------------------------------------- render engine
+    @contextmanager
+    def _deferred_renders(self):
+        """Inside the block every sheet render is only recorded; afterwards each touched sheet is
+        drawn once (the visible one) or marked stale (hidden ones, drawn when shown). One IPC
+        request used to draw the same new sheet four times."""
+        self._render_hold += 1
+        try:
+            yield
+        finally:
+            self._render_hold -= 1
+            if self._render_hold == 0:
+                held, self._held_sheets = self._held_sheets, set()
+                cur = self.current_sheet()
+                for sid in held:
+                    ps = self.open_tabs.get(sid)
+                    if ps is None:
+                        continue
+                    if ps is cur:
+                        self._render_ps(ps)
+                    else:
+                        ps._stale = True
+
+    def _render_ps(self, ps):
+        """Render a sheet and remember what it was rendered from."""
+        if self._render_hold:
+            self._held_sheets.add(ps.model.sheet_id)
+            return
+        ps.render(self.repository, self.images)
+        ps._stale = False
+        ps._rendered_fp = self.sheet_fingerprint(ps.model.sheet_id)
+
     def render_current_sheet(self):
         cs = self.current_sheet()
         if cs:
-            cs.render(self.repository, self.images)
+            self._render_ps(cs)
+            self._notify_documents()
+
+    def _render_if_needed(self):
+        """Tab switch: draw the sheet only when its model or data changed since it was drawn
+        (re-rendering a big sheet costs a few hundred ms)."""
+        cs = self.current_sheet()
+        if cs is None:
+            return
+        if getattr(cs, "_stale", True) or getattr(cs, "_rendered_fp", None) != \
+                self.sheet_fingerprint(cs.model.sheet_id):
+            self._render_ps(cs)
             self._notify_documents()
 
     def _render_sheet(self, sheet_id):
         ps = self.open_tabs.get(sheet_id)
         if ps is not None:
-            ps.render(self.repository, self.images)
+            self._render_ps(ps)
         self._notify_documents()
 
-    def _refresh_open_sheets(self):
+    @staticmethod
+    def _sheet_uses(sm, ids) -> bool:
+        for sub in sm.subplots:
+            if any(t.data_id in ids for t in sub.traces):
+                return True
+            if sub.image is not None and sub.image.data_id in ids:
+                return True
+        return False
+
+    def _refresh_open_sheets(self, only_ids=None):
+        """Re-render open sheets -- only the visible one now, the others when their tab is shown
+        (20 open tabs used to mean 20 renders for every pushed data frame). ``only_ids``: just the
+        sheets that plot one of these data / image ids (``set()`` -> none, a brand-new object)."""
+        cur = self.current_sheet()
+        touched = False
         for ps in self.open_tabs.values():
-            ps.render(self.repository, self.images)
-        self._notify_documents()
+            if only_ids is not None and not self._sheet_uses(ps.model, only_ids):
+                continue
+            touched = True
+            if ps is cur:
+                self._render_ps(ps)
+            else:
+                ps._stale = True
+        if touched or only_ids is None:
+            self._notify_documents()
 
     # --------------------------------------------------------------- figure files
     def document_assets(self) -> list:
@@ -2851,14 +2919,40 @@ class SciSuiteWindow(QMainWindow):
         for oid in sorted(ids):
             obj = self.repository.get(oid)
             if obj is not None:
-                for c in obj.column_order:
-                    h.update(obj.columns[c].tobytes())
+                h.update(self._data_digest(obj))
                 continue
             img = self.images.get(oid)
             if img is not None:
-                h.update(np.ascontiguousarray(img.data).tobytes())
-                h.update(json.dumps(img.axis_coords, sort_keys=True, default=str).encode())
+                h.update(self._image_digest(img))
         return h.hexdigest()
+
+    def _data_digest(self, obj) -> bytes:
+        """Content hash of a data object, remembered until its columns are replaced (a big data
+        pool would otherwise be re-hashed for every document build)."""
+        sig = obj.signature()
+        hit = self._digest_cache.get(obj.id)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        h = hashlib.blake2b(digest_size=16)
+        for c in obj.column_order:
+            h.update(c.encode("utf-8"))
+            h.update(np.ascontiguousarray(obj.columns[c]))
+        digest = h.digest()
+        self._digest_cache[obj.id] = (sig, digest)
+        return digest
+
+    def _image_digest(self, img) -> bytes:
+        sig = (id(img.data), tuple(img.data.shape), json.dumps(img.axis_coords, sort_keys=True,
+                                                               default=str))
+        hit = self._digest_cache.get(img.id)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        h = hashlib.blake2b(digest_size=16)
+        h.update(np.ascontiguousarray(img.data))
+        h.update(sig[2].encode("utf-8"))
+        digest = h.digest()
+        self._digest_cache[img.id] = (sig, digest)
+        return digest
 
     def export_sheet_pdf(self, sheet_id, path):
         """Render a sheet as a vector PDF at its own figure size (``_DOC_FIG_CM`` when the
@@ -3139,9 +3233,26 @@ class SciSuiteWindow(QMainWindow):
         self._refresh_ipc_data()
         self._refresh_ipc_snapshot()
 
+    def _cache_for(self, path) -> dict:
+        return self._save_caches.setdefault(str(path), {})
+
+    def _save_now(self, path, force: bool = False) -> None:
+        """Synchronous save. Big data / figure files are rewritten only when they changed, and a
+        project that is identical to the last save is not written again (unless ``force``)."""
+        prior = self._autosave_threads.get(path)
+        if prior is not None and prior.is_alive():
+            prior.join()
+        cache = self._cache_for(path)
+        pm = self._project_model()
+        sig = pm.signature()
+        if not force and cache.get("sig") == sig and os.path.isfile(path):
+            return
+        pm.prepare_save(path, cache).run()
+        cache["sig"] = sig
+
     def _write_project(self, path: str) -> bool:
         try:
-            self._project_model().save(path)
+            self._save_now(path, force=True)
             return True
         except OSError as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
@@ -3174,11 +3285,17 @@ class SciSuiteWindow(QMainWindow):
         prior = self._autosave_threads.get(path)
         if prior is not None and prior.is_alive():
             return   # last autosave to this path (e.g. a slow drive) hasn't finished yet
+        cache = self._cache_for(path)
         pm = self._project_model()   # snapshot the live model on the GUI thread
+        sig = pm.signature()
+        if cache.get("sig") == sig and os.path.isfile(path):
+            return                   # nothing changed since the last save: no work at all
+        plan = pm.prepare_save(path, cache)   # payload + file list, still on the GUI thread
 
         def worker():
             try:
-                pm.save(path)
+                plan.run()           # file I/O only
+                cache["sig"] = sig
                 self._autosave_done.emit(
                     path, True, f"Autosaved  -  {time.strftime('%H:%M:%S')}")
             except OSError as exc:
@@ -3198,7 +3315,7 @@ class SciSuiteWindow(QMainWindow):
         if not self.project_path:
             return
         try:
-            self._project_model().save(self.project_path)
+            self._save_now(self.project_path)
             self.statusBar().showMessage(
                 f"Autosaved  -  {time.strftime('%H:%M:%S')}", 3000)
         except OSError as exc:
@@ -3227,14 +3344,22 @@ class SciSuiteWindow(QMainWindow):
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             QMessageBox.critical(self, "Cannot open project", str(exc))
             return
+        self._save_caches.pop(str(path), None)
+        pm.seed_cache(path, self._cache_for(path))
         self._load_project_model(pm)
+        if getattr(pm, "missing", None):
+            QMessageBox.warning(
+                self, "Files missing",
+                "The project refers to files next to it that were not found (the data / "
+                "figures are empty). Keep the project folder (same name as the .sciproj file) "
+                "together with the file.\n\n" + "\n".join(pm.missing[:12]))
         self.project_path = path
         self._update_title()
         self.statusBar().showMessage(f"Opened {self._project_name()}", 4000)
 
     def save_session(self):
         try:
-            self._project_model().save(self.session_file)
+            self._save_now(self.session_file)
         except OSError:
             pass
 
@@ -3245,6 +3370,7 @@ class SciSuiteWindow(QMainWindow):
             pm = ProjectModel.load(self.session_file)
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             return
+        pm.seed_cache(self.session_file, self._cache_for(self.session_file))
         self._load_project_model(pm)
 
     @staticmethod
@@ -3368,15 +3494,18 @@ class SciSuiteWindow(QMainWindow):
 
     def _refresh_ipc_data(self):
         """Rebuild full column + image data (client get_data / get_image). Data mutations only."""
+        # references to the arrays, no copies: they are replaced when a column changes, never
+        # edited in place, so the serving thread can read them while the GUI goes on. The
+        # conversion to the wire format happens per request.
         self._ipc_data_full = {
             o.id: {"id": o.id, "name": o.name, "column_order": list(o.column_order),
-                   "columns": {c: o.columns[c].tolist() for c in o.column_order}}
+                   "columns": {c: o.columns[c] for c in o.column_order}}
             for o in self.repository.values()
         }
         self._ipc_image_full = {
             im.id: {"id": im.id, "name": im.name, "shape": list(im.shape),
                     "dtype": str(im.data.dtype), "axis_names": list(im.axis_names),
-                    "bytes": np.ascontiguousarray(im.data).tobytes()}
+                    "array": im.data}
             for im in self.images.values()
         }
         if isinstance(self.ipc.snapshot, dict):
@@ -3456,6 +3585,10 @@ class SciSuiteWindow(QMainWindow):
         return next((o for o in self.images.values() if o.name == key), None)
 
     def handle_incoming_ipc(self, payload: dict):
+        with self._deferred_renders():
+            self._dispatch_ipc(payload)
+
+    def _dispatch_ipc(self, payload: dict):
         action = payload.get("action")
         if action == ACTION_APPEND_DATAFRAME:
             self._ingest_dataobject(payload)
@@ -3575,7 +3708,7 @@ class SciSuiteWindow(QMainWindow):
                              notes=payload.get("notes", ""))
             self.repository[obj.id] = obj
         self._refresh_data_list()
-        self._refresh_open_sheets()
+        self._refresh_open_sheets({obj.id} if existing is not None else set())
         self._sync_subplot_trace_list()
         self._refresh_ipc_data()
         self._refresh_ipc_snapshot()
@@ -3599,7 +3732,7 @@ class SciSuiteWindow(QMainWindow):
                               axis_coords=coords)
             self.images[obj.id] = obj
         self._refresh_data_list()
-        self._refresh_open_sheets()
+        self._refresh_open_sheets({obj.id} if existing is not None else set())
         self._refresh_ipc_data()
         self._refresh_ipc_snapshot()
         return obj

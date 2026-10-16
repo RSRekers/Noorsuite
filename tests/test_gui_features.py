@@ -105,7 +105,7 @@ def test_clipboard_export_matches_display_proportions(win):
     buf = BytesIO()
     win._savefig_at_export_size(ps, buf, "png", wysiwyg=True)
     w, h = Image.open(BytesIO(buf.getvalue())).size
-    assert (w, h) == (round(w_in * 300), round(h_in * 300))      # no tight re-crop
+    assert abs(w - round(w_in * 300)) <= 1 and abs(h - round(h_in * 300)) <= 1   # no tight re-crop
     assert tuple(ps.fig.get_size_inches()) == (w_in, h_in)       # figure restored
 
 

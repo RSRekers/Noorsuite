@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboB
                              QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from . import latex, zotero
+from .latexeditor import AssistEditor
 from .fuzzy import smart_score
 
 _NOOR_LINE_RE = re.compile(
@@ -103,8 +104,9 @@ class _LatexHighlighter(QSyntaxHighlighter):
                 self.setFormat(m.start(), m.end() - m.start(), f)
 
 
-class LatexEditor(QPlainTextEdit):
-    """Plain-text editor. Double-click in a ``\\noorsheet{...}`` emits ``sheetRequested``;
+class LatexEditor(AssistEditor):
+    """Plain-text editor (autocomplete, bracket wrapping, picture paste: :class:`AssistEditor`).
+    Double-click in a ``\\noorsheet{...}`` emits ``sheetRequested``;
     text dropped from the project tree / figure list is inserted at the drop position."""
 
     sheetRequested = pyqtSignal(str)
@@ -1119,6 +1121,11 @@ class DocumentTab(QWidget):
         self.editor.setPlainText(model.source)
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.sheetRequested.connect(self._open_ref)
+        self.editor.extras_provider = self._completion_extras
+        self.editor.imagePasted.connect(self.paste_picture)
+        self.editor.filesPasted.connect(self.paste_picture_files)
+        self.editor.autoclose = bool(self._settings.value("doc/autoclose", True, type=bool))
+        self.editor.autocomplete = bool(self._settings.value("doc/autocomplete", True, type=bool))
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("LaTeX output appears here.")
@@ -1959,6 +1966,87 @@ class DocumentTab(QWidget):
             shutil.copyfile(self._pdf, path)
             self.status_label.setText(f"  exported {Path(path).name}")
 
+    # -- completion data / pictures -------------------------------------------------------
+    def _completion_extras(self) -> dict:
+        """Keys, labels, sheets ... offered by the autocomplete popup."""
+        rev = self.editor.document().revision()
+        if getattr(self, "_labels_rev", None) != rev:
+            from . import latexcomplete
+            self._labels_rev = rev
+            self._labels = latexcomplete.labels_in(self.editor.toPlainText())
+        host = self.host
+        cite = []
+        try:
+            for r in host.document_references():
+                title = (r.get("title") or "")[:60]
+                cite.append((r["key"], f"{r.get('year', '')} {title}".strip()))
+            sheets = [(s.sheet_id, s.name) for s in host.document_sheets()]
+            assets = [(a.asset_id, a.name) for a in host.document_assets()]
+            tables = [(t.table_id, getattr(t, "name", "")) for t in host.document_tables()]
+        except Exception:
+            sheets, assets, tables = [], [], []
+        return {"cite": cite, "labels": self._labels, "sheets": sheets, "assets": assets,
+                "tables": tables}
+
+    def _is_beamer(self) -> bool:
+        from . import templates as _t
+        return _t.base_of(self.current_layout()) == "beamer"
+
+    def paste_clipboard_picture(self):
+        md = QApplication.clipboard().mimeData()
+        files = self.editor.picture_files(md)
+        if files:
+            self.paste_picture_files(files)
+        elif md.hasImage():
+            self.paste_picture(md.imageData())
+        else:
+            self.status_label.setText("  no picture on the clipboard")
+
+    def paste_picture(self, image):
+        """A picture from the clipboard: stored in the project, placed in the text (a free,
+        movable object on the current slide in a presentation)."""
+        from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+        from PyQt6.QtGui import QImage
+        if not isinstance(image, QImage) or image.isNull():
+            return
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buf, "PNG")
+        stamp = time.strftime("%Y-%m-%d %H-%M-%S")
+        a = self.host.import_asset(data=bytes(ba), ext="png", name=f"Pasted picture {stamp}")
+        self._place_asset(a, image.width() / max(1, image.height()))
+
+    def paste_picture_files(self, paths):
+        from PyQt6.QtGui import QImage
+        for p in paths:
+            try:
+                a = self.host.import_asset(p)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "Paste picture", f"{p}\n\n{exc}")
+                continue
+            img = QImage(p)
+            ratio = img.width() / max(1, img.height()) if not img.isNull() else 1.4
+            self._place_asset(a, ratio)
+
+    def _place_asset(self, a, ratio: float):
+        from . import slideobjects as so
+        src = self.source()
+        if self._is_beamer() and so.frames(src):
+            pw, ph = (v / 10 for v in so.slide_size_mm(src))
+            w = min(pw * 0.5, ph * 0.6 * ratio)
+            h = w / ratio
+            obj = {"kind": "file", "x": round((pw - w) / 2, 2), "y": round((ph - h) / 2, 2),
+                   "w": round(w, 2), "h": round(h, 2), "arg": a.asset_id}
+            frame = so.frame_at(src, self.editor.textCursor().position())
+            self.apply_source(so.add_object(src, frame, obj))
+            self.status_label.setText("  picture added to the slide (Slide editor: move / scale it)")
+            if self.right_tabs.currentWidget() is self.slide_editor:
+                self.slide_editor.refresh()
+            return
+        self.insert_text(latex.asset_snippet(a.asset_id, a.name, a.name))
+        self.status_label.setText("  picture inserted")
+
     # -- text formatting ------------------------------------------------------------------
     def _format_menu(self, parent) -> QMenu:
         from . import textformat
@@ -1970,6 +2058,18 @@ class DocumentTab(QWidget):
             m.addAction(label, lambda k=kind: self.format_selection(k))
         m.addSeparator()
         m.addAction("Colour...", self._format_color)
+        m.addSeparator()
+        ac = m.addAction("Autocomplete while typing")
+        ac.setCheckable(True)
+        ac.setChecked(bool(self._settings.value("doc/autocomplete", True, type=bool)))
+        ac.toggled.connect(lambda on: (setattr(self.editor, "autocomplete", on),
+                                       self._settings.setValue("doc/autocomplete", on)))
+        cl = m.addAction("Close brackets automatically")
+        cl.setCheckable(True)
+        cl.setChecked(bool(self._settings.value("doc/autoclose", True, type=bool)))
+        cl.toggled.connect(lambda on: (setattr(self.editor, "autoclose", on),
+                                       self._settings.setValue("doc/autoclose", on)))
+        m.addAction("Paste picture from clipboard", self.paste_clipboard_picture)
         size = m.addMenu("Size")
         for name in textformat.SIZES:
             size.addAction(name, lambda n=name: self.format_selection("size", n))

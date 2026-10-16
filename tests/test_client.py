@@ -42,7 +42,7 @@ def test_push_dataframe_registers_one_object_with_all_numeric_columns():
     assert p["action"] == ACTION_APPEND_DATAFRAME
     assert p["name"] == "run1"
     assert p["column_order"] == ["t", "a", "b"]          # non-numeric dropped
-    assert p["columns"]["a"] == [1.0, 2.0, 3.0]
+    assert list(p["columns"]["a"]) == [1.0, 2.0, 3.0]
     assert p["tags"] == ["r"]
     assert p["mode"] == "new"
 
@@ -54,7 +54,7 @@ def test_push_dataframe_includes_named_numeric_index():
     client.push_dataframe(df, name="sweep")
     p = rec.last
     assert p["column_order"] == ["freq", "a"]
-    assert p["columns"]["freq"] == [10.0, 20.0]
+    assert list(p["columns"]["freq"]) == [10.0, 20.0]
 
 
 def test_plot_sends_add_to_sheet_after_optional_push():

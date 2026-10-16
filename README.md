@@ -204,6 +204,32 @@ preview), text to edit the label. Objects are plain `\noorobj[x=..,y=..,w=..,h=.
 frame (positions in cm from the top-left corner), so everything stays editable in the text, in undo and in the
 PowerPoint export (native shapes, connectors, pictures, text boxes).
 
+**Autocomplete and editing help (LaTeX editor).** While typing, a list opens under the caret: `\be` offers `\begin`,
+`\begin{` offers the environments (choosing `equation` writes the whole `\begin{equation} ... \label{eq:} ... \end{equation}`
+block), `\end{` offers the environments that are still open, `\cite{` the project's references, `\ref{` the labels of the
+text, `\noorsheet{` / `\noorfile{` / `\noortable{` the sheets, figure files and tables, `\usepackage{` common packages, and
+the option keys of `\noorobj[` / `\includegraphics[`. Up / Down choose, **Tab** fills (Enter fills only after you navigated with
+the arrows, otherwise it is a newline), Esc closes. A filled snippet puts the caret in its first field; **Tab** jumps to the
+next field. Enter after `\begin{env}` adds the matching `\end{env}`. Typing `( [ {` closes the bracket, typing the closer
+steps over it, Backspace in an empty pair removes both. With text selected, typing `( [ { < " ' ` $ * _ ~ | =` **wraps** the
+selection instead of replacing it (the inner text stays selected, so `$` twice gives `$$text$$`). Both helpers can be switched
+off in *Format*.
+
+**Pasting pictures.** Ctrl+V with a picture (or copied picture files) on the clipboard stores it in the project and puts it
+into the text: a figure in a document, a free, movable object on the current slide in a presentation. In the slide editor
+Ctrl+V (or *Paste picture*) does the same. *Format -> Paste picture from clipboard* works without a keyboard shortcut.
+
+**Figure and font sizes.** Every sheet has one physical size: its own cm size, else 12 x 8 cm. The screen, the PDF, the PNG
+exports and the clipboard all use it, so a label has the same proportion to the figure everywhere (it used to depend on the
+window size on screen). *Figure* tab -> **Fonts in real points** makes a 10 pt label exactly 10 pt on paper when the figure is
+placed at its own width (older sheets keep the scaled sizes).
+
+**Large projects.** Data above ~4000 numbers is saved as binary files in `<project>/_data/` (and imported figure files in
+`<project>/_files/`) instead of JSON: a 64 MB data pool saves in 0.3 s instead of 38 s, loads in 0.4 s instead of 7 s and
+the autosave skips everything that did not change. Long lines (> 20 000 points) are drawn as a min / max envelope at the
+resolution of the figure (peaks are kept, exports use a finer envelope); sheets in hidden tabs are drawn when you show
+them, pushing a new data frame no longer redraws any sheet, one request draws a sheet once.
+
 **Master layout.** Choose *Master layout (all slides)* at the top of the slide editor's frame list to edit the
 template itself: the title, body text area, slide number and source line are dashed placeholder boxes (their
 starting positions are measured in the compiled PDF) that you drag and resize, with font size and colour in the

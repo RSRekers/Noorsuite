@@ -967,7 +967,7 @@ class FigureStyleWidget(QWidget):
 
     _FIELDS = ("fig_face_color", "fig_face_alpha", "fig_frame_on",
                "fig_edge_color", "fig_edge_width", "fig_edge_style",
-               "fig_width_cm", "fig_height_cm")
+               "fig_width_cm", "fig_height_cm", "fig_real_points")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1014,9 +1014,17 @@ class FigureStyleWidget(QWidget):
         size_btns.addWidget(self.square_btn)
         size_btns.addWidget(self.auto_btn)
         form.addRow("", size_btns)
+        self.real_points = QCheckBox("Fonts in real points (size on paper = size in points)")
+        self.real_points.setToolTip(
+            "On: a 10 pt label is 10 pt when the figure is placed at its own width in the document\n"
+            "(the on-screen figure, PDF, PNG and clipboard all use the cm size above).\n"
+            "Off (older sheets): text sizes scale with the figure size and the subplot grid.")
+        self.real_points.toggled.connect(self._push)
+        form.addRow("", self.real_points)
         hint = QLabel("Both set: the figure keeps that width:height shape on screen "
                       "(letterboxed to fit the tab) and exports at exactly that size. "
-                      "Blank: fills the tab like before.")
+                      "Blank: fills the tab; PDF / PNG then use the default 12 x 8 cm. The screen "
+                      "always shows the figure at its cm size, scaled to the window.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray;")
         form.addRow("", hint)
@@ -1038,6 +1046,7 @@ class FigureStyleWidget(QWidget):
             self.edge_style.setCurrentText(s.fig_edge_style)
             self.width_cm_edit.setText(_fmt(s.fig_width_cm))
             self.height_cm_edit.setText(_fmt(s.fig_height_cm))
+            self.real_points.setChecked(bool(getattr(s, "fig_real_points", False)))
         finally:
             self._loading = False
 
@@ -1065,6 +1074,7 @@ class FigureStyleWidget(QWidget):
         s.fig_edge_style = self.edge_style.currentText()
         s.fig_width_cm = _parse_float_or_none(self.width_cm_edit.text())
         s.fig_height_cm = _parse_float_or_none(self.height_cm_edit.text())
+        s.fig_real_points = self.real_points.isChecked()
         self.changed.emit()
 
 

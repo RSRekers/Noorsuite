@@ -675,6 +675,28 @@ title/x_label/y_label + trace labels).
 - `\noorslide{title-dx,title-dy,title-size,body-top,margin-left,margin-right,number-on-title,number-x,number-y,
   number-size}` (beamer only): title shift = `every node` shift inside the frametitle template, number on the title
   slide = addition to the `title page` template (plain frames have no footline).
+- Editor assist: `latexcomplete.py` (Qt-free: `complete(before, extras) -> (start, [Item])`, `expand(snippet, indent)`;
+  catalogues `COMMANDS` / `ENVIRONMENTS` / `PACKAGES`, `$1` / `${2:default}` / `$0` stops) and `latexeditor.AssistEditor`
+  (popup = frameless `QListWidget` that never takes focus; Up / Down / Tab / Esc handled in `keyPressEvent`; snippet stops are
+  `QTextCursor`s that follow the text; `WRAP_PAIRS` wrap a selection, `AUTO_CLOSE`, `_auto_end`; `canInsertFromMimeData` /
+  `insertFromMimeData` emit `imagePasted` / `filesPasted` -> `DocumentTab.paste_picture*` -> `host.import_asset(data=, ext="png")`
+  and a `\noorfile` figure (article) or a `\noorobj` file object (beamer)). `DocumentTab._completion_extras` feeds cite keys /
+  labels (cached per `document().revision()`) / sheets / assets / tables.
+- One physical figure size: `sheet.logical_size_cm(model)` = own cm size else `latex.DEFAULT_FIG_CM`; `_sync_zoom_dpi` keeps the
+  figure at that width in inches and sets `fig.dpi = canvas px / width` (window size and zoom only change the pixel count);
+  `render` text_scale from the same size (`SheetModel.fig_real_points` -> 1.0, literal points). Do not reintroduce
+  `dpi = 100 * zoom`.
+- Performance rules: (1) `ProjectModel.prepare_save(path, cache)` (GUI thread: payload + job list) / `SavePlan.run()` (file I/O,
+  any thread). Data objects with > `SIDECAR_MIN_VALUES` numbers -> `<stem>/_data/<id>.npz`, assets -> `<stem>/_files/<id>.<ext>`,
+  JSON written to `*.tmp` then renamed; the `cache` dict (per path, `SciSuiteWindow._cache_for`) remembers
+  `DataObject.signature()` = (`_rev`, id / length of every column) so unchanged data is never rewritten; `ProjectModel.signature()`
+  lets `_save_now` / `_background_save` skip an unchanged project. Columns are replaced (`update_from`, which bumps `_rev`), never
+  edited in place -- keep it that way, the caches, `_ipc_data_full` (references, not copies) and the digest cache rely on it.
+  (2) `_refresh_open_sheets(only_ids)` renders only the visible sheet that plots those ids; hidden ones get `_stale` and are drawn
+  by `_render_if_needed` when shown (`_rendered_fp` = `sheet_fingerprint`); `handle_incoming_ipc` runs inside
+  `_deferred_renders()` so a request renders each touched sheet once. (3) `model.thin_line` min / max decimation of long
+  monotonic lines in `PlotSheet._thinned` (`line_budget` bins; exports 20000). (4) `_data_digest` / `_image_digest` cache content
+  hashes for `sheet_fingerprint`; `_place_active_highlight` caches its tight bbox. (5) The client sends numpy arrays, not lists.
 - Master layout: `slideobjects.MASTER` (-1) = "frame" index of the preamble's `\noormasterobj` lines (drawn in
   an `addtobeamertemplate{background}` *after* the theme background); `placeholders(source, page_cm, detected)`
   -> pseudo objects `ph-title/body/number/source` (values: `\noorslide` keys `title-x/y/w/size/color`,

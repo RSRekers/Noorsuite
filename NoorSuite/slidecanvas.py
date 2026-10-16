@@ -49,6 +49,7 @@ class SlideCanvas(QWidget):
     deleteRequested = pyqtSignal(int)
     duplicateRequested = pyqtSignal(int)
     reorderRequested = pyqtSignal(int, int)    # index, +1 / -1
+    pasteRequested = pyqtSignal()              # Ctrl+V
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -454,6 +455,9 @@ class SlideCanvas(QWidget):
     def keyPressEvent(self, e):
         k = e.key()
         step = 0.5 if e.modifiers() & Qt.KeyboardModifier.ShiftModifier else 0.1      # cm
+        if k == Qt.Key.Key_V and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.pasteRequested.emit()
+            return
         if self.sel < 0:
             return super().keyPressEvent(e)
         if k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):

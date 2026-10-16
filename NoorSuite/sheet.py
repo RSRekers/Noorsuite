@@ -21,8 +21,8 @@ from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                              QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget)
 
-from .model import (INDEX_COL, ImageRef, ShapeRef, SheetModel, apply_tick_labels,
-                    gradient_rgba, heatmap_band_edges, heatmap_iso_levels, resolve_ticks)
+from .model import (INDEX_COL, THIN_MIN_POINTS, ImageRef, ShapeRef, SheetModel, apply_tick_labels,
+                    gradient_rgba, heatmap_band_edges, heatmap_iso_levels, resolve_ticks, thin_line)
 from .widgets import CollapsibleSection
 
 class _DynRot(Affine2DBase):
@@ -54,6 +54,15 @@ _HL_PAD_PX = 6.0
 # by (this figure's diagonal / _REFERENCE_DIAG_CM) so the text-to-figure proportion holds
 # regardless of the requested physical size.
 _REFERENCE_DIAG_CM = (8.0 ** 2 + 6.0 ** 2) ** 0.5 * 2.54
+
+
+def logical_size_cm(m) -> tuple:
+    """(width, height) in cm of a sheet's figure: its own size when both are set, else
+    ``latex.DEFAULT_FIG_CM`` (the size PDF / PNG exports use)."""
+    if m.fig_width_cm and m.fig_height_cm:
+        return float(m.fig_width_cm), float(m.fig_height_cm)
+    from .latex import DEFAULT_FIG_CM
+    return float(DEFAULT_FIG_CM[0]), float(DEFAULT_FIG_CM[1])
 
 
 def rgba(color, alpha):
@@ -193,6 +202,9 @@ class PlotSheet(QWidget):
         self.canvas_host = _AspectCanvasHost(self.canvas)
         self.canvas_host.zoom_changed.connect(lambda _z: self._sync_zoom_dpi())
         self._exporting = False       # suppress the active-subplot cue while exporting
+        self.line_budget = None       # bins for thinning long lines (None: from the canvas width)
+        self._render_gen = 0          # bumped by every render(); keys the highlight cache
+        self._hl_key = None
 
         plot_page = QWidget()
         plot_layout = QVBoxLayout(plot_page)
@@ -425,6 +437,7 @@ class PlotSheet(QWidget):
     # ------------------------------------------------------------------ render
     def render(self, repository: dict, images: dict | None = None):
         m = self.model
+        self._render_gen += 1
         self._repository = repository
         self._images = images or {}
         self.fig.clf()
@@ -448,16 +461,18 @@ class PlotSheet(QWidget):
         self._image_geom = {}
 
         rows, cols = m.rows, m.cols
-        if m.fig_width_cm and m.fig_height_cm:
-            diag_cm = (float(m.fig_width_cm) ** 2 + float(m.fig_height_cm) ** 2) ** 0.5
-            size_scale = diag_cm / _REFERENCE_DIAG_CM
+        # the physical size every output uses (screen, PDF, PNG, clipboard): the sheet's own cm
+        # size, else latex.DEFAULT_FIG_CM -- text proportions are therefore identical everywhere
+        w_cm, h_cm = logical_size_cm(m)
+        if getattr(m, "fig_real_points", False):
+            text_scale = 1.0                              # points are points
         else:
-            size_scale = 1.0
-        # each subplot only gets 1/rows x 1/cols of the figure -- shrink text so a
-        # bigger grid doesn't just keep the same absolute (point) sizes and squeeze
-        # every cell's axes box to fit them (1x1 grid -> unchanged, matches before).
-        grid_scale = 1.0 / max(1, max(rows, cols))
-        text_scale = max(0.3, min(size_scale * grid_scale, 3.0))
+            size_scale = (w_cm ** 2 + h_cm ** 2) ** 0.5 / _REFERENCE_DIAG_CM
+            # each subplot only gets 1/rows x 1/cols of the figure -- shrink text so a
+            # bigger grid doesn't just keep the same absolute (point) sizes and squeeze
+            # every cell's axes box to fit them (1x1 grid -> unchanged, matches before).
+            grid_scale = 1.0 / max(1, max(rows, cols))
+            text_scale = max(0.3, min(size_scale * grid_scale, 3.0))
 
         for idx in range(rows * cols):
             sub = m.subplots[idx]
@@ -546,7 +561,11 @@ class PlotSheet(QWidget):
                 except Exception:
                     continue
                 before = set(ax.get_children())
-                self._draw_trace(ax, tref, x, y)
+                dx, dy = x, y
+                if tref.plot_type == "Line" and not tref.show_errorbar \
+                        and len(x) >= THIN_MIN_POINTS:
+                    dx, dy = self._thinned(x, y, sub)
+                self._draw_trace(ax, tref, dx, dy)
                 if tref.show_errorbar:
                     try:
                         yerr = tref.resolve_yerr(data)
@@ -600,6 +619,18 @@ class PlotSheet(QWidget):
                  if m.fig_width_cm and m.fig_height_cm else None)
         self.canvas_host.set_ratio(ratio)
         self.canvas.draw_idle()
+
+    def _thinned(self, x, y, sub):
+        """A long line reduced to what the figure can show (see :func:`model.thin_line`)."""
+        bins = self.line_budget or int(min(6000, max(1500, 1.5 * self.canvas.width())))
+        frac = 1.0
+        if (sub.x_min is not None or sub.x_max is not None) and len(x) > 1:
+            lo, hi = float(min(x[0], x[-1])), float(max(x[0], x[-1]))
+            v0 = lo if sub.x_min is None else float(sub.x_min)
+            v1 = hi if sub.x_max is None else float(sub.x_max)
+            if hi > lo:
+                frac = abs(v1 - v0) / (hi - lo)
+        return thin_line(x, y, bins, frac)
 
     def _layout(self):
         """``tight_layout`` -- or, when every subplot is content-only, no margins at all so the
@@ -966,13 +997,18 @@ class PlotSheet(QWidget):
         canvas grows by ``zoom`` in pixels, so the figure dpi grows by ``zoom`` too and
         everything (text, lines) scales with it instead of just adding empty space."""
         dpr = float(getattr(self.canvas, "device_pixel_ratio", 1.0) or 1.0)
-        target = 100.0 * self.canvas_host.zoom * dpr
-        if abs(self.fig.dpi - target) < 1e-6:
+        w_px, h_px = self.canvas.width() * dpr, self.canvas.height() * dpr
+        if w_px <= 0 or h_px <= 0:
+            return
+        # the figure keeps its *physical* width (the sheet's cm size, else the export default);
+        # the canvas -- window size and zoom -- only decides how many pixels show it, so text,
+        # lines and markers have the same proportions on screen as in the PDF / PNG / clipboard
+        w_in = logical_size_cm(self.model)[0] / 2.54
+        target = w_px / w_in
+        if abs(self.fig.dpi - target) < 1e-6 and abs(self.fig.get_figwidth() - w_in) < 1e-9:
             return
         self.fig.dpi = target
-        w_px, h_px = self.canvas.width() * dpr, self.canvas.height() * dpr
-        if w_px > 0 and h_px > 0:
-            self.fig.set_size_inches(w_px / target, h_px / target, forward=False)
+        self.fig.set_size_inches(w_in, h_px / target, forward=False)
         if draw:
             try:
                 self._layout()
@@ -1039,6 +1075,13 @@ class PlotSheet(QWidget):
             return False
         idx = min(self.model.active_index, len(self._axes) - 1)
         ax = self._axes[idx]
+        # the cue only moves when the figure was rebuilt, resized or the axes were re-laid out;
+        # get_tightbbox() (every tick label measured) costs ~0.1 s, too much for every repaint
+        key = (idx, self._render_gen, tuple(np.round(self.fig.get_size_inches(), 4)),
+               round(float(self.fig.dpi), 3), tuple(np.round(ax.get_position().bounds, 5)))
+        if key == self._hl_key and self._highlight_patch is not None:
+            return False
+        self._hl_key = key
         try:
             bbox = ax.get_tightbbox(renderer)
             if bbox is None:
@@ -1421,6 +1464,7 @@ def export_sheet_pdf(sm, repository, images, path, default_cm=None, assets=None)
         sm.fig_width_cm, sm.fig_height_cm = default_cm or DEFAULT_FIG_CM
     ps = PlotSheet(sm)
     ps.assets = assets or {}
+    ps.line_budget = 20000                   # vector file: ~40k points per line are plenty
     try:
         ps.render(repository, images)
         with matplotlib.rc_context({"pdf.fonttype": 42}):          # real, embeddable text
@@ -1448,6 +1492,7 @@ def export_sheet_png(sm, repository, images, path, width_px=360, assets=None):
         sm.fig_width_cm, sm.fig_height_cm = DEFAULT_FIG_CM
     ps = PlotSheet(sm)
     ps.assets = assets or {}
+    ps.line_budget = 20000
     try:
         ps.render(repository, images)
         w_in, h_in = sm.fig_width_cm / 2.54, sm.fig_height_cm / 2.54

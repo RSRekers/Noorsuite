@@ -200,12 +200,12 @@ class SciSuiteClient:
 
         if df.index.name and pd.api.types.is_numeric_dtype(df.index):
             key = str(df.index.name)
-            columns[key] = np.asarray(df.index.values, dtype=float).tolist()
+            columns[key] = np.ascontiguousarray(df.index.values, dtype=float)
             order.append(key)
 
         for col in df.columns:
             if pd.api.types.is_numeric_dtype(df[col]):
-                columns[str(col)] = np.asarray(df[col].values, dtype=float).tolist()
+                columns[str(col)] = np.ascontiguousarray(df[col].values, dtype=float)
                 order.append(str(col))
 
         return self._ipc.send({
