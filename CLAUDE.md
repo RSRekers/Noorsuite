@@ -682,6 +682,13 @@ title/x_label/y_label + trace labels).
   `insertFromMimeData` emit `imagePasted` / `filesPasted` -> `DocumentTab.paste_picture*` -> `host.import_asset(data=, ext="png")`
   and a `\noorfile` figure (article) or a `\noorobj` file object (beamer)). `DocumentTab._completion_extras` feeds cite keys /
   labels (cached per `document().revision()`) / sheets / assets / tables.
+- Window layout: `_main_splitter` children are not collapsible with minimum widths 190 / 300 / 270; the sidebar is
+  `_right_wrap`, shown / hidden by `_apply_sidebar` (`_sidebar_wanted`, QSettings `ui/sidebar`, toolbar action `sidebar_act` /
+  F4, `reset_layout`); a document tab hides it, a sheet tab restores it and `_ensure_sidebar_width` repairs a collapsed state.
+  The initial size is clamped to the screen. Do not go back to `setSizes([.., 0])` to hide panels.
+- Defaults: `SubplotModel` tick 13 / axis labels 15 / title 16 / legend 11 pt; `SheetModel.fig_real_points` is True for new
+  sheets but `from_dict` starts at False so files without the key keep the scaled text (end-to-end agreement of screen figure,
+  exported PDF and compiled document is tested in `tests/test_layout_and_sizes.py`).
 - One physical figure size: `sheet.logical_size_cm(model)` = own cm size else `latex.DEFAULT_FIG_CM`; `_sync_zoom_dpi` keeps the
   figure at that width in inches and sets `fig.dpi = canvas px / width` (window size and zoom only change the pixel count);
   `render` text_scale from the same size (`SheetModel.fig_real_points` -> 1.0, literal points). Do not reintroduce

@@ -204,6 +204,15 @@ preview), text to edit the label. Objects are plain `\noorobj[x=..,y=..,w=..,h=.
 frame (positions in cm from the top-left corner), so everything stays editable in the text, in undo and in the
 PowerPoint export (native shapes, connectors, pictures, text boxes).
 
+**Window and sidebar.** The window is never larger than the screen (on a laptop the plot sidebar used to sit beyond the
+screen edge). The sidebar can no longer be dragged to zero width; *Sidebar* in the toolbar (F4) shows / hides it and
+*Reset layout* brings back the default panel widths. Documents hide the sidebar while their tab is open and sheets bring
+it back (unless you switched it off).
+
+**Default fonts.** New subplots start with tick labels 13 pt, axis labels 15 pt, title 16 pt, legend 11 pt, and new sheets
+use real point sizes (a 15 pt label prints as 15 pt when the figure is placed at its own width). Saved sheets keep their
+own sizes and their older scaled text; switch *Fonts in real points* on in the Figure tab to convert one.
+
 **Deleting through the API.** `suite.remove_data(name_or_id_or_list)` and `suite.remove_sheet(name_or_id_or_list)` delete data
 objects / images and sheets (with their tab and tree entry; data stays in the pool when a sheet goes, traces disappear
 with their data). Ids win over names; a name that is not unique raises `ValueError` before anything is deleted. Works

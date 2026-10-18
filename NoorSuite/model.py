@@ -1017,21 +1017,21 @@ class SubplotModel:
         self.y_max = None
 
         # Cosmetics
-        self.tick_label_size = 9.0
+        self.tick_label_size = 13.0
         self.face_color = "#ffffff"    # axes background
         self.face_alpha = 1.0
         self.spine_color = "#000000"
         self.spine_width = 0.8
         self.spine_style = "-"
-        self.title_fontsize = 11.0
-        self.xlabel_fontsize = 10.0
-        self.ylabel_fontsize = 10.0
+        self.title_fontsize = 16.0
+        self.xlabel_fontsize = 15.0
+        self.ylabel_fontsize = 15.0
 
         # Legend
         self.legend_visible = True
         self.legend_loc = "best"
         self.legend_frame = True
-        self.legend_fontsize = 8.0
+        self.legend_fontsize = 11.0
         self.legend_ncol = 1
         # "content only": no axes, ticks, labels, title, legend or background -- just what
         # is drawn inside (an image, a picture, objects, traces)
@@ -1177,7 +1177,7 @@ class SheetModel:
         # True: fonts are real points on the figure's physical size (what you see is what the
         # document prints). False (older sheets): text sizes follow the figure's size relative to
         # an 8x6 inch figure and the grid, so small figures do not drown in text.
-        self.fig_real_points = False
+        self.fig_real_points = True      # new sheets: a 13 pt tick label is 13 pt on paper
 
         self.tags: list[str] = []
         self.colormaps: list[ColorMap] = []   # custom colormaps owned by this sheet
@@ -1219,6 +1219,7 @@ class SheetModel:
     def from_dict(cls, d: dict) -> "SheetModel":
         sh = cls(d.get("name", "Sheet"), d.get("rows", 1), d.get("cols", 1), d.get("sheet_id"))
         sh.active_index = d.get("active_index", 0)
+        sh.fig_real_points = False       # sheets saved before the option keep their scaled text
         for f in cls._FIG_FIELDS:
             if f in d and d[f] is not None:
                 setattr(sh, f, d[f])

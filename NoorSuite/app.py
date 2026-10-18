@@ -21,9 +21,9 @@ from pathlib import Path
 
 import numpy as np
 from matplotlib import rcParams
-from PyQt6.QtCore import (QByteArray, QFileSystemWatcher, QMimeData, Qt, QTimer,
+from PyQt6.QtCore import (QByteArray, QFileSystemWatcher, QMimeData, QSettings, Qt, QTimer,
                           pyqtSignal)
-from PyQt6.QtGui import QAction, QDrag, QIcon, QImage, QKeySequence
+from PyQt6.QtGui import QAction, QDrag, QGuiApplication, QIcon, QImage, QKeySequence
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog,
                              QDialogButtonBox, QFileDialog, QHBoxLayout,
                              QInputDialog, QLabel, QLineEdit, QListWidget,
@@ -785,7 +785,16 @@ class SciSuiteWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - Scientific Comparison & Exploration")
         self.setWindowIcon(app_icon())
-        self.resize(1500, 940)
+        # never larger than the screen: on a laptop the right-hand sidebar used to sit beyond
+        # the screen edge (the window was a fixed 1500 x 940)
+        scr = (QGuiApplication.primaryScreen().availableGeometry()
+               if QGuiApplication.primaryScreen() is not None else None)
+        if scr is not None:
+            self.resize(min(1500, int(scr.width() * 0.97)), min(940, int(scr.height() * 0.93)))
+            self.move(scr.x() + max(0, (scr.width() - self.width()) // 2),
+                      scr.y() + max(0, (scr.height() - self.height()) // 4))
+        else:
+            self.resize(1500, 940)
 
         st = self.style()
         self._folder_icon = st.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
@@ -856,8 +865,15 @@ class SciSuiteWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 7)
         splitter.setStretchFactor(2, 3)
+        splitter.setChildrenCollapsible(False)     # a panel can be narrow, never silently gone
+        splitter.widget(0).setMinimumWidth(190)
+        splitter.widget(1).setMinimumWidth(300)
+        splitter.widget(2).setMinimumWidth(270)
         self._main_splitter = splitter
-        self._saved_split = None          # panel sizes to restore after a document tab
+        self._right_wrap = splitter.widget(2)      # the plot sidebar (inspector)
+        self._sidebar_wanted = bool(QSettings("NoorSuite", "NoorSuite").value(
+            "ui/sidebar", True, type=bool))
+        self._right_wrap.setVisible(self._sidebar_wanted)
         self.setCentralWidget(splitter)
         self._init_actions()
 
@@ -1166,6 +1182,20 @@ class SciSuiteWindow(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(slot)
             toolbar.addAction(action)
+
+        toolbar.addSeparator()
+        self.sidebar_act = QAction("Sidebar", self)
+        self.sidebar_act.setCheckable(True)
+        self.sidebar_act.setChecked(self._sidebar_wanted)
+        self.sidebar_act.setShortcut(QKeySequence("F4"))
+        self.sidebar_act.setToolTip("Show / hide the plot sidebar (F4)")
+        self.sidebar_act.toggled.connect(lambda on: self.toggle_sidebar(on))
+        self.addAction(self.sidebar_act)
+        toolbar.addAction(self.sidebar_act)
+        reset_act = QAction("Reset layout", self)
+        reset_act.setToolTip("Sidebar visible, panel widths back to the defaults")
+        reset_act.triggered.connect(self.reset_layout)
+        toolbar.addAction(reset_act)
 
         self.statusBar().showMessage("Ready")
 
@@ -1657,6 +1687,48 @@ class SciSuiteWindow(QMainWindow):
         self._render_if_needed()
         return ps
 
+    def _apply_sidebar(self):
+        """Show / hide the plot sidebar as the user wants it and make sure it has a usable width
+        (a stale or collapsed splitter state used to leave it unreachable)."""
+        self._right_wrap.setVisible(self._sidebar_wanted)
+        if self._sidebar_wanted:
+            self._ensure_sidebar_width()
+
+    def _ensure_sidebar_width(self, force: bool = False):
+        sp = self._main_splitter
+        sizes = sp.sizes()
+        total = sum(sizes)
+        if total < 600 or len(sizes) < 3:
+            return
+        if force or sizes[2] < 270:
+            right = max(300, min(420, int(total * 0.27)))
+            left = max(200, int(total * 0.2))
+            sp.setSizes([left, total - left - right, right])
+
+    def toggle_sidebar(self, on=None):
+        """Show / hide the plot sidebar (toolbar button, F4)."""
+        self._sidebar_wanted = (not self._sidebar_wanted) if on is None else bool(on)
+        QSettings("NoorSuite", "NoorSuite").setValue("ui/sidebar", self._sidebar_wanted)
+        if hasattr(self, "sidebar_act"):
+            self.sidebar_act.blockSignals(True)
+            self.sidebar_act.setChecked(self._sidebar_wanted)
+            self.sidebar_act.blockSignals(False)
+        if isinstance(self.tab_widget.currentWidget(), DocumentTab):
+            self.statusBar().showMessage(
+                "The sidebar belongs to sheets - documents use the full width", 4000)
+            return
+        self._apply_sidebar()
+
+    def reset_layout(self):
+        """Sidebar visible, panel widths back to the defaults."""
+        self._sidebar_wanted = True
+        QSettings("NoorSuite", "NoorSuite").setValue("ui/sidebar", True)
+        if hasattr(self, "sidebar_act"):
+            self.sidebar_act.setChecked(True)
+        if not isinstance(self.tab_widget.currentWidget(), DocumentTab):
+            self._right_wrap.setVisible(True)
+            self._ensure_sidebar_width(force=True)
+
     def _on_notes_edited(self):
         self.statusBar().showMessage(
             "Notes updated (saved with the project / Ctrl+S / autosave)", 2000)
@@ -1694,14 +1766,12 @@ class SciSuiteWindow(QMainWindow):
         sp = getattr(self, "_main_splitter", None)
         if sp is not None:
             if isinstance(w, DocumentTab):
+                self._right_wrap.hide()                       # documents get the width
                 total = sp.width()
-                if total > 400 and sum(sp.sizes()) > 0:       # laid out and visible
-                    if self._saved_split is None:
-                        self._saved_split = sp.sizes()
-                    sp.setSizes([int(total * 0.18), total - int(total * 0.18), 0])
-            elif isinstance(w, PlotSheet) and self._saved_split is not None:
-                sp.setSizes(self._saved_split)
-                self._saved_split = None
+                if total > 400:
+                    sp.setSizes([int(total * 0.18), total - int(total * 0.18)])
+            elif isinstance(w, PlotSheet):
+                self._apply_sidebar()
         if self.current_sheet():
             self._sync_grid_spinners()
             self.sync_active_subplot_inspector()
