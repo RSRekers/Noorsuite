@@ -204,6 +204,11 @@ preview), text to edit the label. Objects are plain `\noorobj[x=..,y=..,w=..,h=.
 frame (positions in cm from the top-left corner), so everything stays editable in the text, in undo and in the
 PowerPoint export (native shapes, connectors, pictures, text boxes).
 
+**Deleting through the API.** `suite.remove_data(name_or_id_or_list)` and `suite.remove_sheet(name_or_id_or_list)` delete data
+objects / images and sheets (with their tab and tree entry; data stays in the pool when a sheet goes, traces disappear
+with their data). Ids win over names; a name that is not unique raises `ValueError` before anything is deleted. Works
+live and offline.
+
 **Autocomplete and editing help (LaTeX editor).** While typing, a list opens under the caret: `\be` offers `\begin`,
 `\begin{` offers the environments (choosing `equation` writes the whole `\begin{equation} ... \label{eq:} ... \end{equation}`
 block), `\end{` offers the environments that are still open, `\cite{` the project's references, `\ref{` the labels of the

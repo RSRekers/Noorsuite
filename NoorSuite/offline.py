@@ -33,7 +33,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_LIST_ASSETS, ACTION_TABLE, ACTION_LIST_TABLES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
                        ACTION_PING,
-                       ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE)
+                       ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET, ACTION_REMOVE_TRACE)
 
 SESSION_FILE = os.path.expanduser("~/.scisuite_session.json")
 
@@ -99,6 +99,7 @@ class OfflineBackend:
             ACTION_ADD_IMAGE_TO_SHEET: self._add_image_to_sheet,
             ACTION_REMOVE_DATA: self._remove,
             ACTION_REMOVE_TRACE: self._remove,
+            ACTION_REMOVE_SHEET: self._remove_sheet,
             ACTION_CLEAR: self._clear,
             ACTION_ORGANIZE: self._organize,
             ACTION_DOCUMENT: self._document,
@@ -371,6 +372,26 @@ class OfflineBackend:
         for sm in self.project.sheets:
             for sub in sm.subplots:
                 sub.traces = [t for t in sub.traces if t.data_id != obj.id]
+
+    def _remove_sheet(self, p):
+        key = p.get("key")
+        sm = next((s for s in self.project.sheets if s.sheet_id == key), None)
+        if sm is None:
+            return {"status": "error", "message": f"no sheet matching {key!r}"}
+        self.project.sheets.remove(sm)
+
+        def prune(nodes):
+            keep = []
+            for n in nodes:
+                if n.get("type") == "sheet" and n.get("sheet_id") == sm.sheet_id:
+                    continue
+                if n.get("children"):
+                    n["children"] = prune(n["children"])
+                keep.append(n)
+            return keep
+        self.project.tree = prune(self.project.tree)
+        if self.project.active_sheet_id == sm.sheet_id:
+            self.project.active_sheet_id = ""
 
     def _clear(self, p):
         self.project.data_objects.clear()

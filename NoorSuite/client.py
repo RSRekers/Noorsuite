@@ -28,7 +28,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_LIST_ASSETS, ACTION_TABLE, ACTION_LIST_TABLES,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
-                       ACTION_REMOVE_DATA,
+                       ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET,
                        DEFAULT_PORT, IPCClient)
 
 _DATA_COLUMNS = ["id", "name", "columns", "nrows", "tags", "source"]
@@ -705,9 +705,43 @@ class SciSuiteClient:
         row = hit.iloc[0]
         return figure_snippet(row["id"], row["name"], caption, label, width)
 
+    def _resolve(self, key, rows, what):
+        """id of the one entry of ``rows`` ([{id, name}]) that ``key`` names: an exact id first,
+        else a unique name. Raises ``KeyError`` (none) / ``ValueError`` (several share the name)."""
+        for r in rows:
+            if r.get("id") == key:
+                return r["id"]
+        hits = [r["id"] for r in rows if r.get("name") == key]
+        if not hits:
+            raise KeyError(f"no {what} matching {key!r}")
+        if len(hits) > 1:
+            raise ValueError(f"{len(hits)} {what}s are called {key!r}; pass the id instead: {hits}")
+        return hits[0]
+
     def remove_data(self, key):
-        """Remove a data object (and every trace referencing it) by id or name."""
-        return self._ipc.send({"action": ACTION_REMOVE_DATA, "key": key})
+        """Remove data objects / images (and every trace or image layer using them) by id or name;
+        ``key`` may be a list. A name shared by several objects raises ``ValueError`` -- nothing is
+        deleted then; pass the id (see :meth:`list_data`)."""
+        keys = [key] if isinstance(key, str) else list(key)
+        rows = ((self._ipc.send({"action": ACTION_LIST_DATA}) or {}).get("data", [])
+                + (self._ipc.send({"action": ACTION_LIST_IMAGES}) or {}).get("images", []))
+        ids = [self._resolve(k, rows, "data object") for k in keys]       # all checked before any delete
+        resp = None
+        for i in ids:
+            resp = self._ipc.send({"action": ACTION_REMOVE_DATA, "key": i})
+        return resp
+
+    def remove_sheet(self, sheet):
+        """Delete sheets (tab, tree entry and all) by id or name; ``sheet`` may be a list. Data
+        stays in the pool. A name used by several sheets raises ``ValueError`` (nothing is
+        deleted) -- pass the id from :meth:`list_sheets`."""
+        keys = [sheet] if isinstance(sheet, str) else list(sheet)
+        rows = (self._ipc.send({"action": ACTION_LIST_SHEETS}) or {}).get("sheets", [])
+        ids = [self._resolve(k, rows, "sheet") for k in keys]
+        resp = None
+        for i in dict.fromkeys(ids):
+            resp = self._ipc.send({"action": ACTION_REMOVE_SHEET, "key": i})
+        return resp
 
     def clear(self):
         """Remove every data object and every trace."""

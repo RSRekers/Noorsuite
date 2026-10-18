@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog
                              QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                              QPushButton, QComboBox, QSpinBox, QSplitter,
                              QStackedWidget, QStyle, QTableWidget, QTableWidgetItem,
-                             QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem,
+                             QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator,
                              QVBoxLayout, QWidget)
 
 from .colormap import available_specs, load_file, resolve_spec, sample, save_file
@@ -48,7 +48,8 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_ASSET,
                   ACTION_DOCUMENT, ACTION_REFERENCES,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
-                  ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE, DEFAULT_PORT, IPCBridge)
+                  ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET, ACTION_REMOVE_TRACE, DEFAULT_PORT,
+                  IPCBridge)
 from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
                     TableModel,
                     apply_group_transform,
@@ -1924,6 +1925,23 @@ class SciSuiteWindow(QMainWindow):
         for it in chosen:
             self._delete_tree_item(it)
 
+    def _remove_sheet_by_key(self, key):
+        """API delete: a sheet by id (the client resolves names). Tab, tree entry, tree-less
+        sheets and the IPC snapshot are all cleaned up; unknown ids only get a status message."""
+        if key not in self.sheets:
+            self.statusBar().showMessage(f"remove_sheet: no sheet {key!r}", 6000)
+            return
+        it = QTreeWidgetItemIterator(self.tree)
+        while it.value() is not None:
+            item = it.value()
+            if item.data(0, ITEM_TYPE_ROLE) == TYPE_SHEET and item.data(0, ITEM_ID_ROLE) == key:
+                self._delete_tree_item(item)
+                break
+            it += 1
+        else:
+            self._forget_sheet(key)
+        self._sync_subplot_trace_list(keep_selection=False)
+
     def _forget_sheet(self, sheet_id):
         ps = self.open_tabs.pop(sheet_id, None)
         if ps is not None:
@@ -3600,6 +3618,8 @@ class SciSuiteWindow(QMainWindow):
             self._handle_add_to_sheet(payload)
         elif action == ACTION_ADD_IMAGE_TO_SHEET:
             self._handle_add_image_to_sheet(payload)
+        elif action == ACTION_REMOVE_SHEET:
+            self._remove_sheet_by_key(payload.get("key"))
         elif action in (ACTION_REMOVE_DATA, ACTION_REMOVE_TRACE):
             self._remove_data(payload.get("key"))
         elif action == ACTION_CLEAR:

@@ -48,8 +48,11 @@ suite.show_image(arr, name="z_stack", axes=(1, 2), new_sheet=True)
 suite.list_data(); suite.list_sheets(); suite.list_traces(); suite.list_images()
 df = suite.get_data("IV_sweep")                  # pull, then edit and push back:
 with suite.edit_data("IV_sweep") as df: df["P"] = df["I"] * df["V"]
-suite.remove_data("IV_sweep")
+suite.remove_data("IV_sweep")                    # data / images by id or name (list ok); traces using it go too
+suite.remove_sheet("Overview")                   # sheet by id or name (list ok): tab + tree entry, data stays
 ```
+Deleting is irreversible and only for things the user asked to delete. A name shared by several objects raises
+`ValueError` and deletes nothing: look at `list_sheets()` / `list_data()` and pass the id.
 
 ### Organize as you insert (always do this - the user searches by name/tag/notes)
 
