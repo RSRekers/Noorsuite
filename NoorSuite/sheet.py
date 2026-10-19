@@ -682,15 +682,12 @@ class PlotSheet(QWidget):
         except (AttributeError, ValueError):
             pass   # e.g. ticklabel_format doesn't support a log-scaled axis
 
-    @staticmethod
-    def _image_cmap_norm(ref, sl):
+    def _image_cmap_norm(self, ref, sl):
         """Colormap + norm for an image/heatmap: optional reversal, and either a continuous
         ``Normalize(vmin, vmax)`` or -- with colour bands set -- a ``BoundaryNorm`` over
         a colormap resampled to one colour per band."""
-        try:
-            base = mpl.colormaps[ref.cmap]
-        except (KeyError, ValueError):
-            base = mpl.colormaps["viridis"]
+        from .colormap import mpl_cmap
+        base = mpl_cmap(ref.cmap, self.model)
         if ref.cmap_reverse:
             base = base.reversed()
         finite = sl[np.isfinite(sl)] if np.issubdtype(sl.dtype, np.number) else np.array([])
@@ -725,8 +722,8 @@ class PlotSheet(QWidget):
             yc = (nrows - 0.5 - np.arange(nrows)) if ref.origin == "upper" \
                 else np.arange(nrows) + 0.5
             xlab = ylab = None
-            tick_x, tick_y = (xc, [str(i) for i in range(ncols)]), \
-                (yc, [str(i) for i in range(nrows)])
+            tick_x, tick_y = (xc, None), (yc, None)      # automatic ticks (a label per pixel took
+                                                          # seconds per 512 x 512 image)
         else:
             # heatmap: cells sit at their real coordinates (index centres where an axis has none)
             xc, xlab = xpos if xpos is not None else (np.arange(ncols) + 0.5, None)

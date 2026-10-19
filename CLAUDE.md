@@ -899,3 +899,10 @@ oorfile` -> PNG
   `_warmup_steps` one small unit per event-loop pass: heavy imports + `find_engine`, then per document the stale figure PDFs (written to the
   document's workdir + `state.json`), figure thumbnails and a once-per-session Zotero look-up of missing / thin cited keys (`_zotero_tried`
   is shared with the `DocumentTab`s, so opening a tab does not repeat it).
+- Images: a plain image has *automatic* ticks (`_image_geom` labels are `None`; a label per pixel made a 512 x 512 image take ~10 s to lay out);
+  only heatmaps / categorical axes get data ticks. `ImageRef.aspect` defaults to `"equal"` (heatmaps with coordinates to `"auto"`).
+  Image colormaps resolve through `colormap.mpl_cmap(name, sheet_model)`: a matplotlib name, or one of the user's custom colormaps (sheet's
+  own + `colormap.LIBRARY`, which the window keeps current with `colormap.set_library` before every render / export; its colours become a
+  continuous gradient); `ImageStyleWidget.names_provider` lists them in the colourmap box and the custom colours are part of `sheet_fingerprint`.
+  `model.copy_image_style` / the Axes tab button "Apply this image style to all images in the sheet" (`_apply_image_style_to_all_images`) copy
+  everything except vmin / vmax, band edges, isoline levels and explicit tick values.

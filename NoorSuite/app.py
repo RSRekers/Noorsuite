@@ -36,11 +36,12 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog
 
 from .colormap import available_specs, load_file, resolve_spec, sample, save_file
 from .dialogs import (AxesDialog, AxesStyleWidget, BulkTraceEditWidget,
-                      ColormapPanel, FigureDialog, FigureStyleWidget, ImageDialog,
+                      ColormapPanel, FigureDialog, FigureStyleWidget, ImageDialog, ImageStyleWidget,
                       LegendDialog, ShapeDialog, ShapeStyleWidget, TextDialog,
                       TraceStyleDialog, TraceStyleWidget)
 from . import assets as assets_mod
 from . import latex
+from . import colormap as colormap_mod
 from .zotero import label as zotero_label
 from .docview import DocumentTab
 from .fuzzy import fuzzy_match, smart_score
@@ -59,7 +60,7 @@ from .model import (ERR_COLUMN_ATTRS, ERROR_MODE_LABELS, ERROR_MODES, INDEX_COL,
                     ProjectModel, SHAPE_KIND_LABELS, SHAPE_KINDS, ShapeRef, SheetModel,
                     SubplotModel, TraceRef, make_shape, _new_id,
                     aggregate_series, append_notes, apply_sheet_annotations,
-                    common_label, copy_subplot_style, duplicate_sheet_model, make_image_ref, merge_tags, resolve_sidecar_names,
+                    common_label, copy_image_style, copy_subplot_style, duplicate_sheet_model, make_image_ref, merge_tags, resolve_sidecar_names,
                     split_folder_path, split_into_repeats)
 from .sheet import PlotSheet, export_sheet_pdf, export_sheet_png, export_sheet_raster
 from .widgets import CollapsibleSection
@@ -860,6 +861,8 @@ class SciSuiteWindow(QMainWindow):
         self._held_sheets: set = set()
         self._autosave_done.connect(self._on_autosave_done)
         self._zotero_found.connect(self._on_zotero_found)
+        ImageStyleWidget.names_provider = lambda: colormap_mod.custom_names(
+            self._active_sheet_model())
         self._zotero_tried: set = set()       # cite keys already looked up this session
         self._warm_gen = 0
 
@@ -1231,6 +1234,14 @@ class SciSuiteWindow(QMainWindow):
             "stay per-subplot.")
         self.axes_broadcast_btn.clicked.connect(self._apply_axes_style_to_all_subplots)
         axes_tab_l.addWidget(self.axes_broadcast_btn)
+        self.image_broadcast_btn = QPushButton("Apply this image style to all images in the sheet")
+        self.image_broadcast_btn.setToolTip(
+            "Copies colormap, interpolation, aspect, colourbar, isolines and tick style of this "
+            "subplot's image to every other image in the sheet. Value range (vmin / vmax), band "
+            "edges and explicit tick values stay per image.")
+        self.image_broadcast_btn.clicked.connect(self._apply_image_style_to_all_images)
+        self.image_broadcast_btn.setEnabled(False)
+        axes_tab_l.addWidget(self.image_broadcast_btn)
         self.axes_selected_btn = QPushButton("Apply this style to selected subplots...")
         self.axes_selected_btn.setToolTip(
             "Copies this subplot's style to the subplots you selected in the subplot-order "
@@ -2656,6 +2667,7 @@ class SciSuiteWindow(QMainWindow):
         sm = self._active_sheet_model()
         self.axes_widget.set_subplot(sm.get_active_subplot() if sm else None)
         self.figure_widget.set_sheet(sm)
+        self._update_image_broadcast(sm)
 
     def _after_trace_edit(self):
         self.render_current_sheet()
@@ -2668,6 +2680,28 @@ class SciSuiteWindow(QMainWindow):
 
     def _after_axes_edit(self):
         self.render_current_sheet()
+
+    def _update_image_broadcast(self, sm=None):
+        sm = sm or self._active_sheet_model()
+        src = sm.get_active_subplot() if sm else None
+        n = sum(1 for s in (sm.subplots if sm else []) if s.image is not None and s is not src)
+        self.image_broadcast_btn.setEnabled(bool(src is not None and src.image is not None and n))
+
+    def _apply_image_style_to_all_images(self):
+        """Colormap / interpolation / aspect / colourbar / isolines / ticks of the active image
+        onto every other image of the sheet (see :func:`model.copy_image_style`)."""
+        sm = self._active_sheet_model()
+        if sm is None:
+            return
+        src = sm.get_active_subplot()
+        targets = [s.image for s in sm.subplots if s is not src and s.image is not None]
+        if src is None or src.image is None or not targets:
+            return
+        for ref in targets:
+            copy_image_style(src.image, ref)
+        self.render_current_sheet()
+        self._refresh_ipc_snapshot()
+        self.statusBar().showMessage(f"Image style applied to {len(targets)} other image(s).", 4000)
 
     def _apply_axes_style_to_all_subplots(self):
         """Copy the active subplot's cosmetics/grid/legend/number-format/aspect to
@@ -2863,6 +2897,7 @@ class SciSuiteWindow(QMainWindow):
         if self._render_hold:
             self._held_sheets.add(ps.model.sheet_id)
             return
+        colormap_mod.set_library(self.colormaps)
         ps.render(self.repository, self.images)
         ps._stale = False
         ps._rendered_fp = self.sheet_fingerprint(ps.model.sheet_id)
@@ -3139,7 +3174,11 @@ class SciSuiteWindow(QMainWindow):
         sm = self.sheets.get(sheet_id)
         if sm is None:
             return ""
+        colormap_mod.set_library(self.colormaps)
         h = hashlib.md5(json.dumps(sm.to_dict(), sort_keys=True, default=str).encode())
+        for sub in sm.subplots:                # a custom colormap's colours change the picture
+            if sub.image is not None:
+                h.update(colormap_mod.custom_signature(sub.image.cmap, sm).encode())
         for sub in sm.subplots:
             for sh in sub.shapes:
                 if sh.kind == "picture":
@@ -3187,11 +3226,13 @@ class SciSuiteWindow(QMainWindow):
     def export_sheet_pdf(self, sheet_id, path):
         """Render a sheet as a vector PDF at its own figure size (``_DOC_FIG_CM`` when the
         sheet has none), on a throw-away copy so open tabs / zoom are untouched."""
+        colormap_mod.set_library(self.colormaps)
         export_sheet_pdf(self.sheets[sheet_id], self.repository, self.images, path,
                          assets=self.assets)
 
     def export_sheet_raster(self, sheet, path, dpi=300):
         """PNG of a sheet model at its figure size (Word / LibreOffice export)."""
+        colormap_mod.set_library(self.colormaps)
         export_sheet_raster(sheet, self.repository, self.images, path, dpi, assets=self.assets)
 
     def set_sheet_width(self, sheet_id, width_cm) -> None:
@@ -3223,6 +3264,7 @@ class SciSuiteWindow(QMainWindow):
         path = cache / f"{sheet_id}-{self.sheet_fingerprint(sheet_id)[:16]}-{px}.png"
         if not path.is_file():
             try:
+                colormap_mod.set_library(self.colormaps)
                 export_sheet_png(sm, self.repository, self.images, str(path), px,
                                  assets=self.assets)
             except Exception:

@@ -8,7 +8,7 @@ height so they always fit small screens.
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox,
                              QDialog, QDialogButtonBox, QDoubleSpinBox,
@@ -612,6 +612,7 @@ class ImageStyleWidget(QWidget):
     """Bind to a :class:`~NoorSuite.model.SubplotModel` and edit ``sub.image`` (an ImageRef)."""
 
     changed = pyqtSignal()
+    names_provider = None          # callable -> the user's custom colormap names (set by the window)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -731,6 +732,7 @@ class ImageStyleWidget(QWidget):
             self.setEnabled(ref is not None)
             if ref is None:
                 return
+            self._fill_cmaps()
             self.cmap_combo.setCurrentText(ref.cmap)
             self.vmin_edit.setText(_fmt(ref.vmin))
             self.vmax_edit.setText(_fmt(ref.vmax))
@@ -761,6 +763,21 @@ class ImageStyleWidget(QWidget):
                 every.setValue(int(getattr(ref, f"{axis}_tick_every")))
         finally:
             self._loading = False
+
+    def _fill_cmaps(self):
+        """Built-in maps plus the user's custom colormaps (made in "Colours / colormap")."""
+        try:
+            prov = ImageStyleWidget.names_provider          # via the class: no bound self
+            custom = list(prov()) if prov else []
+        except Exception:
+            custom = []
+        wanted = custom + [n for n in _IMAGE_CMAPS if n not in custom]
+        have = [self.cmap_combo.itemText(i) for i in range(self.cmap_combo.count())]
+        if have != wanted:
+            self.cmap_combo.clear()
+            self.cmap_combo.addItems(wanted)
+            for i in range(len(custom)):
+                self.cmap_combo.setItemData(i, "custom colormap", Qt.ItemDataRole.ToolTipRole)
 
     def _push(self, *_):
         if self._loading or self._ref is None:

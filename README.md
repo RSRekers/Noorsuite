@@ -209,6 +209,8 @@ PowerPoint export (native shapes, connectors, pictures, text boxes).
 `python -m NoorSuite insert data.csv --plot x:y1,y2 --yerr e1,e2 [--band] [--yerr-mode sem]`. Missing error columns are reported
 instead of silently dropped.
 
+**Images.** Image multiplots render in about a second (plain images no longer get a tick label per pixel), images keep an equal aspect by default, the colourmap box of an image also offers your own colormaps (made under *Colours / colormap*), and *Apply this image style to all images in the sheet* copies colormap, interpolation, aspect, colourbar, isolines and tick style to the other images.
+
 **Fast documents.** After the window opens, NoorSuite prepares the documents in the background (figure PDFs, thumbnails, cited Zotero records), and an unchanged document is not rebuilt in the next session.
 
 **Command line.** `python -m NoorSuite insert ...` puts a file into the project; `python -m NoorSuite api <command>` covers the rest

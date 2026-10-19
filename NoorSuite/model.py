@@ -1873,6 +1873,18 @@ def resolve_ticks(mode, values_text, every, positions, labels=None):
     return None
 
 
+IMAGE_BROADCAST_EXCLUDE = ("vmin", "vmax", "cmap_boundaries", "iso_levels", "x_tick_values",
+                           "y_tick_values")
+
+
+def copy_image_style(src: "ImageRef", dst: "ImageRef") -> None:
+    """Copy colormap / interpolation / aspect / colourbar / isolines / tick style of one image to
+    another (value ranges, band edges and explicit tick values are data specific and stay)."""
+    for f in ImageRef.STYLE_FIELDS:
+        if f not in IMAGE_BROADCAST_EXCLUDE:
+            setattr(dst, f, getattr(src, f))
+
+
 def make_image_ref(obj, display_axes, style=None) -> "ImageRef":
     """The :class:`ImageRef` for placing ``obj`` with ``display_axes`` (slice positions
     start mid-stack). A heatmap (coordinates on a displayed axis) defaults to a free aspect,

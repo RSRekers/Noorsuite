@@ -22,6 +22,45 @@ BUILTIN_NAMES = ["tab10", "tab20", "Set2", "Dark2", "viridis", "plasma",
 _QUALITATIVE = {"tab10": 10, "tab20": 20, "Set2": 8, "Dark2": 8}
 
 
+# The project's colormap library, kept current by the window, so the render engine (screen, PDF,
+# thumbnails, headless export) can draw an image with a user's custom colormap by name.
+LIBRARY: list = []
+
+
+def set_library(colormaps) -> None:
+    LIBRARY[:] = list(colormaps or [])
+
+
+def custom_names(sheet_model=None) -> list:
+    """Names of the user's own colormaps (sheet first, then the project library)."""
+    out = []
+    for cm in list(getattr(sheet_model, "colormaps", []) or []) + LIBRARY:
+        if not getattr(cm, "builtin", False) and cm.name not in out:
+            out.append(cm.name)
+    return out
+
+
+def mpl_cmap(name, sheet_model=None):
+    """A matplotlib colormap for ``name``: a matplotlib name, or one of the user's custom
+    colormaps (its colours become a continuous gradient). Falls back to viridis."""
+    from matplotlib.colors import LinearSegmentedColormap
+    for cm in list(getattr(sheet_model, "colormaps", []) or []) + LIBRARY:
+        if cm.name == name and not getattr(cm, "builtin", False) and cm.colors:
+            cols = list(cm.colors)
+            return LinearSegmentedColormap.from_list(name, cols * 2 if len(cols) == 1 else cols)
+    try:
+        return _mpl_colormaps[name]
+    except (KeyError, ValueError):
+        return _mpl_colormaps["viridis"]
+
+
+def custom_signature(name, sheet_model=None) -> str:
+    for cm in list(getattr(sheet_model, "colormaps", []) or []) + LIBRARY:
+        if cm.name == name and not getattr(cm, "builtin", False):
+            return ",".join(cm.colors)
+    return ""
+
+
 def _resolve_name(spec) -> str:
     return spec if isinstance(spec, str) else getattr(spec, "name", "")
 
