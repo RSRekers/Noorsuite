@@ -204,6 +204,11 @@ preview), text to edit the label. Objects are plain `\noorobj[x=..,y=..,w=..,h=.
 frame (positions in cm from the top-left corner), so everything stays editable in the text, in undo and in the
 PowerPoint export (native shapes, connectors, pictures, text boxes).
 
+**Error bars from the API / CLI.** `suite.plot("d", "x", "y", yerr="y_err")` (also `yerr_low` / `yerr_high`, `band=True`,
+`errorbars=False`, `yerr_mode`; with several y columns `yerr={"y1": "e1", "y2": "e2"}`) and on the command line
+`python -m NoorSuite insert data.csv --plot x:y1,y2 --yerr e1,e2 [--band] [--yerr-mode sem]`. Missing error columns are reported
+instead of silently dropped.
+
 **Mean with a shaded band.** *Combine into mean ± error trace...* (several selected traces, or one trace that holds
 repeats) now asks how to show the spread: **shaded band** (default), error bars, or both, and from which source: standard
 deviation, standard error of the mean (std / sqrt(n)) or min / max. The result is one trace in the colour of the first

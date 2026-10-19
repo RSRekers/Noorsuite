@@ -50,7 +50,7 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_ASSET,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
                   ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET, ACTION_REMOVE_TRACE, DEFAULT_PORT,
                   IPCBridge)
-from .model import (ERROR_MODE_LABELS, ERROR_MODES, INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
+from .model import (ERR_COLUMN_ATTRS, ERROR_MODE_LABELS, ERROR_MODES, INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
                     TableModel,
                     apply_group_transform,
                     REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
@@ -1420,6 +1420,15 @@ class SciSuiteWindow(QMainWindow):
             ref = TraceRef(data.id, sel.get("x_col", INDEX_COL), y_col)
             ref.color = self._next_trace_color(sm, sub)
             ref.apply_style(sel.get("style") or {})      # explicit options win
+            ref.apply_style((sel.get("styles") or {}).get(y_col) or {})     # per-trace (errors)
+            for attr in ERR_COLUMN_ATTRS:                # an error column that is not there
+                col = getattr(ref, attr)
+                if col and col not in data.columns:
+                    self.statusBar().showMessage(
+                        f"plot(): error column {col!r} not in {data.name!r} -- ignored", 8000)
+                    setattr(ref, attr, "")
+            if not ref.has_error_data:
+                ref.show_errorbar = ref.show_band = False
             sub.traces.append(ref)
         self._render_sheet(sheet_id)
         if sm is self._active_sheet_model():
@@ -3990,7 +3999,8 @@ class SciSuiteWindow(QMainWindow):
         sel = {"data_id": obj.id,
                "x_col": payload.get("x_col", INDEX_COL) or INDEX_COL,
                "y_cols": list(payload.get("y_cols", [])),
-               "style": payload.get("trace_style") or {}}
+               "style": payload.get("trace_style") or {},
+               "styles": payload.get("trace_styles") or {}}
         self._add_traces(sel, sm.sheet_id, sub_idx)
 
     def _remove_data(self, key):

@@ -166,6 +166,12 @@ Slide objects (tell the user): the document tab's *Slide editor* places and edit
 lines (cm from the top-left); *Slide setup...* writes `\noorslide{title-dx=,title-size=,body-top=,margin-left=,
 number-on-title=true,...}`. Figures in any document take `[width=,angle=,xshift=,yshift=]`.
 
+Error bars / bands on any plot: `suite.plot("d", "x", "y", yerr="y_std")` (symmetric column), `yerr_low="lo", yerr_high="hi"`
+(asymmetric offsets), several y columns -> `yerr={"y1": "e1", "y2": "e2"}` or a list in y order, `band=True` adds a shaded band of the
+same error (`band_alpha`), `errorbars=False` hides the whiskers, `yerr_mode="std"|"sem"|"minmax"`; with a DataFrame the error may be an array.
+A column that does not exist raises `ValueError` listing the available ones. CLI: `insert data.csv --plot x:y1,y2 --yerr e1,e2` (or
+`--yerr y1=e1,y2=e2`), `--yerr-low/--yerr-high`, `--yerr-mode`, `--band --band-alpha 0.3`, `--no-errorbars`.
+
 Mean with band: `suite.plot_mean(["run1","run2"], "x", "y", band="std"|"sem"|"minmax"|None, errorbars=False, new_sheet=True,
 title=..., label=..., style={"color": ...})` (several data objects, one y column) or `suite.plot_mean("wide", "t", ["a","b","c"], ...)`
 (one object, repeat columns) pushes a derived object "<label> (n=.. mean±err)" (x, mean, std, sem, err_min, err_max) and plots it

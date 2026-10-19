@@ -433,7 +433,8 @@ class SciSuiteClient:
     def plot(self, data, x, y, *, name=None, sheet=None, subplot=0, new_sheet=False,
              title=None, tags=None, notes=None, folder=None, subplot_title=None,
              x_label=None, y_label=None, plot_type=None, style=None, sort=False,
-             x_tick_labels=None, y_tick_labels=None):
+             x_tick_labels=None, y_tick_labels=None, yerr=None, yerr_low=None,
+             yerr_high=None, yerr_mode=None, errorbars=None, band=False, band_alpha=0.25):
         """Add columns of a data object as traces to a sheet.
 
         ``data`` is a data-object name (already pushed) or a DataFrame (pushed now
@@ -454,13 +455,30 @@ class SciSuiteClient:
         ``x_tick_labels`` / ``y_tick_labels``: custom tick text, as ``{value: "text"}`` (ticks
         at those values) or a list of strings (placed at 0, 1, 2, ...), e.g.
         ``x_tick_labels={0: "RT", 1: "4 K", 2: "1.5 K"}``.
+
+        Error bars / bands: ``yerr`` = column with a symmetric error (std, sem, ...);
+        ``yerr_low`` + ``yerr_high`` = columns with the offsets below / above the value (asymmetric,
+        e.g. min / max span). With several ``y`` columns pass a dict ``{y_col: err_col}`` or a list in
+        the same order. When ``data`` is a DataFrame the error may also be an array / Series (stored as
+        a column ``"<y>_err"``). Whiskers are drawn by default when an error is given
+        (``errorbars=False`` hides them); ``band=True`` adds a translucent shaded band of the same
+        error (``band_alpha``); ``yerr_mode`` ("std" | "sem" | "minmax") says which error the
+        ``yerr`` / ``yerr_low`` / ``yerr_high`` columns are drawn from (default: ``"std"`` for
+        ``yerr``, ``"minmax"`` for low / high). Missing error columns raise ``ValueError``.
         """
+        y_cols = [y] if isinstance(y, str) else list(y)
+        trace_styles = {}
+        if any(v is not None for v in (yerr, yerr_low, yerr_high)):
+            data, trace_styles = self._error_styles(
+                data, name, y_cols, yerr, yerr_low, yerr_high, yerr_mode, errorbars, band,
+                band_alpha)
+        elif band:
+            raise ValueError("band=True needs an error: pass yerr=... (or yerr_low / yerr_high)")
         if isinstance(data, str):
             data_name = data
         else:
             data_name = name or "data"
             self.push_dataframe(data, name=data_name)
-        y_cols = [y] if isinstance(y, str) else list(y)
         target = "__new__" if new_sheet else (sheet or "__active__")
         return self._ipc.send({
             "action": ACTION_ADD_TO_SHEET,
@@ -473,7 +491,75 @@ class SciSuiteClient:
                                           subplot_title, x_label, y_label,
                                           x_tick_labels, y_tick_labels),
             "trace_style": _trace_style(plot_type, style, sort),
+            "trace_styles": trace_styles,
         })
+
+    @staticmethod
+    def _per_y(arg, y_cols, what):
+        """``{y_col: value}`` from a single value, a list in ``y_cols`` order or a dict."""
+        if arg is None:
+            return {}
+        if isinstance(arg, dict):
+            bad = [k for k in arg if k not in y_cols]
+            if bad:
+                raise ValueError(f"{what}: {bad} are not among the plotted y columns {y_cols}")
+            return dict(arg)
+        if len(y_cols) == 1:
+            if isinstance(arg, (list, tuple)) and len(arg) == 1 and isinstance(arg[0], str):
+                arg = arg[0]
+            return {y_cols[0]: arg}
+        if isinstance(arg, (list, tuple)) and len(arg) == len(y_cols):
+            return dict(zip(y_cols, arg))
+        raise ValueError(f"{what}: with several y columns pass a dict {{y: column}} or a list "
+                         f"with one entry per y column ({len(y_cols)})")
+
+    def _error_styles(self, data, name, y_cols, yerr, yerr_low, yerr_high, yerr_mode, errorbars,
+                      band, band_alpha):
+        """Resolve the error arguments of :meth:`plot` -> (data, per-y trace style dict)."""
+        if yerr_mode is not None and yerr_mode not in ("std", "sem", "minmax"):
+            raise ValueError("yerr_mode must be 'std', 'sem' or 'minmax'")
+        if (yerr_low is None) != (yerr_high is None):
+            raise ValueError("yerr_low and yerr_high go together (offsets below / above the value)")
+        specs = {"yerr_col": self._per_y(yerr, y_cols, "yerr"),
+                 "yerr_low_col": self._per_y(yerr_low, y_cols, "yerr_low"),
+                 "yerr_high_col": self._per_y(yerr_high, y_cols, "yerr_high")}
+        if not isinstance(data, str):
+            data = pd.DataFrame(data)
+            for attr, per in specs.items():                    # arrays become columns
+                for yc, v in list(per.items()):
+                    if not isinstance(v, str):
+                        col = f"{yc}_err" if attr == "yerr_col" else \
+                            f"{yc}_{'lo' if attr == 'yerr_low_col' else 'hi'}"
+                        data = data.assign(**{col: np.asarray(v, dtype=float)})
+                        per[yc] = col
+            columns = set(map(str, data.columns))
+        else:
+            rows = (self._ipc.send({"action": ACTION_LIST_DATA}) or {}).get("data", [])
+            row = next((r for r in rows if data in (r.get("name"), r.get("id"))), None)
+            columns = set(row["columns"]) if row else None
+            for per in specs.values():
+                if any(not isinstance(v, str) for v in per.values()):
+                    raise ValueError("an error array needs a DataFrame as data; with a data "
+                                     "object name pass the error column's name")
+        styles = {}
+        for yc in y_cols:
+            st = {}
+            for attr, per in specs.items():
+                if yc in per:
+                    col = per[yc]
+                    if columns is not None and col not in columns:
+                        raise ValueError(f"error column {col!r} not found; available: "
+                                         f"{sorted(columns)}")
+                    st[attr] = col
+            if not st:
+                continue
+            asym = "yerr_low_col" in st
+            st["yerr_mode"] = yerr_mode or ("minmax" if asym and "yerr_col" not in st else "std")
+            st["show_errorbar"] = True if errorbars is None else bool(errorbars)
+            if band:
+                st["show_band"], st["band_alpha"] = True, float(band_alpha)
+            styles[yc] = st
+        return data, styles
 
     def plot_mean(self, data, x=None, y=None, *, band="std", errorbars=False, label=None,
                   name=None, plot_type="Line", style=None, band_alpha=0.25, sheet=None,

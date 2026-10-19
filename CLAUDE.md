@@ -682,6 +682,11 @@ title/x_label/y_label + trace labels).
   `insertFromMimeData` emit `imagePasted` / `filesPasted` -> `DocumentTab.paste_picture*` -> `host.import_asset(data=, ext="png")`
   and a `\noorfile` figure (article) or a `\noorobj` file object (beamer)). `DocumentTab._completion_extras` feeds cite keys /
   labels (cached per `document().revision()`) / sheets / assets / tables.
+- Error arguments of `client.plot` (`yerr`, `yerr_low`, `yerr_high`, `yerr_mode`, `errorbars`, `band`, `band_alpha`) are resolved by
+  `_error_styles` into a per-y `trace_styles` payload key ({y_col: error style}); GUI `_add_traces` and `OfflineBackend._add_to_sheet`
+  apply it after the shared `trace_style`, drop error columns that are not in the data (status message / error response) and switch
+  bars / band off when no error data is left. `insert_cli` maps `--yerr / --yerr-low / --yerr-high / --yerr-mode / --band /
+  --no-errorbars` onto them and prints `plot failed: ...` (exit 1) for `ValueError`s.
 - Mean +- spread: `TraceRef.show_band` / `band_alpha` (style fields) draw `PlotSheet._draw_band` (`fill_between(y - lo, y + hi)`,
   before the line, same layer) from the same error columns as the whiskers; `yerr_mode` is one of `model.ERROR_MODES`
   (`std`, `sem` via `yerr_sem_col`, `minmax`). `aggregate_series` / `split_into_repeats` return `sem` = std / sqrt(n) and the
