@@ -55,12 +55,14 @@ def frame(payload: dict) -> bytes:
 
 
 def _recv_exactly(conn, n: int):
-    buf = bytearray()
-    while len(buf) < n:
-        chunk = conn.recv(min(8192, n - len(buf)))
-        if not chunk:
+    buf = bytearray(n)                       # 1 MB reads: 8 kB chunks took minutes for a 30 MB frame
+    view = memoryview(buf)
+    got = 0
+    while got < n:
+        k = conn.recv_into(view[got:got + min(1 << 20, n - got)])
+        if not k:
             return None
-        buf.extend(chunk)
+        got += k
     return bytes(buf)
 
 
@@ -93,11 +95,13 @@ class IPCClient:
             return False
 
     def send(self, payload: dict, timeout: float = 5.0):
+        data = frame(payload)
+        timeout = max(timeout, 10.0 + len(data) / 2e6)    # big pushes need time, not a 5 s limit
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect(("127.0.0.1", self.port))
         try:
-            s.sendall(frame(payload))
+            s.sendall(data)
             return read_frame(s)
         finally:
             s.close()

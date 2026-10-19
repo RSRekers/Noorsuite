@@ -19,7 +19,7 @@ def _set_windows_app_id(app_id: str) -> None:
 
 def main(argv=None) -> int:
     argv = list(sys.argv if argv is None else argv)
-    if len(argv) > 1 and argv[1] in ("skill", "insert", "latex", "presentation"):   # subcommands
+    if len(argv) > 1 and argv[1] in ("skill", "insert", "api", "latex", "presentation"):   # subcommands
         if argv[1] == "presentation":
             from .pptximport import main as pres_main
             return pres_main(argv[2:])
@@ -29,6 +29,9 @@ def main(argv=None) -> int:
         if argv[1] == "skill":
             from .skill import main as skill_main
             return skill_main(argv[2:])
+        if argv[1] == "api":
+            from .api_cli import main as api_main
+            return api_main(argv[2:])
         from .insert_cli import main as insert_main
         return insert_main(argv[2:])
     port = DEFAULT_PORT
@@ -42,7 +45,7 @@ def main(argv=None) -> int:
 
     from PyQt6.QtWidgets import QApplication
 
-    from .app import APP_ID, APP_NAME, SciSuiteWindow, app_icon
+    from .app import APP_ID, APP_NAME, SciSuiteWindow, app_icon, install_crash_guards
 
     _set_windows_app_id(APP_ID)
     app = QApplication(argv[:1])
@@ -51,8 +54,10 @@ def main(argv=None) -> int:
     app.setStyle("Fusion")
     app.setWindowIcon(app_icon())
 
+    install_crash_guards()
     window = SciSuiteWindow(port=port)
     window.show()
+    window.start_warmup()
     return app.exec()
 
 

@@ -1753,6 +1753,32 @@ def thin_line(x, y, n_bins: int, visible_fraction: float = 1.0):
     return x[keep], y[keep]
 
 
+def thin_band(x, lo, hi, n_bins: int):
+    """Envelope of a long band for drawing: per bin of consecutive points the lowest ``lo`` and the
+    highest ``hi`` (x = bin mean), so a million-point error band is drawn with ``n_bins`` polygons
+    columns and looks the same. Short inputs come back unchanged."""
+    x = np.asarray(x, dtype=float)
+    lo = np.asarray(lo, dtype=float)
+    hi = np.asarray(hi, dtype=float)
+    n = len(x)
+    bins = int(min(n // 4, max(16, n_bins)))
+    if n < THIN_MIN_POINTS or bins < 16 or n < 4 * bins:
+        return x, lo, hi
+    per = n // bins
+    main = per * bins
+    xs = np.nanmean(x[:main].reshape(bins, per), axis=1)
+    los = np.nanmin(lo[:main].reshape(bins, per), axis=1)
+    his = np.nanmax(hi[:main].reshape(bins, per), axis=1)
+    return xs, los, his
+
+
+def thin_indices(n: int, cap: int):
+    """About ``cap`` evenly spaced indices of ``n`` points (error bars of a huge trace)."""
+    if n <= cap:
+        return np.arange(n)
+    return np.unique(np.linspace(0, n - 1, cap).astype(int))
+
+
 # ---------------------------------------------------------------------------
 # Heatmaps: grids, colour bands, isoline levels, tick positions (Qt/matplotlib-free)
 # ---------------------------------------------------------------------------

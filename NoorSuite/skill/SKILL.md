@@ -349,6 +349,17 @@ Reads `.csv/.tsv/.txt/.xlsx/.json/.parquet` (DataFrame) and `.npy` (image). `--p
 `--title/--sheet-tags/--sheet-notes/--folder/--subplot-title/--x-label/--y-label` (sheet
 organization), `--notes` (data), `--plot-type Scatter`, `--sort`, `--x-tick-labels "0=RT; 1=4 K"` / `--y-tick-labels`, `--update`, `--project FILE`, `--port N`.
 
+### `api`: every other action from the command line
+
+`{{PYTHON}} -m NoorSuite api <command>` mirrors the client (live GUI if one answers on `--port`, else the project file):
+`list data|images|traces|sheets|documents|assets|tables|references|templates [--json]`, `get DATA [--out f.csv]`,
+`remove data|sheet KEY...`, `clear --yes`, `annotate DATA --tags --notes`, `organize SHEET --title --tags --notes --folder
+--subplot-title --x-label ...`, `shape SHEET rect|ellipse|line|arrow|xspan|yspan|text|picture --x0 --x1 --y0 --y1 --fill
+--text --parent --scale ...`, `clear-shapes SHEET`, `heatmap grid.csv|grid.npy [--xyz X,Y,Z] --cmap --bins --isolines --xticks ...`,
+`mean DATA --x x --y r1,r2,r3 --band std|sem|minmax --errorbars`, `document NAME --file f.tex|--text ... [--mode append --template acs]`,
+`get-document KEY`, `si-document MAIN`, `asset FILE`, `table NAME DATA --columns a,b --rows 1:20`, `snippet figure|table KEY --caption`,
+`references --file x.bib | --zotero-keys k1,k2 | --zotero-search Q | --zotero-pick`. Failures print `<command> failed: ...` and exit 1.
+
 ## 4. After inserting
 
 Tell the user where the data went (live GUI vs. which file) and what exists now

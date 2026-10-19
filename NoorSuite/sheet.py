@@ -21,7 +21,9 @@ from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                              QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget)
 
-from .model import (INDEX_COL, THIN_MIN_POINTS, ImageRef, ShapeRef, SheetModel, apply_tick_labels,
+_MAX_WHISKERS = 400
+
+from .model import (INDEX_COL, THIN_MIN_POINTS, thin_band, thin_indices, ImageRef, ShapeRef, SheetModel, apply_tick_labels,
                     gradient_rgba, heatmap_band_edges, heatmap_iso_levels, resolve_ticks, thin_line)
 from .widgets import CollapsibleSection
 
@@ -562,8 +564,7 @@ class PlotSheet(QWidget):
                     continue
                 before = set(ax.get_children())
                 dx, dy = x, y
-                if tref.plot_type == "Line" and not tref.show_errorbar \
-                        and not tref.show_band and len(x) >= THIN_MIN_POINTS:
+                if tref.plot_type == "Line" and len(x) >= THIN_MIN_POINTS:
                     dx, dy = self._thinned(x, y, sub)
                 if tref.show_band:                    # under the line, same layer
                     self._draw_band(ax, tref, data, x, y)
@@ -806,7 +807,12 @@ class PlotSheet(QWidget):
         lo, hi = (err[0], err[1]) if err.ndim == 2 else (err, err)
         if len(lo) != len(y):
             return
-        poly = ax.fill_between(x, y - lo, y + hi, color=tref.color, alpha=tref.band_alpha,
+        if len(x) >= THIN_MIN_POINTS:
+            bins = self.line_budget or int(min(6000, max(1500, 1.5 * self.canvas.width())))
+            x, lo_c, hi_c = thin_band(x, y - lo, y + hi, bins)
+        else:
+            lo_c, hi_c = y - lo, y + hi
+        poly = ax.fill_between(x, lo_c, hi_c, color=tref.color, alpha=tref.band_alpha,
                                linewidth=0, label="_nolegend_")
         self.artist_map[poly] = tref
 
@@ -988,6 +994,10 @@ class PlotSheet(QWidget):
         independent of ``plot_type``, so "Scatter + errorbar" and "Line + errorbar" are
         both just this on top of their normal trace (see TraceRef.show_errorbar).
         ``fmt="none"`` so this call draws only the whiskers, not another line/marker."""
+        if len(x) > _MAX_WHISKERS:           # a million whiskers are neither visible nor drawable
+            keep = thin_indices(len(x), _MAX_WHISKERS)
+            x, y = np.asarray(x)[keep], np.asarray(y)[keep]
+            yerr = np.asarray(yerr)[..., keep]
         container = ax.errorbar(
             x, y, yerr=yerr, fmt="none", ecolor=tref.color,
             elinewidth=max(0.6, tref.line_width * 0.6), capsize=3, alpha=tref.alpha,

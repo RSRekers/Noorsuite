@@ -209,6 +209,12 @@ PowerPoint export (native shapes, connectors, pictures, text boxes).
 `python -m NoorSuite insert data.csv --plot x:y1,y2 --yerr e1,e2 [--band] [--yerr-mode sem]`. Missing error columns are reported
 instead of silently dropped.
 
+**Fast documents.** After the window opens, NoorSuite prepares the documents in the background (figure PDFs, thumbnails, cited Zotero records), and an unchanged document is not rebuilt in the next session.
+
+**Command line.** `python -m NoorSuite insert ...` puts a file into the project; `python -m NoorSuite api <command>` covers the rest
+of the client: `list`, `get`, `remove`, `clear`, `annotate`, `organize`, `shape`, `clear-shapes`, `heatmap`, `mean`, `document`,
+`get-document`, `si-document`, `asset`, `table`, `snippet`, `references` (`python -m NoorSuite api --help`).
+
 **Mean with a shaded band.** *Combine into mean ± error trace...* (several selected traces, or one trace that holds
 repeats) now asks how to show the spread: **shaded band** (default), error bars, or both, and from which source: standard
 deviation, standard error of the mean (std / sqrt(n)) or min / max. The result is one trace in the colour of the first

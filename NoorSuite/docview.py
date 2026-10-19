@@ -18,6 +18,7 @@ The tab talks to the main window through a small *host* protocol (``document_she
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -33,7 +34,7 @@ from PyQt6.QtPdf import QPdfDocument, QPdfLinkModel
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
                              QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
                              QListView, QListWidget, QListWidgetItem, QMessageBox,
-                             QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
+                             QMenu, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QScrollArea, QSplitter,
                              QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from . import latex, zotero
@@ -217,9 +218,15 @@ class PdfPreview(QScrollArea):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._render)
+        self._labels: list = []
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.timeout.connect(self._fill_visible)
+        self.verticalScrollBar().valueChanged.connect(lambda _v: self._scroll_timer.start(30))
         self._placeholder("No PDF yet - press Compile (F5).")
 
     def _clear(self):
+        self._labels = []
         while self._layout.count():
             w = self._layout.takeAt(0).widget()
             if w is not None:
@@ -271,17 +278,43 @@ class PdfPreview(QScrollArea):
             return
         self._clear()
         scale = self._px_per_pt()
-        dpr = self.devicePixelRatioF()
+        self._labels = []
         for p in range(self._doc.pageCount()):
             pts = self._doc.pagePointSize(p)
-            size = QSize(max(1, round(pts.width() * scale * dpr)),
-                         max(1, round(pts.height() * scale * dpr)))
-            image = self._doc.render(p, size)
-            image.setDevicePixelRatio(dpr)
             lab = _PageLabel(self, p)
-            lab.setPixmap(QPixmap.fromImage(image))
             lab.setFixedSize(QSize(round(pts.width() * scale), round(pts.height() * scale)))
+            lab.setStyleSheet("background: white;")
             self._layout.addWidget(lab, 0, Qt.AlignmentFlag.AlignHCenter)
+            self._labels.append(lab)
+        self._container.adjustSize()
+        self._layout.activate()
+        self._fill_visible()
+        QTimer.singleShot(0, self._fill_visible)       # once the viewport has its final size
+
+    def _fill_visible(self):
+        """Pages are painted only when they are (nearly) on screen -- a 40-page paper used to be
+        rendered completely on every load and every resize. Far-away pages give their bitmap back."""
+        labels = getattr(self, "_labels", [])
+        if not labels or self._doc.status() != QPdfDocument.Status.Ready:
+            return
+        dpr = self.devicePixelRatioF()
+        top = self.verticalScrollBar().value()
+        h = self.viewport().height()
+        lo, hi = top - h, top + 2 * h
+        for p, lab in enumerate(labels):
+            try:
+                y = lab.y()
+                near = y + lab.height() >= lo and y <= hi
+                if near and lab.pixmap().isNull():
+                    size = QSize(max(1, round(lab.width() * dpr)), max(1, round(lab.height() * dpr)))
+                    image = self._doc.render(p, size)
+                    image.setDevicePixelRatio(dpr)
+                    lab.setPixmap(QPixmap.fromImage(image))
+                elif not near and not lab.pixmap().isNull() and (y + lab.height() < top - 3 * h
+                                                                  or y > top + 4 * h):
+                    lab.setPixmap(QPixmap())
+            except RuntimeError:            # label deleted by a concurrent re-render
+                return
 
     def link_at(self, page: int, pos) -> str:
         if page >= len(self._links):
@@ -984,6 +1017,7 @@ class DocumentTab(QWidget):
         self._again = False
         self._last_fp = None
         self._pdf = ""
+        self._built_fp = None
         self._fig_fp: dict = {}               # key -> fingerprint of the exported PDF
         self.workdir = latex.default_workdir(model.doc_id)
         self._settings = QSettings("NoorSuite", "NoorSuite")
@@ -1116,6 +1150,12 @@ class DocumentTab(QWidget):
         self.status_label = QLabel("")
         toolbar.addSeparator()
         toolbar.addWidget(self.status_label)
+        self.progress = QProgressBar()
+        self.progress.setMaximumWidth(140)
+        self.progress.setMaximumHeight(14)
+        self.progress.setTextVisible(False)
+        self.progress.hide()
+        toolbar.addWidget(self.progress)
 
         self.editor = LatexEditor()
         self.editor.setPlainText(model.source)
@@ -1200,6 +1240,14 @@ class DocumentTab(QWidget):
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 1)
         split.setSizes([280, 500, 500])
+        # every pane may be dragged narrow: without this the preview / slide editor / panel kept the
+        # sum of their children's minimum widths and the handles did nothing on a laptop screen
+        for pane, floor in ((self.side, 120), (mid, 160), (self.right_tabs, 160)):
+            pane.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            pane.setMinimumWidth(floor)
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(7)
+        mid.setChildrenCollapsible(False)
         self._split = split
         self.panel_act.toggled.connect(lambda on: self._split.setSizes(
             [280 if on else 0, 500, 500]))
@@ -1226,6 +1274,7 @@ class DocumentTab(QWidget):
         if engine is None:
             self.log.setPlainText(latex.build_pdf(self.workdir, None).log)
         self._load_cached_pdf()
+        self._restore_state()
         self.sync_layout_combo()
         QTimer.singleShot(1500, lambda: self._complete_records(None))   # old, thin records
 
@@ -1683,7 +1732,7 @@ class DocumentTab(QWidget):
         used = set(zotero.cite_keys(self.source()))
         parts += [json.dumps(r, sort_keys=True) for r in self.host.document_references()
                   if r["key"] in used]
-        return hash("\n".join(parts))
+        return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()   # stable across sessions
 
     # -- Zotero --------------------------------------------------------------------------
     def pick_from_zotero(self, insert: bool = True):
@@ -1792,9 +1841,11 @@ class DocumentTab(QWidget):
 
     # -- unknown \cite keys: look them up in Zotero (typed by hand, copied from Obsidian) ---
     def _resolve_unknown_keys(self, undefined):
-        todo = [k for k in undefined if k not in self._lookup_tried]
+        tried = getattr(self.host, "_zotero_tried", self._lookup_tried)   # shared: once per session
+        todo = [k for k in undefined if k not in tried]
         if not todo:
             return
+        tried.update(todo)
         self._lookup_tried.update(todo)
 
         def work():
@@ -1818,6 +1869,35 @@ class DocumentTab(QWidget):
             self._pdf = str(pdf)
             self.preview.load(self._pdf)
 
+    # The figure PDFs and the built document stay valid between sessions: their fingerprints are
+    # kept next to them, so opening an unchanged document neither re-exports every figure on the
+    # GUI thread nor rebuilds the PDF (that was most of the wait at the start of a session).
+    def _state_key(self) -> str:
+        from . import __version__
+        return hashlib.md5((__version__ + latex.STY).encode("utf-8")).hexdigest()[:12]
+
+    def _restore_state(self):
+        try:
+            st = json.loads((self.workdir / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if st.get("key") != self._state_key():
+            return
+        self._fig_fp.update({k: v for k, v in st.get("figs", {}).items()})
+        if self._pdf and st.get("doc") and st.get("doc") == self._fingerprint():
+            self._last_fp = self._built_fp = st["doc"]
+            self.built_source = self.source()
+            self.status_label.setText("  up to date (cached build)")
+
+    def _save_state(self):
+        try:
+            self.workdir.mkdir(parents=True, exist_ok=True)
+            (self.workdir / "state.json").write_text(json.dumps(
+                {"key": self._state_key(), "figs": self._fig_fp, "doc": self._built_fp}),
+                encoding="utf-8")
+        except OSError:
+            pass
+
     def _export_figures(self, figures: Path):
         """Export the referenced sheets that changed since their PDF was written."""
         missing, exported, cached = [], 0, 0
@@ -1832,6 +1912,9 @@ class DocumentTab(QWidget):
                 cached += 1
                 continue
             self.status_label.setText(f"  exporting figure {n}/{len(refs)} ...")
+            self.progress.setRange(0, len(refs))
+            self.progress.setValue(n - 1)
+            self.progress.show()
             QApplication.processEvents()
             try:
                 self.host.export_sheet_pdf(sm.sheet_id, str(target))
@@ -1870,6 +1953,7 @@ class DocumentTab(QWidget):
         if not force and fp == self._last_fp:
             return
         self._last_fp = fp
+        self._compiling_fp = fp
         engine = latex.find_engine()
         if engine is None:
             self.log.setPlainText(latex.build_pdf(self.workdir, None).log)
@@ -1898,6 +1982,9 @@ class DocumentTab(QWidget):
         missing, exported, cached = self._export_figures(self.workdir / latex.FIGURES_DIR)
         t_fig = time.time() - t0
         self.status_label.setText(f"  building ({Path(engine).stem}) ...")
+        self.progress.setRange(0, 0)               # busy while the engine runs
+        self.progress.show()
+        self._save_state()
 
         def work():
             res = latex.build_pdf(self.workdir, engine)
@@ -1912,6 +1999,7 @@ class DocumentTab(QWidget):
 
     def _on_built(self, res):
         self._building = False
+        self.progress.hide()
         self.compile_act.setEnabled(True)
         log = res.log
         for n in getattr(res, "notes", []):
@@ -1944,6 +2032,9 @@ class DocumentTab(QWidget):
                 f"{getattr(res, 'fig_cached', 0)} cached{fmt}){note}")
         else:
             self.status_label.setText("  build FAILED - see the log" + note)
+        if res.ok:
+            self._built_fp = getattr(self, "_compiling_fp", None)
+            self._save_state()
         if self._again:
             self._again = False
             QTimer.singleShot(50, self.compile)

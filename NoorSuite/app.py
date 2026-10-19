@@ -14,6 +14,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 import os
+import re
 import threading
 import time
 from io import BytesIO
@@ -804,6 +805,7 @@ class NormalizeTracesDialog(QDialog):
 # =====================================================================
 class SciSuiteWindow(QMainWindow):
     _autosave_done = pyqtSignal(str, bool, str)   # (path, ok, message) -- cross-thread
+    _zotero_found = pyqtSignal(object)            # records found by the start-up look-up
 
     def __init__(self, port: int = DEFAULT_PORT):
         super().__init__()
@@ -857,6 +859,9 @@ class SciSuiteWindow(QMainWindow):
         self._render_hold = 0                     # > 0: renders are collected, done once at the end
         self._held_sheets: set = set()
         self._autosave_done.connect(self._on_autosave_done)
+        self._zotero_found.connect(self._on_zotero_found)
+        self._zotero_tried: set = set()       # cite keys already looked up this session
+        self._warm_gen = 0
 
         self._init_ui()
         self.load_session()
@@ -869,6 +874,102 @@ class SciSuiteWindow(QMainWindow):
         self._autosave_timer.setInterval(_AUTOSAVE_SECONDS * 1000)
         self._autosave_timer.timeout.connect(self._periodic_autosave)
         self._autosave_timer.start()
+
+    # ------------------------------------------------------------ start-up warm-up
+    def start_warmup(self, delay_ms: int = 1200):
+        """Prepare everything a document needs while the user is still looking at the plots:
+        heavy imports and matplotlib's PDF/font machinery, the figures and thumbnails of every
+        document (only those whose sheet or data changed), and the cited Zotero records. One
+        small step per event-loop pass, so the window stays responsive."""
+        self._warm_gen += 1
+        gen = self._warm_gen
+        steps = self._warmup_steps()
+
+        def tick():
+            if gen != self._warm_gen:
+                return                               # a newer project replaced this run
+            try:
+                next(steps)
+            except StopIteration:
+                self.statusBar().showMessage("Documents are ready.", 3000)
+                return
+            except Exception:
+                return
+            QTimer.singleShot(20, tick)
+
+        QTimer.singleShot(delay_ms, tick)
+
+    def _warmup_steps(self):
+        from . import latex, zotero
+        from . import docview, slideeditor, tables  # noqa: F401  (imports are the cost)
+        latex.find_engine()
+        yield
+        docs = [d for d in self.documents.values() if latex.figure_refs(d.source)
+                or zotero.cite_keys(d.source)]
+        self._warm_zotero(docs)
+        for n, dm in enumerate(docs, 1):
+            self.statusBar().showMessage(f"Preparing documents ({n}/{len(docs)}) ...")
+            sheets = self.document_sheets()
+            work = latex.default_workdir(dm.doc_id)
+            state_file = work / "state.json"
+            try:
+                st = json.loads(state_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                st = {}
+            from . import __version__
+            key = hashlib.md5((__version__ + latex.STY).encode("utf-8")).hexdigest()[:12]
+            if st.get("key") != key:
+                st = {"key": key, "figs": {}, "doc": None}
+            figs = st.setdefault("figs", {})
+            figures = work / latex.FIGURES_DIR
+            changed = False
+            for ref in latex.figure_refs(dm.source):
+                sm = latex.resolve_ref(ref, sheets)
+                if sm is None or not re.fullmatch(r"[A-Za-z0-9._-]+", ref):
+                    continue
+                fp = self.sheet_fingerprint(sm.sheet_id)
+                target = figures / f"{ref}.pdf"
+                if not (target.is_file() and figs.get(ref) == fp):
+                    figures.mkdir(parents=True, exist_ok=True)
+                    try:
+                        self.export_sheet_pdf(sm.sheet_id, str(target))
+                        figs[ref] = fp
+                        changed = True
+                    except Exception:
+                        pass
+                    yield
+                self.sheet_thumbnail(sm.sheet_id)         # cached on disk for the figure panel
+                yield
+            if changed:
+                try:
+                    work.mkdir(parents=True, exist_ok=True)
+                    state_file.write_text(json.dumps(st), encoding="utf-8")
+                except OSError:
+                    pass
+
+    def _warm_zotero(self, docs):
+        """Look up cited keys that are missing or thin in the project's references -- once per
+        session and key, in a thread (Zotero may be closed: then it fails fast and stays quiet)."""
+        from . import zotero
+        cited = {k for d in docs for k in zotero.cite_keys(d.source)}
+        todo = [k for k in cited if k not in self._zotero_tried
+                and (k not in self.references or not zotero.is_complete(self.references[k]))]
+        if not todo:
+            return
+        self._zotero_tried.update(todo)
+
+        def work():
+            try:
+                found, _missing = zotero.rpc_find_keys(todo)
+            except Exception:
+                return
+            if found:
+                self._zotero_found.emit(found)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_zotero_found(self, found):
+        self.add_references(found)
 
     # --------------------------------------------------------- project identity
     def _project_name(self) -> str:
@@ -3485,6 +3586,7 @@ class SciSuiteWindow(QMainWindow):
         self.project_path = path
         self._update_title()
         self.statusBar().showMessage(f"Opened {self._project_name()}", 4000)
+        self.start_warmup(600)
 
     def save_session(self):
         try:
@@ -3714,8 +3816,20 @@ class SciSuiteWindow(QMainWindow):
         return next((o for o in self.images.values() if o.name == key), None)
 
     def handle_incoming_ipc(self, payload: dict):
-        with self._deferred_renders():
-            self._dispatch_ipc(payload)
+        """Runs on the GUI thread. An exception here must never reach Qt's slot machinery
+        (PyQt6 aborts the whole process on it): it is logged and shown in the status bar."""
+        try:
+            with self._deferred_renders():
+                self._dispatch_ipc(payload)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            _log_crash(traceback.format_exc())
+            try:
+                self.statusBar().showMessage(
+                    f"Request '{payload.get('action')}' failed: {exc}", 15000)
+            except Exception:
+                pass
 
     def _dispatch_ipc(self, payload: dict):
         action = payload.get("action")
@@ -4045,3 +4159,42 @@ def _in_scroll(widget: QWidget) -> QWidget:
 
 # Backwards-compatible alias.
 ModernOriginSuite = SciSuiteWindow
+
+
+def _log_crash(text: str) -> None:
+    """Append an error report to ``~/.noorsuite/crash.log`` (never raises)."""
+    try:
+        import datetime
+        d = os.path.expanduser("~/.noorsuite")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "crash.log"), "a", encoding="utf-8") as fh:
+            fh.write(f"--- {datetime.datetime.now().isoformat(timespec='seconds')}\n{text}\n")
+    except Exception:
+        pass
+
+
+def install_crash_guards() -> None:
+    """PyQt6 calls ``abort()`` when a Python exception escapes a slot / event handler, which killed
+    the whole window for what is usually a recoverable error. Log it instead, and keep a native
+    fault trace (segfaults) in the same folder."""
+    import sys
+    import traceback
+
+    def hook(etype, value, tb):
+        text = "".join(traceback.format_exception(etype, value, tb))
+        sys.stderr.write(text)
+        _log_crash(text)
+
+    sys.excepthook = hook
+    try:
+        import faulthandler
+        d = os.path.expanduser("~/.noorsuite")
+        os.makedirs(d, exist_ok=True)
+        global _FAULT_FILE
+        _FAULT_FILE = open(os.path.join(d, "fault.log"), "a")
+        faulthandler.enable(_FAULT_FILE)
+    except Exception:
+        pass
+
+
+_FAULT_FILE = None

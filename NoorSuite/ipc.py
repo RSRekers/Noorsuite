@@ -87,7 +87,7 @@ class IPCBridge(QObject):
 
     def _serve(self, conn) -> None:
         try:
-            conn.settimeout(10.0)   # never let one client wedge its own handler thread
+            conn.settimeout(60.0)   # never let one client wedge its own handler thread
             payload = read_frame(conn)
             if payload is not None:
                 conn.sendall(frame(self._handle(payload)))

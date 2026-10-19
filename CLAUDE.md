@@ -687,6 +687,15 @@ title/x_label/y_label + trace labels).
   apply it after the shared `trace_style`, drop error columns that are not in the data (status message / error response) and switch
   bars / band off when no error data is left. `insert_cli` maps `--yerr / --yerr-low / --yerr-high / --yerr-mode / --band /
   --no-errorbars` onto them and prints `plot failed: ...` (exit 1) for `ValueError`s.
+- Robustness: `handle_incoming_ipc` catches every exception (status bar + `~/.noorsuite/crash.log`) because PyQt6 aborts the process on
+  an exception escaping a slot; `__main__` installs `app.install_crash_guards()` (`sys.excepthook` + faulthandler to `fault.log`).
+  `protocol._recv_exactly` reads 1 MB chunks and `IPCClient.send` scales its timeout with the payload (8 kB chunks timed out on
+  30 MB pushes). Error bars of a huge trace are capped at `sheet._MAX_WHISKERS`, bands use `model.thin_band`, lines are always thinned.
+- Document start-up: `DocumentTab` keeps `workdir/state.json` (`_state_key` = version + STY hash, figure fingerprints `_fig_fp`,
+  `doc` = fingerprint of the last successful build); `_restore_state` makes an unchanged document skip figure export and rebuild
+  in the next session (`_fingerprint` is an md5, not `hash()`, so it is stable across processes). `PdfPreview` paints only pages
+  near the viewport (`_fill_visible`), the three panes of the document splitter have `Ignored` size policy + small minimum widths.
+- CLI parity: `api_cli.py` (`python -m NoorSuite api ...`) wraps every client action; keep it in step when adding client methods.
 - Mean +- spread: `TraceRef.show_band` / `band_alpha` (style fields) draw `PlotSheet._draw_band` (`fill_between(y - lo, y + hi)`,
   before the line, same layer) from the same error columns as the whiskers; `yerr_mode` is one of `model.ERROR_MODES`
   (`std`, `sem` via `yerr_sem_col`, `minmax`). `aggregate_series` / `split_into_repeats` return `sem` = std / sqrt(n) and the
@@ -886,3 +895,7 @@ oorfile` -> PNG
 - Only a sheet's **own** custom colormaps can be deleted from the panel; built-ins and library
   entries are read-only there.
 - Closing a sheet's tab does not delete the sheet; it stays in the tree (`self.sheets`).
+- Start-up warm-up: `SciSuiteWindow.start_warmup()` (called by `__main__` and after opening a project; not by tests' windows) steps through
+  `_warmup_steps` one small unit per event-loop pass: heavy imports + `find_engine`, then per document the stale figure PDFs (written to the
+  document's workdir + `state.json`), figure thumbnails and a once-per-session Zotero look-up of missing / thin cited keys (`_zotero_tried`
+  is shared with the `DocumentTab`s, so opening a tab does not repeat it).
