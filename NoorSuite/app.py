@@ -50,7 +50,7 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_ASSET,
                   ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
                   ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET, ACTION_REMOVE_TRACE, DEFAULT_PORT,
                   IPCBridge)
-from .model import (INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
+from .model import (ERROR_MODE_LABELS, ERROR_MODES, INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
                     TableModel,
                     apply_group_transform,
                     REL_MODES, REL_VALUE_PREFIX, SPLIT_LAYOUT_LABELS,
@@ -92,7 +92,7 @@ QTreeView::indicator:indeterminate, QListView::indicator:indeterminate {
 # "Apply to all traces" (TraceStyleWidget) copies line/marker style, not colour (which
 # differentiates traces) or scale_factor (which is data-dependent, like axis limits).
 _TRACE_STYLE_BROADCAST_FIELDS = ("plot_type", "line_style", "line_width",
-                                 "marker", "marker_size", "alpha", "yerr_mode")
+                                 "marker", "marker_size", "alpha", "yerr_mode", "band_alpha")
 
 ITEM_TYPE_ROLE = Qt.ItemDataRole.UserRole + 1
 ITEM_ID_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -552,6 +552,28 @@ class CommonColumnsDialog(QDialog):
         return x_col, y_cols
 
 
+def _add_error_display_controls(dlg, layout):
+    """The "how to show the spread" choice shared by both combine dialogs."""
+    row = QHBoxLayout()
+    row.addWidget(QLabel("Show the spread as:"))
+    dlg.display_combo = QComboBox()
+    dlg.display_combo.addItems(["Shaded band", "Error bars", "Band and error bars"])
+    row.addWidget(dlg.display_combo, 1)
+    layout.addLayout(row)
+    row2 = QHBoxLayout()
+    row2.addWidget(QLabel("Spread:"))
+    dlg.error_combo = QComboBox()
+    dlg.error_combo.addItems(ERROR_MODE_LABELS)
+    row2.addWidget(dlg.error_combo, 1)
+    layout.addLayout(row2)
+
+
+def _error_choice(dlg):
+    """``(display, mode)`` -- display "band" | "bars" | "both", mode of ``model.ERROR_MODES``."""
+    return (("band", "bars", "both")[dlg.display_combo.currentIndex()],
+            ERROR_MODES[dlg.error_combo.currentIndex()])
+
+
 class CombineTracesDialog(QDialog):
     """"Combine into mean +/- error trace..." on 2+ selected traces in the active
     subplot's trace list -- pick the resulting trace's base plot style (so it's
@@ -578,6 +600,7 @@ class CombineTracesDialog(QDialog):
         form.addWidget(self.style_combo, 1)
         layout.addLayout(form)
 
+        _add_error_display_controls(self, layout)
         self.remove_check = QCheckBox("Remove the original traces")
         self.remove_check.setChecked(True)
         layout.addWidget(self.remove_check)
@@ -642,6 +665,7 @@ class SplitAggregateDialog(QDialog):
         form2.addWidget(self.style_combo, 1)
         layout.addLayout(form2)
 
+        _add_error_display_controls(self, layout)
         self.remove_check = QCheckBox("Remove the original trace")
         self.remove_check.setChecked(True)
         layout.addWidget(self.remove_check)
@@ -1499,9 +1523,21 @@ class SciSuiteWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         n, layout, plot_type, remove_original = dlg.selection()
-        self._split_and_aggregate_trace(sm, ref, x, y, n, layout, plot_type, remove_original)
+        display, mode = _error_choice(dlg)
+        self._split_and_aggregate_trace(sm, ref, x, y, n, layout, plot_type, remove_original,
+                                        display, mode)
 
-    def _split_and_aggregate_trace(self, sm, ref, x, y, n, layout, plot_type, remove_original):
+    @staticmethod
+    def _set_spread(new_ref, display="band", mode="std"):
+        """Error columns of a derived mean trace + how its spread is drawn."""
+        new_ref.yerr_col, new_ref.yerr_sem_col = "std", "sem"
+        new_ref.yerr_low_col, new_ref.yerr_high_col = "err_min", "err_max"
+        new_ref.yerr_mode = mode
+        new_ref.show_band = display in ("band", "both")
+        new_ref.show_errorbar = display in ("bars", "both")
+
+    def _split_and_aggregate_trace(self, sm, ref, x, y, n, layout, plot_type, remove_original,
+                                   display="band", mode="std"):
         try:
             agg = split_into_repeats(y, n, layout=layout)
         except ValueError as e:
@@ -1513,10 +1549,10 @@ class SciSuiteWindow(QMainWindow):
         # "sequence".
         x_axis = 0 if layout == "sequence" else 1
         x_reduced = np.asarray(x, dtype=float).reshape(-1, n).mean(axis=x_axis)
-        columns = {"x": x_reduced, "mean": agg["mean"], "std": agg["std"],
+        columns = {"x": x_reduced, "mean": agg["mean"], "std": agg["std"], "sem": agg["sem"],
                   "err_min": agg["err_min"], "err_max": agg["err_max"]}
         new_obj = DataObject(f"{ref.display_label} (n={n} mean±err)", columns,
-                             ["x", "mean", "std", "err_min", "err_max"], source="split")
+                             ["x", "mean", "std", "sem", "err_min", "err_max"], source="split")
         self.repository[new_obj.id] = new_obj
 
         sub = sm.get_active_subplot()
@@ -1525,10 +1561,7 @@ class SciSuiteWindow(QMainWindow):
         new_ref = TraceRef(new_obj.id, "x", "mean", label=ref.display_label)
         new_ref.plot_type = plot_type
         new_ref.color = ref.color
-        new_ref.show_errorbar = True
-        new_ref.yerr_col = "std"
-        new_ref.yerr_low_col = "err_min"
-        new_ref.yerr_high_col = "err_max"
+        self._set_spread(new_ref, display, mode)
 
         if remove_original:
             sub.traces.remove(ref)
@@ -1577,16 +1610,18 @@ class SciSuiteWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         plot_type, remove_originals = dlg.selection()
+        display, mode = _error_choice(dlg)
         self._combine_selected_traces(sm, refs, x0, [y for _, y in resolved],
-                                      plot_type, remove_originals)
+                                      plot_type, remove_originals, display, mode)
 
-    def _combine_selected_traces(self, sm, refs, x, ys, plot_type, remove_originals):
+    def _combine_selected_traces(self, sm, refs, x, ys, plot_type, remove_originals,
+                                 display="band", mode="std"):
         agg = aggregate_series(ys)
         label = common_label([r.display_label for r in refs])
-        columns = {"x": x, "mean": agg["mean"], "std": agg["std"],
+        columns = {"x": x, "mean": agg["mean"], "std": agg["std"], "sem": agg["sem"],
                   "err_min": agg["err_min"], "err_max": agg["err_max"]}
         new_obj = DataObject(f"{label} (n={len(refs)} mean±err)", columns,
-                             ["x", "mean", "std", "err_min", "err_max"], source="combined")
+                             ["x", "mean", "std", "sem", "err_min", "err_max"], source="combined")
         self.repository[new_obj.id] = new_obj
 
         # _selected_trace_refs() only ever returns rows from the active subplot's own
@@ -1599,10 +1634,7 @@ class SciSuiteWindow(QMainWindow):
         new_ref = TraceRef(new_obj.id, "x", "mean", label=label)
         new_ref.plot_type = plot_type
         new_ref.color = color
-        new_ref.show_errorbar = True
-        new_ref.yerr_col = "std"
-        new_ref.yerr_low_col = "err_min"
-        new_ref.yerr_high_col = "err_max"
+        self._set_spread(new_ref, display, mode)
 
         if remove_originals:
             for sub2 in sm.subplots:

@@ -682,6 +682,12 @@ title/x_label/y_label + trace labels).
   `insertFromMimeData` emit `imagePasted` / `filesPasted` -> `DocumentTab.paste_picture*` -> `host.import_asset(data=, ext="png")`
   and a `\noorfile` figure (article) or a `\noorobj` file object (beamer)). `DocumentTab._completion_extras` feeds cite keys /
   labels (cached per `document().revision()`) / sheets / assets / tables.
+- Mean +- spread: `TraceRef.show_band` / `band_alpha` (style fields) draw `PlotSheet._draw_band` (`fill_between(y - lo, y + hi)`,
+  before the line, same layer) from the same error columns as the whiskers; `yerr_mode` is one of `model.ERROR_MODES`
+  (`std`, `sem` via `yerr_sem_col`, `minmax`). `aggregate_series` / `split_into_repeats` return `sem` = std / sqrt(n) and the
+  derived data objects carry a `sem` column. `TraceRef.apply_style` also accepts the error columns and `label` (that is how
+  `client.plot_mean` configures its trace through the normal `trace_style` payload). The combine dialogs share
+  `_add_error_display_controls` / `_error_choice`; builders take `display` ("band" | "bars" | "both") and `mode`.
 - Window layout: `_main_splitter` children are not collapsible with minimum widths 190 / 300 / 270; the sidebar is
   `_right_wrap`, shown / hidden by `_apply_sidebar` (`_sidebar_wanted`, QSettings `ui/sidebar`, toolbar action `sidebar_act` /
   F4, `reset_layout`); a document tab hides it, a sheet tab restores it and `_ensure_sidebar_width` repairs a collapsed state.

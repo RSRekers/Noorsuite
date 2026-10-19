@@ -158,6 +158,17 @@ class TraceStyleWidget(QWidget):
         self.errbar_check = QCheckBox("Show error bars")
         self.errbar_check.toggled.connect(self._on_errbar_toggled)
         form.addRow("", self.errbar_check)
+        self.band_check = QCheckBox("Show shaded band (error range)")
+        self.band_check.setToolTip("Translucent area around the line (mean +- std / sem / "
+                                   "min-max) -- the same error source as the error bars.")
+        self.band_check.toggled.connect(self._on_errbar_toggled)
+        form.addRow("", self.band_check)
+        self.band_alpha_spin = QDoubleSpinBox()
+        self.band_alpha_spin.setRange(0.05, 1.0)
+        self.band_alpha_spin.setSingleStep(0.05)
+        self.band_alpha_spin.setDecimals(2)
+        self.band_alpha_spin.valueChanged.connect(self._push)
+        form.addRow("  Band opacity:", self.band_alpha_spin)
         self.errbar_mode_combo = QComboBox()
         self.errbar_mode_combo.addItems(ERROR_MODE_LABELS)
         self.errbar_mode_combo.currentIndexChanged.connect(self._push)
@@ -198,8 +209,10 @@ class TraceStyleWidget(QWidget):
             "row index, e.g. 0" if token == "rel_index" else "")
         self._push()
 
-    def _on_errbar_toggled(self, checked):
-        self._set_row_visible(self.errbar_mode_combo, checked)
+    def _on_errbar_toggled(self, _checked=None):
+        either = self.errbar_check.isChecked() or self.band_check.isChecked()
+        self._set_row_visible(self.errbar_mode_combo, either)
+        self._set_row_visible(self.band_alpha_spin, self.band_check.isChecked())
         self._push()
 
     def _set_row_visible(self, widget, show: bool):
@@ -238,9 +251,14 @@ class TraceStyleWidget(QWidget):
                 "" if ref.has_error_data else
                 "This trace has no error data -- build one with \"Combine into mean "
                 "+/- error trace...\" on several selected traces.")
+            self.band_check.setChecked(ref.show_band and ref.has_error_data)
+            self.band_check.setEnabled(ref.has_error_data)
+            self.band_alpha_spin.setValue(ref.band_alpha)
             self.errbar_mode_combo.setCurrentIndex(
                 ERROR_MODES.index(ref.yerr_mode) if ref.yerr_mode in ERROR_MODES else 0)
-            self._set_row_visible(self.errbar_mode_combo, self.errbar_check.isChecked())
+            self._set_row_visible(self.errbar_mode_combo,
+                                  self.errbar_check.isChecked() or self.band_check.isChecked())
+            self._set_row_visible(self.band_alpha_spin, self.band_check.isChecked())
 
             sf = ref.scale_factor
             if sf.startswith(CUSTOM_FACTOR_PREFIX):
@@ -280,6 +298,8 @@ class TraceStyleWidget(QWidget):
         r.alpha = self.alpha_spin.value()
         r.sort_x = self.sort_check.isChecked()
         r.show_errorbar = self.errbar_check.isChecked() and self.errbar_check.isEnabled()
+        r.show_band = self.band_check.isChecked() and self.band_check.isEnabled()
+        r.band_alpha = self.band_alpha_spin.value()
         r.yerr_mode = ERROR_MODES[self.errbar_mode_combo.currentIndex()]
         token = Y_TRANSFORMS[self.transform_combo.currentIndex()]
         rel_mode = REL_MODES[self.relmode_combo.currentIndex()]

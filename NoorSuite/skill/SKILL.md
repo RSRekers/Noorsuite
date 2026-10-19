@@ -166,6 +166,12 @@ Slide objects (tell the user): the document tab's *Slide editor* places and edit
 lines (cm from the top-left); *Slide setup...* writes `\noorslide{title-dx=,title-size=,body-top=,margin-left=,
 number-on-title=true,...}`. Figures in any document take `[width=,angle=,xshift=,yshift=]`.
 
+Mean with band: `suite.plot_mean(["run1","run2"], "x", "y", band="std"|"sem"|"minmax"|None, errorbars=False, new_sheet=True,
+title=..., label=..., style={"color": ...})` (several data objects, one y column) or `suite.plot_mean("wide", "t", ["a","b","c"], ...)`
+(one object, repeat columns) pushes a derived object "<label> (n=.. mean±err)" (x, mean, std, sem, err_min, err_max) and plots it
+as one trace with a translucent band (`band_alpha`). In the GUI the same is *Combine into mean ± error trace...*; the Trace Style tab
+switches band / bars / source afterwards.
+
 Defaults (tell the user): new subplots use 13 pt ticks / 15 pt axis labels / 16 pt title and real point sizes
 (`SheetModel.fig_real_points`); saved sheets keep theirs. The window fits the screen; F4 toggles the plot sidebar.
 

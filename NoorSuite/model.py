@@ -52,8 +52,9 @@ INDEX_COL = "__index__"   # x_col sentinel: use the row index as x
 # (TraceRef.show_errorbar), so "Scatter + errorbar" and "Line + errorbar" are both
 # just this plot type with that flag on. See "Errorbar overlay" below.
 PLOT_TYPES = ["Line", "Scatter", "Line+Scatter", "Step", "Bar"]
-ERROR_MODES = ["std", "minmax"]
-ERROR_MODE_LABELS = ["Std. deviation", "Min / max span"]
+ERROR_MODES = ["std", "sem", "minmax"]
+ERROR_MODE_LABELS = ["Std. deviation", "Std. error of the mean", "Min / max span"]
+ERR_COLUMN_ATTRS = ("yerr_col", "yerr_sem_col", "yerr_low_col", "yerr_high_col")
 LINE_STYLES = ["-", "--", "-.", ":"]
 LINE_STYLE_LABELS = ["Solid (-)", "Dashed (--)", "Dash-Dot (-.)", "Dotted (:)"]
 MARKERS = ["None", ".", "o", "s", "D", "d", "^", "v", "<", ">",
@@ -239,8 +240,8 @@ def aggregate_series(arrays: list) -> dict:
     one's own :attr:`TraceRef.scale_factor` -- a per-series baseline normalization via
     ``REL_INDEX_PREFIX``, say -- is already baked in if the caller wants that).
 
-    Returns ``{"mean", "std", "err_min", "err_max"}``, arrays the same length as the
-    input. ``err_min``/``err_max`` are already offsets from the mean (``mean - min`` /
+    Returns ``{"mean", "std", "sem", "err_min", "err_max"}`` (``sem`` = std / sqrt(n)),
+    arrays the same length as the input. ``err_min``/``err_max`` are already offsets from the mean (``mean - min`` /
     ``max - mean``), ready to feed straight into an asymmetric errorbar. Raises
     :class:`ValueError` for fewer than 2 arrays, or if their lengths differ.
     """
@@ -252,9 +253,11 @@ def aggregate_series(arrays: list) -> dict:
         raise ValueError(f"series have different lengths: {sorted(lengths)}")
     stack = np.column_stack(arrays)
     mean = stack.mean(axis=1)
+    std = stack.std(axis=1, ddof=1)
     return {
         "mean": mean,
-        "std": stack.std(axis=1, ddof=1),
+        "std": std,
+        "sem": std / np.sqrt(stack.shape[1]),
         "err_min": mean - stack.min(axis=1),
         "err_max": stack.max(axis=1) - mean,
     }
@@ -279,7 +282,7 @@ def split_into_repeats(values, n: int, layout: str = "block") -> dict:
       repeats of the same position in the cycle), giving ``n`` points (one per
       position), each summarizing ``len(values)/n`` repeats of it.
 
-    Returns ``{"mean", "std", "err_min", "err_max"}``. Raises :class:`ValueError` if
+    Returns ``{"mean", "std", "sem", "err_min", "err_max"}``. Raises :class:`ValueError` if
     ``n < 1``, ``len(values)`` isn't an exact multiple of ``n``, or ``layout`` isn't
     one of :data:`SPLIT_LAYOUTS`.
     """
@@ -298,6 +301,7 @@ def split_into_repeats(values, n: int, layout: str = "block") -> dict:
     return {
         "mean": mean,
         "std": std,
+        "sem": std / np.sqrt(stack.shape[axis]),
         "err_min": mean - stack.min(axis=axis),
         "err_max": stack.max(axis=axis) - mean,
     }
@@ -415,7 +419,7 @@ class TraceRef:
 
     _STYLE_FIELDS = ("plot_type", "color", "edge_color", "line_style", "line_width",
                      "marker", "marker_size", "alpha", "scale_factor",
-                     "show_errorbar", "yerr_mode", "sort_x")
+                     "show_errorbar", "yerr_mode", "sort_x", "show_band", "band_alpha")
 
     def __init__(self, data_id, x_col, y_col, label="", enabled=True):
         self.data_id = data_id
@@ -441,6 +445,11 @@ class TraceRef:
         # built by combining several repeat traces -- see app._combine_selected_traces);
         # yerr_mode picks which of them resolve_yerr() actually returns.
         self.show_errorbar = False
+        # Shaded band (mean +- error, drawn with fill_between under the line): independent of
+        # the error bars and of the plot type, fed by the same error columns / yerr_mode.
+        self.show_band = False
+        self.band_alpha = 0.25
+        self.yerr_sem_col = ""      # std. error of the mean, used when yerr_mode == "sem"
         self.yerr_col = ""          # symmetric error, used when yerr_mode == "std"
         self.yerr_low_col = ""      # offset below the mean (mean - min)
         self.yerr_high_col = ""     # offset above the mean (max - mean)
@@ -456,7 +465,8 @@ class TraceRef:
         """Whether this trace has error column(s) to show at all (regardless of
         whether :attr:`show_errorbar` is currently on) -- gates the "Show error bars"
         checkbox in the UI."""
-        return bool(self.yerr_col or (self.yerr_low_col and self.yerr_high_col))
+        return bool(self.yerr_col or self.yerr_sem_col
+                    or (self.yerr_low_col and self.yerr_high_col))
 
     @property
     def display_label(self) -> str:
@@ -466,7 +476,7 @@ class TraceRef:
         return {f: getattr(self, f) for f in self._STYLE_FIELDS}
 
     def apply_style(self, d: dict) -> None:
-        for f in self._STYLE_FIELDS:
+        for f in self._STYLE_FIELDS + ERR_COLUMN_ATTRS + ("label",):   # these ride along (API)
             if f in d and d[f] is not None:
                 setattr(self, f, d[f])
 
@@ -505,6 +515,10 @@ class TraceRef:
             lo = np.asarray(data_object.get(self.yerr_low_col), dtype=float) * scale
             hi = np.asarray(data_object.get(self.yerr_high_col), dtype=float) * scale
             return self._yerr_sorted(data_object, np.vstack([lo, hi]))
+        if self.yerr_mode == "sem" and self.yerr_sem_col:
+            return self._yerr_sorted(
+                data_object,
+                np.asarray(data_object.get(self.yerr_sem_col), dtype=float) * scale)
         if self.yerr_col:
             return self._yerr_sorted(
                 data_object,
@@ -515,7 +529,7 @@ class TraceRef:
         d = {"data_id": self.data_id, "x_col": self.x_col, "y_col": self.y_col,
              "label": self.label, "enabled": self.enabled,
              "yerr_col": self.yerr_col, "yerr_low_col": self.yerr_low_col,
-             "yerr_high_col": self.yerr_high_col}
+             "yerr_high_col": self.yerr_high_col, "yerr_sem_col": self.yerr_sem_col}
         d.update(self.style_dict())
         return d
 
@@ -526,6 +540,7 @@ class TraceRef:
         t.yerr_col = d.get("yerr_col", "")
         t.yerr_low_col = d.get("yerr_low_col", "")
         t.yerr_high_col = d.get("yerr_high_col", "")
+        t.yerr_sem_col = d.get("yerr_sem_col", "")
         t.apply_style(d)
         return t
 

@@ -41,7 +41,8 @@ _SHEET_COLUMNS = ["id", "name", "rows", "cols", "subplots", "tags", "duplicate_n
 
 
 _TRACE_OPTIONS = ("color", "edge_color", "line_style", "line_width", "marker",
-                  "marker_size", "alpha")
+                  "marker_size", "alpha", "show_band", "band_alpha", "show_errorbar", "yerr_mode",
+                  "yerr_col", "yerr_sem_col", "yerr_low_col", "yerr_high_col", "label")
 
 
 def _trace_style(plot_type, style, sort) -> dict:
@@ -473,6 +474,64 @@ class SciSuiteClient:
                                           x_tick_labels, y_tick_labels),
             "trace_style": _trace_style(plot_type, style, sort),
         })
+
+    def plot_mean(self, data, x=None, y=None, *, band="std", errorbars=False, label=None,
+                  name=None, plot_type="Line", style=None, band_alpha=0.25, sheet=None,
+                  subplot=0, new_sheet=False, **plot_options):
+        """Plot several repeat measurements as their mean with a shaded band around it.
+
+        ``data`` is either a list of data-object names that each hold column ``y`` (``x`` = the
+        shared x column, ``None`` = row index) or ONE data object / DataFrame with a list of
+        columns ``y`` (the repeats). The row-wise mean, std, sem (= std / sqrt(n)) and min / max
+        are pushed as one derived data object ``"<label> (n=.. mean±err)"`` and plotted as a
+        single trace. ``band`` = ``"std"`` | ``"sem"`` | ``"minmax"`` | ``None`` (shaded area
+        around the mean, translucent, ``band_alpha``); ``errorbars=True`` adds whiskers from
+        the same source. ``style`` / ``plot_type`` / ``sheet`` / ``new_sheet`` / ``title`` ...
+        as in :meth:`plot`. Returns the derived object's name.
+        """
+        import numpy as np
+        from .model import ERROR_MODES, aggregate_series
+        if band is not None and band not in ERROR_MODES:
+            raise ValueError(f"band must be one of {ERROR_MODES} or None")
+        try:
+            if isinstance(data, (list, tuple)) and data and all(isinstance(d, str) for d in data):
+                if not isinstance(y, str):
+                    raise ValueError("with several data objects pass ONE column name as y")
+                frames = [self.get_data(d) for d in data]
+                ys = [np.asarray(f[y], dtype=float) for f in frames]
+                xs = [np.asarray(f[x], dtype=float) if x else np.arange(len(f), dtype=float)
+                      for f in frames]
+                ylabel = y
+            else:
+                df = self.get_data(data) if isinstance(data, str) else pd.DataFrame(data)
+                cols = [y] if isinstance(y, str) else list(y or [])
+                if len(cols) < 2:
+                    raise ValueError("pass at least two columns y=[...] (the repeats)")
+                ys = [np.asarray(df[c], dtype=float) for c in cols]
+                xs = [np.asarray(df[x], dtype=float) if x else np.arange(len(df), dtype=float)]
+                ylabel = label or (data if isinstance(data, str) else "mean")
+        except KeyError as exc:
+            raise ValueError(f"column {exc} not found in the data") from None
+        if len(ys) < 2:
+            raise ValueError("need at least two series to take a mean")
+        if any(len(v) != len(xs[0]) or not np.allclose(v, xs[0], equal_nan=True) for v in xs):
+            raise ValueError("the series do not share the same x values")
+        agg = aggregate_series(ys)
+        label = label or ylabel
+        out_name = name or f"{label} (n={len(ys)} mean±err)"
+        derived = pd.DataFrame({"x": xs[0], "mean": agg["mean"], "std": agg["std"],
+                                "sem": agg["sem"], "err_min": agg["err_min"],
+                                "err_max": agg["err_max"]})
+        self.push_dataframe(derived, name=out_name, mode="update", tags=["mean"],
+                            notes=f"mean of {len(ys)} series ({', '.join(map(str, data)) if isinstance(data, (list, tuple)) else ylabel})")
+        st = dict(style or {})
+        st.update({"show_band": band is not None, "band_alpha": float(band_alpha),
+                   "show_errorbar": bool(errorbars), "yerr_mode": band or "std",
+                   "yerr_col": "std", "yerr_sem_col": "sem", "yerr_low_col": "err_min",
+                   "yerr_high_col": "err_max", "label": label})
+        self.plot(out_name, "x", "mean", sheet=sheet, subplot=subplot, new_sheet=new_sheet,
+                  plot_type=plot_type, style=st, **plot_options)
+        return out_name
 
     def organize_sheet(self, sheet, *, title=None, tags=None, notes=None, folder=None,
                        subplot=0, subplot_title=None, x_label=None, y_label=None,

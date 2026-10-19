@@ -563,8 +563,10 @@ class PlotSheet(QWidget):
                 before = set(ax.get_children())
                 dx, dy = x, y
                 if tref.plot_type == "Line" and not tref.show_errorbar \
-                        and len(x) >= THIN_MIN_POINTS:
+                        and not tref.show_band and len(x) >= THIN_MIN_POINTS:
                     dx, dy = self._thinned(x, y, sub)
+                if tref.show_band:                    # under the line, same layer
+                    self._draw_band(ax, tref, data, x, y)
                 self._draw_trace(ax, tref, dx, dy)
                 if tref.show_errorbar:
                     try:
@@ -790,6 +792,23 @@ class PlotSheet(QWidget):
             else:
                 ax.set_yticks(ticks)
                 ax.set_yticklabels(names)
+
+    def _draw_band(self, ax, tref, data, x, y):
+        """Shaded mean +- error area (``fill_between``): the trace's error source
+        (std / sem / min-max) as a translucent band in the trace's colour."""
+        try:
+            err = tref.resolve_yerr(data)
+        except Exception:
+            err = None
+        if err is None:
+            return
+        err = np.asarray(err, dtype=float)
+        lo, hi = (err[0], err[1]) if err.ndim == 2 else (err, err)
+        if len(lo) != len(y):
+            return
+        poly = ax.fill_between(x, y - lo, y + hi, color=tref.color, alpha=tref.band_alpha,
+                               linewidth=0, label="_nolegend_")
+        self.artist_map[poly] = tref
 
     def _draw_trace(self, ax, tref, x, y):
         marker = None if tref.marker == "None" else tref.marker

@@ -204,6 +204,14 @@ preview), text to edit the label. Objects are plain `\noorobj[x=..,y=..,w=..,h=.
 frame (positions in cm from the top-left corner), so everything stays editable in the text, in undo and in the
 PowerPoint export (native shapes, connectors, pictures, text boxes).
 
+**Mean with a shaded band.** *Combine into mean ± error trace...* (several selected traces, or one trace that holds
+repeats) now asks how to show the spread: **shaded band** (default), error bars, or both, and from which source: standard
+deviation, standard error of the mean (std / sqrt(n)) or min / max. The result is one trace in the colour of the first
+original (the derived data object also keeps `std`, `sem`, `err_min`, `err_max`). Every trace with error data has the same
+controls in its *Trace Style* tab (*Show shaded band*, *Band opacity*, *Error source*), so the choice can be changed
+afterwards. From a notebook: `suite.plot_mean(["run1", "run2", "run3"], "x", "y", band="sem", errorbars=False)` or
+`suite.plot_mean("wide", "t", ["a", "b", "c"], band="minmax")`.
+
 **Window and sidebar.** The window is never larger than the screen (on a laptop the plot sidebar used to sit beyond the
 screen edge). The sidebar can no longer be dragged to zero width; *Sidebar* in the toolbar (F4) shows / hides it and
 *Reset layout* brings back the default panel widths. Documents hide the sidebar while their tab is open and sheets bring
