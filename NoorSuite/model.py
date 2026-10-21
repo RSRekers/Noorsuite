@@ -1168,7 +1168,9 @@ class SheetModel:
 
     _FIG_FIELDS = ("fig_face_color", "fig_face_alpha", "fig_frame_on",
                    "fig_edge_color", "fig_edge_width", "fig_edge_style",
-                   "fig_width_cm", "fig_height_cm", "fig_real_points")
+                   "fig_width_cm", "fig_height_cm", "fig_real_points",
+                   "joint_legend", "joint_legend_ncol", "joint_legend_fontsize",
+                   "joint_legend_frame")
 
     def __init__(self, name="Sheet 1", rows=1, cols=1, sheet_id=None):
         self.sheet_id = sheet_id or _new_id()
@@ -1193,6 +1195,13 @@ class SheetModel:
         # document prints). False (older sheets): text sizes follow the figure's size relative to
         # an 8x6 inch figure and the grid, so small figures do not drown in text.
         self.fig_real_points = True      # new sheets: a 13 pt tick label is 13 pt on paper
+        # One legend for the whole figure instead of one per panel: "" (off) | "bottom" | "top" |
+        # "right" | "left". It lists every distinct trace label of all panels once; the per-panel
+        # legends are not drawn while it is on. ncol 0 = automatic (a row / column of entries).
+        self.joint_legend = ""
+        self.joint_legend_ncol = 0
+        self.joint_legend_fontsize = 11.0
+        self.joint_legend_frame = False
 
         self.tags: list[str] = []
         self.colormaps: list[ColorMap] = []   # custom colormaps owned by this sheet
@@ -1606,7 +1615,22 @@ def apply_sheet_annotations(sm, payload: dict, assets=None) -> None:
     if payload.get("name"):
         sm.name = payload["name"]
     if payload.get("grid"):
-        sm.set_grid(int(payload["grid"][0]), int(payload["grid"][1]))
+        r, c = int(payload["grid"][0]), int(payload["grid"][1])
+        if (r, c) != (sm.rows, sm.cols):
+            sm.set_grid(r, c)
+        # a grid of panels needs room: unless the figure size was chosen, scale it with the grid
+        # (otherwise 12 panels share one 12 x 8 cm figure and nothing is readable)
+        if not (sm.fig_width_cm and sm.fig_height_cm) and not payload.get("sheet_style", {}).get(
+                "size_cm", payload.get("sheet_style", {}).get("width_cm")):
+            from .latex import default_size_cm
+            sm.fig_width_cm, sm.fig_height_cm = default_size_cm(r, c)
+    if payload.get("sheet_style"):
+        apply_sheet_style(sm, payload["sheet_style"])
+    for idx, opts in (payload.get("subplot_style") or {}).items():
+        targets = range(len(sm.subplots)) if str(idx) == "all" else [int(idx)]
+        for i in targets:
+            if 0 <= i < len(sm.subplots):
+                apply_subplot_style(sm.subplots[i], opts)
     if payload.get("tags"):
         sm.tags = merge_tags(sm.tags, payload["tags"])
     if payload.get("notes"):
@@ -1682,6 +1706,45 @@ def tree_move_sheet(nodes: list, sheet_id: str, folder_path: list,
     return nodes
 
 
+def tree_folder_edit(nodes: list, path: list, action: str, new_name: str = "") -> list:
+    """Raw project tree with a folder created (``create``, parents too), renamed (``rename``) or deleted
+    (``delete``: its sheets and documents move up one level)."""
+    if action == "create":
+        level = nodes
+        for part in path:
+            folder = next((n for n in level if n.get("type") == "folder" and n.get("name") == part), None)
+            if folder is None:
+                folder = {"type": "folder", "id": _new_id(), "name": part, "children": []}
+                level.append(folder)
+            level = folder["children"]
+        return nodes
+    level, parent_level, folder = nodes, None, None
+    for part in path:
+        folder = next((n for n in level if n.get("type") == "folder" and n.get("name") == part), None)
+        if folder is None:
+            raise ValueError("no folder " + "/".join(path))
+        parent_level, level = level, folder["children"]
+    if folder is None:
+        raise ValueError("a folder path is required")
+    if action == "rename":
+        folder["name"] = new_name
+    else:
+        i = parent_level.index(folder)
+        parent_level[i:i + 1] = folder.get("children", [])
+    return nodes
+
+
+def tree_insert_after(nodes: list, sheet_id: str, new_node: dict) -> bool:
+    """Put ``new_node`` right behind the sheet node ``sheet_id`` (same folder); False if not found."""
+    for i, n in enumerate(nodes):
+        if n.get("type") == "sheet" and n.get("sheet_id") == sheet_id:
+            nodes.insert(i + 1, new_node)
+            return True
+        if n.get("type") == "folder" and tree_insert_after(n.get("children", []), sheet_id, new_node):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Copying subplot style / duplicating sheets (shared by the GUI and tests)
 # ---------------------------------------------------------------------------
@@ -1692,6 +1755,168 @@ SUBPLOT_LIMIT_FIELDS = ("x_min", "x_max", "y_min", "y_max")
 SUBPLOT_STYLE_FIELDS = tuple(
     f for f in SubplotModel._FIELDS
     if f not in SUBPLOT_LABEL_FIELDS + SUBPLOT_LIMIT_FIELDS)
+
+
+# ---------------------------------------------------------------------------
+# Styling a subplot / sheet from the API (client, CLI, offline backend): every field, validated
+# ---------------------------------------------------------------------------
+AXIS_SCALES = ("linear", "log", "symlog", "logit")
+# friendly names -> SubplotModel fields (the client and the CLI accept both)
+SUBPLOT_STYLE_ALIASES = {
+    "xscale": "x_scale", "yscale": "y_scale", "grid": "show_grid", "legend": "legend_visible",
+    "tick_size": "tick_label_size", "ticks": "tick_label_size", "title_size": "title_fontsize",
+    "xlabel_size": "xlabel_fontsize", "ylabel_size": "ylabel_fontsize",
+    "legend_size": "legend_fontsize", "background": "face_color", "bg": "face_color",
+    "content_only": "bare",
+}
+
+
+def _truthy(v) -> bool:
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("1", "true", "yes", "on", "y"):
+            return True
+        if s in ("0", "false", "no", "off", "n", ""):
+            return False
+        raise ValueError(f"not a yes / no value: {v!r}")
+    return bool(v)
+
+
+def expand_subplot_style(opts: dict) -> dict:
+    """Friendly options -> ``SubplotModel`` fields. Besides the aliases above: ``font_size`` sets
+    ticks / axis labels / title / legend together (labels = font size, title +10 %, legend -15 %),
+    ``label_size`` both axis labels, ``xlim`` / ``ylim`` = (min, max) (``None`` end = automatic),
+    ``log=True`` / ``logx`` / ``logy`` switch the axes to log scale."""
+    out: dict = {}
+    for key, val in dict(opts or {}).items():
+        if val is None:
+            continue
+        if key == "font_size":
+            fs = float(val)
+            out.update(tick_label_size=fs, xlabel_fontsize=fs, ylabel_fontsize=fs,
+                       title_fontsize=round(fs * 1.1, 2), legend_fontsize=round(fs * 0.85, 2))
+        elif key == "label_size":
+            out.update(xlabel_fontsize=float(val), ylabel_fontsize=float(val))
+        elif key in ("xlim", "ylim"):
+            lo, hi = val
+            out[key[0] + "_min"] = None if lo is None else float(lo)
+            out[key[0] + "_max"] = None if hi is None else float(hi)
+        elif key == "log":
+            if _truthy(val):
+                out.update(x_scale="log", y_scale="log")
+        elif key in ("logx", "logy"):
+            out[key[-1] + "_scale"] = "log" if _truthy(val) else "linear"
+        else:
+            out[SUBPLOT_STYLE_ALIASES.get(key, key)] = val
+    return out
+
+
+def _coerce_field(field: str, default, value):
+    if field in SUBPLOT_LIMIT_FIELDS:
+        return None if value in (None, "", "auto") else float(value)
+    if isinstance(default, bool):
+        return _truthy(value)
+    if isinstance(default, int):
+        return int(float(value))
+    if isinstance(default, float):
+        return float(value)
+    if field in ("x_tick_labels", "y_tick_labels"):
+        return format_tick_labels(value)
+    return str(value)
+
+
+def check_subplot_style(fields: dict) -> dict:
+    """Validated / coerced copy of ``fields`` (``SubplotModel`` field names); ``ValueError`` names
+    the unknown field and lists the valid ones."""
+    ref = SubplotModel()
+    valid = [f for f in SubplotModel._FIELDS]
+    out = {}
+    for key, val in fields.items():
+        if key not in valid:
+            raise ValueError(f"unknown subplot option {key!r}; valid: "
+                             + ", ".join(sorted(set(valid) | set(SUBPLOT_STYLE_ALIASES)
+                                                | {"font_size", "label_size", "xlim", "ylim", "log",
+                                                   "logx", "logy"})))
+        try:
+            out[key] = _coerce_field(key, getattr(ref, key), val)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"bad value {val!r} for {key!r}: {exc}") from None
+    for k in ("x_scale", "y_scale"):
+        if k in out and out[k] not in AXIS_SCALES:
+            raise ValueError(f"{k} must be one of {AXIS_SCALES}, not {out[k]!r}")
+    for k in ("aspect",):
+        if k in out and out[k] not in ("auto", "equal", "custom"):
+            raise ValueError("aspect must be 'auto', 'equal' or 'custom'")
+    return out
+
+
+def apply_subplot_style(sub, fields: dict) -> None:
+    for key, val in check_subplot_style(expand_subplot_style(fields)).items():
+        setattr(sub, key, val)
+
+
+SHEET_STYLE_ALIASES = {"width_cm": "fig_width_cm", "height_cm": "fig_height_cm",
+                       "background": "fig_face_color", "real_points": "fig_real_points",
+                       "frame": "fig_frame_on", "joint_legend_size": "joint_legend_fontsize"}
+JOINT_LEGEND_POSITIONS = ("", "bottom", "top", "right", "left")
+# sheet-level options that may arrive mixed into a plot call's axes options
+SHEET_LEVEL_OPTIONS = ("joint_legend", "joint_legend_ncol", "joint_legend_size",
+                       "joint_legend_fontsize", "joint_legend_frame")
+
+
+def check_sheet_style(fields: dict) -> dict:
+    """Validated sheet options: any ``SheetModel._FIG_FIELDS`` name or alias, ``size_cm`` =
+    (width, height) (``None`` = automatic), ``rows`` / ``cols`` (the grid)."""
+    ref = SheetModel("x")
+    out: dict = {}
+    for key, val in dict(fields or {}).items():
+        if val is None and key != "size_cm":
+            continue
+        if key == "size_cm":
+            if val is None:
+                out["fig_width_cm"] = out["fig_height_cm"] = None
+            else:
+                w, h = val
+                out["fig_width_cm"], out["fig_height_cm"] = float(w), float(h)
+            continue
+        if key in ("rows", "cols"):
+            n = int(val)
+            if not 1 <= n <= 6:
+                raise ValueError(f"{key} must be between 1 and 6")
+            out[key] = n
+            continue
+        name = SHEET_STYLE_ALIASES.get(key, key)
+        if name not in SheetModel._FIG_FIELDS:
+            raise ValueError(f"unknown sheet option {key!r}; valid: rows, cols, size_cm, "
+                             + ", ".join(sorted(set(SheetModel._FIG_FIELDS)
+                                                | set(SHEET_STYLE_ALIASES))))
+        default = getattr(ref, name)
+        if name in ("fig_width_cm", "fig_height_cm"):
+            out[name] = float(val)
+        elif name == "joint_legend":
+            pos = "" if val in (False, "none", "off", "None") else (
+                "bottom" if val is True else str(val).lower())
+            if pos not in JOINT_LEGEND_POSITIONS:
+                raise ValueError(f"joint_legend must be one of {JOINT_LEGEND_POSITIONS[1:]} or none")
+            out[name] = pos
+        elif isinstance(default, bool):
+            out[name] = _truthy(val)
+        elif isinstance(default, int):
+            out[name] = int(float(val))
+        elif isinstance(default, float):
+            out[name] = float(val)
+        else:
+            out[name] = str(val)
+    return out
+
+
+def apply_sheet_style(sm, fields: dict) -> None:
+    st = check_sheet_style(fields)
+    rows, cols = st.pop("rows", sm.rows), st.pop("cols", sm.cols)
+    if (rows, cols) != (sm.rows, sm.cols):
+        sm.set_grid(rows, cols)
+    for key, val in st.items():
+        setattr(sm, key, val)
 
 
 def copy_subplot_style(src, dst, include_labels=False, include_limits=False) -> None:

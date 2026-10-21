@@ -1004,7 +1004,8 @@ class FigureStyleWidget(QWidget):
 
     _FIELDS = ("fig_face_color", "fig_face_alpha", "fig_frame_on",
                "fig_edge_color", "fig_edge_width", "fig_edge_style",
-               "fig_width_cm", "fig_height_cm", "fig_real_points")
+               "fig_width_cm", "fig_height_cm", "fig_real_points",
+               "joint_legend", "joint_legend_ncol", "joint_legend_fontsize", "joint_legend_frame")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1058,6 +1059,22 @@ class FigureStyleWidget(QWidget):
             "Off (older sheets): text sizes scale with the figure size and the subplot grid.")
         self.real_points.toggled.connect(self._push)
         form.addRow("", self.real_points)
+        self.joint_combo = QComboBox()
+        self.joint_combo.addItems(["off (a legend per panel)", "bottom", "top", "right", "left"])
+        self.joint_combo.setToolTip("ONE legend for all panels: every distinct trace label once. "
+                                    "The per-panel legends are hidden while it is on.")
+        self.joint_combo.currentIndexChanged.connect(self._push)
+        form.addRow("Joint legend:", self.joint_combo)
+        self.joint_ncol = QSpinBox()
+        self.joint_ncol.setRange(0, 12)
+        self.joint_ncol.setSpecialValueText("auto")
+        self.joint_ncol.valueChanged.connect(self._push)
+        self.joint_size = _spin(4.0, 40.0, 1.0)
+        self.joint_size.valueChanged.connect(self._push)
+        form.addRow("   columns / font size:", _pair(self.joint_ncol, self.joint_size))
+        self.joint_frame = QCheckBox("Frame around the joint legend")
+        self.joint_frame.toggled.connect(self._push)
+        form.addRow("", self.joint_frame)
         hint = QLabel("Both set: the figure keeps that width:height shape on screen "
                       "(letterboxed to fit the tab) and exports at exactly that size. "
                       "Blank: fills the tab; PDF / PNG then use the default 12 x 8 cm. The screen "
@@ -1084,6 +1101,11 @@ class FigureStyleWidget(QWidget):
             self.width_cm_edit.setText(_fmt(s.fig_width_cm))
             self.height_cm_edit.setText(_fmt(s.fig_height_cm))
             self.real_points.setChecked(bool(getattr(s, "fig_real_points", False)))
+            pos = ("", "bottom", "top", "right", "left")
+            self.joint_combo.setCurrentIndex(pos.index(s.joint_legend) if s.joint_legend in pos else 0)
+            self.joint_ncol.setValue(int(s.joint_legend_ncol))
+            self.joint_size.setValue(float(s.joint_legend_fontsize))
+            self.joint_frame.setChecked(bool(s.joint_legend_frame))
         finally:
             self._loading = False
 
@@ -1112,6 +1134,10 @@ class FigureStyleWidget(QWidget):
         s.fig_width_cm = _parse_float_or_none(self.width_cm_edit.text())
         s.fig_height_cm = _parse_float_or_none(self.height_cm_edit.text())
         s.fig_real_points = self.real_points.isChecked()
+        s.joint_legend = ("", "bottom", "top", "right", "left")[max(0, self.joint_combo.currentIndex())]
+        s.joint_legend_ncol = self.joint_ncol.value()
+        s.joint_legend_fontsize = self.joint_size.value()
+        s.joint_legend_frame = self.joint_frame.isChecked()
         self.changed.emit()
 
 

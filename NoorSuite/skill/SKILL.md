@@ -215,6 +215,13 @@ switches layout; in ACS / Elsevier classes the built copy converts it automatica
 those classes by hand). `suite.push_si_document("Paper")` creates "Paper - SI" (same layout and authors,
 S-numbered counters).
 
+### Font sizes on slides
+
+Slide text is plain LaTeX. Per line: `{\fontsize{24}{28.8}\selectfont text}` (the slide editor writes exactly this when you click text and
+change its size). Per slide: a line `\noorfont{body=22}` right after `\begin{frame}` sets the body / list sizes of that slide. For all
+slides: `\noorslide{title-size=28,body-size=20}` in the preamble. A title size must be set on the title text itself
+(`\begin{frame}{{\fontsize{32}{38.4}\selectfont Title}}`), not inside the frame.
+
 ### Tables from data objects
 
 `suite.push_table("IV summary", "IV A3", columns=["V", ("I", "Current (mA)"), {"col": "R", "fmt": "sci",
@@ -348,6 +355,30 @@ Reads `.csv/.tsv/.txt/.xlsx/.json/.parquet` (DataFrame) and `.npy` (image). `--p
 (use `:y` or `index:y` for the row index), `--sheet NAME|ID`, `--new-sheet`, `--subplot N`,
 `--title/--sheet-tags/--sheet-notes/--folder/--subplot-title/--x-label/--y-label` (sheet
 organization), `--notes` (data), `--plot-type Scatter`, `--sort`, `--x-tick-labels "0=RT; 1=4 K"` / `--y-tick-labels`, `--update`, `--project FILE`, `--port N`.
+
+### Joint legend and combining traces
+
+`joint_legend="bottom" | "top" | "right" | "left"` (on `plot` / `organize_sheet` / `style_sheet`; `"none"` removes it; `joint_legend_ncol`, `joint_legend_size`,
+`joint_legend_frame`) draws ONE legend for a multi-panel sheet listing every distinct trace label once; the per-panel legends disappear. CLI: `--joint-legend bottom`.
+`suite.combine_traces(sheet, ["r1", "r2", "r3"] | "all", subplot=0, display="band" | "bars" | "both", mode="std" | "sem" | "minmax", plot_type="Line", label=None,
+keep_originals=False)` merges traces that share their x values into one mean trace with shaded spread / error bars (new data object `"<label> (n=3 mean±err)"`);
+`split=N, layout="block" | "sequence"` instead takes ONE trace that holds N repeats per condition. CLI: `api combine S --trace r1,r2,r3 --display both --mode sem`.
+Normalizing traces = `restyle_traces(sheet, scale_factor="relidx:pct:0")` (CLI `api trace-style S --scale-factor relidx:pct:0`).
+
+### Axes, fonts, log axes, legends, grids (every plotting call)
+
+`suite.plot(..., yscale="log", logx=True, legend=False, font_size=14, tick_size=, label_size=, title_size=, legend_size=, xlim=(1, 50), ylim=(None, 9),
+show_grid=False, aspect="equal", background="#fafafa", spine_width=1.5)` -- any `SubplotModel` field works, a wrong name raises `ValueError` listing them.
+`grid=(rows, cols)` arranges the panels of the sheet (the figure grows with the grid: 12 panels = 39 x 20 cm; `size_cm=(w, h)` overrides), `subplot=i` picks the
+panel, `all_subplots=True` applies the options to every panel. The same keywords work on `show_image`, `heatmap` and `organize_sheet`.
+Afterwards: `suite.style_subplot(sheet, "all" | i | [i, j], **options)`, `suite.style_sheet(sheet, rows=, cols=, size_cm=, background=)`,
+`suite.restyle_traces(sheet, trace="all" | index | "label", subplot=0, color=, line_width=, marker=, plot_type=, label=, enabled=False, scale_factor=0.5)`,
+`suite.remove_traces(...)`, `suite.move_trace(sheet, trace, to)`, `suite.new_sheet(name, grid=, size_cm=, folder=)`, `suite.duplicate_sheet(sheet, name)`,
+`suite.folder("A/B", "create" | "rename" | "delete", new_name=)`, `suite.add_colormap(name, ["#000", "#f80", "#ff8"])` / `use_colormap(sheet, name)`
+(images / heatmaps take `style={"cmap": name}`), `suite.save_project(path)`, `suite.export_figure(sheet, "fig.png" | ".pdf" | ".svg", dpi=300, size_cm=None)`.
+
+CLI: `{{PYTHON}} -m NoorSuite insert data.csv --plot x:y --new-sheet --yscale log --no-legend --font-size 14 --xlim 1,50 --panels 3x4 --all-panels --set spine_width=1.5`,
+and `api plot|style|trace-style|trace-remove|trace-move|sheet|folder|colormap|save|open|export|info` (every command takes the same look options).
 
 ### `api`: every other action from the command line
 

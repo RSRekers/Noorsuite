@@ -67,12 +67,14 @@ def main_tags(data: dict, names=("main.tex",)) -> set:
     return {t for t, n in data["inputs"].items() if Path(n).name in names}
 
 
-def locate(data: dict, page: int, x: float, y: float, names=("main.tex",)):
+def locate(data: dict, page: int, x: float, y: float, names=("main.tex",), text_only=False):
     """Line (1-based) of the main file closest to the point, or None. ``page`` is 1-based."""
     tags = main_tags(data, names)
     best, best_d = None, None
     for kind, tag, ln, rx, ry, w, h, d in data["pages"].get(page, []):
         if tag not in tags or ln <= 0 or kind in "[(":    # boxes carry the paragraph's end line
+            continue
+        if text_only and (h + d > 90 or w > 800):         # page-sized void boxes of \end{frame}
             continue
         pts = [(rx, ry)]
         if kind in ("h", "k") and w:
@@ -83,6 +85,22 @@ def locate(data: dict, page: int, x: float, y: float, names=("main.tex",)):
             if best_d is None or dist < best_d:
                 best, best_d = ln, dist
     return best
+
+
+def line_rect(data: dict, page: int, line: int, names=("main.tex",)):
+    """Bounding box ``(x, y, w, h)`` in bp (top-left origin) of everything set from source line
+    ``line`` (1-based, build copy) on ``page`` -- the highlight of a clicked text element."""
+    tags = main_tags(data, names)
+    x0 = y0 = x1 = y1 = None
+    for kind, tag, ln, rx, ry, w, h, d in data["pages"].get(page, []):
+        if tag not in tags or ln != line or kind in "[(" or not w:
+            continue
+        top, bottom = ry - h, ry + d
+        x0 = rx if x0 is None else min(x0, rx)
+        x1 = rx + w if x1 is None else max(x1, rx + w)
+        y0 = top if y0 is None else min(y0, top)
+        y1 = bottom if y1 is None else max(y1, bottom)
+    return None if x0 is None else (x0, y0, x1 - x0, y1 - y0)
 
 
 def match_line(build_lines: list, source_lines: list, line: int) -> int:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPointF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QPixmap
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDialo
                              QToolButton, QVBoxLayout, QWidget)
 
 from . import slideobjects as so
+from . import slidetext as stx
 from .slidecanvas import SlideCanvas
 
 _TITLE_RE = re.compile(r"\\begin\{frame\}\s*(?:<[^>]*>)?\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
@@ -80,7 +81,8 @@ class SlideSetupDialog(QDialog):
     """Per-document slide defaults (``\\noorslide{...}``): title, body and number placement."""
 
     FIELDS = [("title-dx", "Title: shift right (cm)"), ("title-dy", "Title: shift down (cm)"),
-              ("title-size", "Title: font size (pt)"), ("body-top", "Body: extra space above (cm)"),
+              ("title-size", "Title: font size (pt)"), ("body-size", "Body text: font size (pt)"),
+              ("body-top", "Body: extra space above (cm)"),
               ("margin-left", "Text margin left (cm)"), ("margin-right", "Text margin right (cm)"),
               ("number-x", "Title slide number: x from left (cm)"),
               ("number-y", "Title slide number: y from top (cm)"),
@@ -144,6 +146,8 @@ class SlideEditor(QWidget):
         self.canvas.duplicateRequested.connect(self.duplicate_object)
         self.canvas.reorderRequested.connect(self.reorder_object)
         self.canvas.pasteRequested.connect(self.paste_picture)
+        self.canvas.pageClicked.connect(self._page_clicked)
+        self._text_line = None                 # source line of the clicked text element
 
         self.frame_combo = QComboBox()
         self.frame_combo.currentIndexChanged.connect(self._frame_chosen)
@@ -185,22 +189,32 @@ class SlideEditor(QWidget):
         tools.addWidget(setup_b)
 
         self._build_props()
+        self._build_text_panel()
+        self.side = QWidget()
+        sl = QVBoxLayout(self.side)
+        sl.setContentsMargins(2, 2, 2, 2)
+        sl.addWidget(self.slide_box)
+        sl.addWidget(self.text_box)
+        sl.addWidget(self.props)
+        sl.addStretch(1)
         body = QHBoxLayout()
         body.addWidget(self.canvas, 1)
         sc = QScrollArea()
         sc.setWidgetResizable(True)
-        sc.setWidget(self.props)
-        sc.setFixedWidth(250)
+        sc.setWidget(self.side)
+        sc.setFixedWidth(270)
         body.addWidget(sc)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.addLayout(top)
         lay.addLayout(tools)
         lay.addLayout(body, 1)
-        self.hint = QLabel("Drag to move, handles to scale, round handle to rotate (Shift: aspect / "
+        self.hint = QLabel("Click an object to select it (hover outlines what a click selects), drag "
+                           "to move, handles to scale, round handle to rotate (Shift: aspect / "
                            "15\u00B0 steps), arrow keys nudge, Del removes, Ctrl+D duplicates, "
-                           "Ctrl+[ / ] changes the stacking order. Double-click opens graphs and "
-                           "SVGs for editing.")
+                           "Ctrl+[ / ] changes the stacking order. Click ordinary slide text to "
+                           "restyle it; double-click text to jump to it in the editor, a graph / SVG "
+                           "to edit it.")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color:#777; font-size:11px;")
         lay.addWidget(self.hint)
@@ -275,7 +289,185 @@ class SlideEditor(QWidget):
         rm.clicked.connect(lambda: self.delete_object(self.canvas.sel))
         for b in (up, down, dup, rm):
             f.addRow(b)
-        self.props.setEnabled(False)
+        self.props.setVisible(False)
+
+    # ---------------------------------------------------------------- slide text (sizes, clicked text)
+    def _size_spin(self, special="theme default"):
+        s = QDoubleSpinBox()
+        s.setRange(0, 200)
+        s.setDecimals(0)
+        s.setSingleStep(2)
+        s.setSuffix(" pt")
+        s.setSpecialValueText(special)
+        s.setKeyboardTracking(False)
+        return s
+
+    def _build_text_panel(self):
+        from PyQt6.QtWidgets import QGroupBox
+        self.slide_box = QGroupBox("This slide")
+        f = QFormLayout(self.slide_box)
+        self.title_size = self._size_spin()
+        self.body_size = self._size_spin()
+        self.title_size.valueChanged.connect(self._slide_fonts_edited)
+        self.body_size.valueChanged.connect(self._slide_fonts_edited)
+        f.addRow("Title size", self.title_size)
+        f.addRow("Body text size", self.body_size)
+        all_b = QPushButton("Use these sizes for all slides")
+        all_b.setToolTip("Writes the title / body size into the slide setup (\\noorslide{...}); "
+                         "slides with their own size keep it")
+        all_b.clicked.connect(self._sizes_for_all)
+        f.addRow(all_b)
+        self.text_box = QGroupBox("Clicked text")
+        g = QFormLayout(self.text_box)
+        self.text_label = QLabel("Click text on the slide.")
+        self.text_label.setWordWrap(True)
+        g.addRow(self.text_label)
+        self.t_size = self._size_spin()
+        self.t_bold = QCheckBox("bold")
+        self.t_italic = QCheckBox("italic")
+        self.t_color = ColorButton(allow_none=True)
+        self.t_size.valueChanged.connect(self._text_style_edited)
+        self.t_bold.toggled.connect(self._text_style_edited)
+        self.t_italic.toggled.connect(self._text_style_edited)
+        self.t_color.changed.connect(self._text_style_edited)
+        g.addRow("Size", self.t_size)
+        g.addRow(self.t_bold, self.t_italic)
+        g.addRow("Colour  (right-click: default)", self.t_color)
+        goto = self.t_goto = QPushButton("Show in the text")
+        goto.clicked.connect(lambda: self._text_line is not None
+                             and self.tab.select_source_line(self._text_line))
+        g.addRow(goto)
+        for w in (self.t_size, self.t_bold, self.t_italic, self.t_color, goto):
+            w.setEnabled(False)
+
+    def _frame_lines(self):
+        """(first, last) source line of the current frame."""
+        src = self.tab.source()
+        fr = so.frames(src)
+        if not 0 <= self.frame < len(fr):
+            return None
+        s, e = fr[self.frame]
+        return src.count("\n", 0, s), src.count("\n", 0, e)
+
+    def _load_slide_fonts(self):
+        """Fill the 'This slide' boxes from the source."""
+        master = self.frame == so.MASTER
+        self.slide_box.setVisible(not master)
+        if master:
+            return
+        src = self.tab.source()
+        self._loading = True
+        try:
+            tl = stx.frame_title_line(src, self.frame)
+            st = stx.line_style(src, tl) if tl is not None else None
+            self.title_size.setValue(float(st["size"] or 0) if st else 0)
+            self.title_size.setEnabled(tl is not None)
+            self.body_size.setValue(float(stx.read_frame_fonts(src, self.frame).get("body", 0)))
+        finally:
+            self._loading = False
+
+    def _slide_fonts_edited(self, *_):
+        if self._loading or self.frame == so.MASTER:
+            return
+        src = self.tab.source()
+        tl = stx.frame_title_line(src, self.frame)
+        if tl is not None:
+            src = stx.restyle_line(src, tl, size=self.title_size.value() or None)
+        src = stx.set_frame_fonts(src, self.frame, body=self.body_size.value() or None)
+        self.tab.apply_source(src)
+        self.refresh()
+
+    def _sizes_for_all(self):
+        src = self.tab.source()
+        vals = so.read_setup(src)
+        vals["title-size"] = f"{self.title_size.value():g}" if self.title_size.value() else ""
+        vals["body-size"] = f"{self.body_size.value():g}" if self.body_size.value() else ""
+        self.tab.apply_source(so.write_setup(src, vals))
+        self.refresh()
+
+    def _page_clicked(self, x_cm, y_cm, double):
+        """Click on the slide where no object is: find the text there (SyncTeX) and offer its style."""
+        self._text_line = None
+        self.canvas.set_marker(None)
+        self._set_text_controls(None)
+        if self.frame == so.MASTER:
+            return
+        built = getattr(self.tab, "built_source", None)
+        page = self._frame_page(built) if built else None
+        if page is None:
+            return
+        k = 72.0 / 2.54
+        x, y = x_cm * k, y_cm * k
+        shown, rect = self._pdf_line_at(page, x, y)
+        span = self._frame_lines()
+        src = self.tab.source()
+        if not shown or span is None:
+            return
+        # SyncTeX cannot tell lines apart inside a Beamer frame (the body is typeset at
+        # \end{frame}), so the text itself is matched against the frame's source lines
+        line = stx.match_pdf_text(src, span[0], span[1], shown)
+        if line is None:
+            return
+        style = stx.line_style(src, line)
+        c = 2.54 / 72.0
+        self.canvas.set_marker((rect.x() * c, rect.y() * c, rect.width() * c, rect.height() * c))
+        if style is None:
+            self.text_label.setText("This line is not text (it is a command).")
+            return
+        self._text_line = line
+        self._set_text_controls(style)
+        if double:
+            self.tab.select_source_line(line)
+
+    def _pdf_line_at(self, page: int, x: float, y: float):
+        """(text, QRectF in points) of the visual line of the compiled page under ``(x, y)``."""
+        text = self._doc.getAllText(page).text()
+        best, best_d = ("", None), None
+        for m in re.finditer(r"[^\r\n]+", text):
+            raw = m.group(0)
+            if not raw.strip():
+                continue
+            r = self._doc.getSelectionAtIndex(page, m.start(), len(raw)).boundingRectangle()
+            if r.width() <= 0:
+                continue
+            dy = 0.0 if r.top() <= y <= r.bottom() else min(abs(y - r.top()), abs(y - r.bottom()))
+            dx = 0.0 if r.left() <= x <= r.right() else min(abs(x - r.left()), abs(x - r.right()))
+            d = dy * 3 + dx * 0.2
+            if dy <= 6 and (best_d is None or d < best_d):
+                best, best_d = (raw, r), d
+        return best
+
+    def _set_text_controls(self, style):
+        on = style is not None
+        for w in (self.t_size, self.t_bold, self.t_italic, self.t_color):
+            w.setEnabled(on)
+        self.t_goto.setEnabled(on)
+        self._loading = True
+        try:
+            if not on:
+                self.text_label.setText("Click text on the slide.")
+                return
+            kind = {"item": "List item", "title": "Title", "block": "Block title"}.get(
+                style["kind"], "Text")
+            txt = style["text"].strip()
+            self.text_label.setText(f"{kind}: {txt[:60]}{'...' if len(txt) > 60 else ''}")
+            self.t_size.setValue(float(style["size"] or 0))
+            self.t_bold.setChecked(bool(style["bold"]))
+            self.t_italic.setChecked(bool(style["italic"]))
+            self.t_color.set_value(style["color"] or "none")
+        finally:
+            self._loading = False
+
+    def _text_style_edited(self, *_):
+        if self._loading or self._text_line is None:
+            return
+        col = self.t_color.value()
+        src = stx.restyle_line(self.tab.source(), self._text_line,
+                               size=self.t_size.value() or None, bold=self.t_bold.isChecked(),
+                               italic=self.t_italic.isChecked(),
+                               color="" if col == "none" else col)
+        self.tab.apply_source(src)
+        self.refresh()
 
     @staticmethod
     def _focused(w) -> bool:
@@ -328,8 +520,11 @@ class SlideEditor(QWidget):
         return kind
 
     def _on_selected(self, index):
-        self.props.setEnabled(index >= 0)
+        self.props.setVisible(index >= 0)
         if index >= 0:
+            self._text_line = None
+            self.canvas.set_marker(None)
+            self._set_text_controls(None)
             self._show_props(index, self.canvas.objs[index])
         else:
             self.kind_label.setText("")
@@ -751,9 +946,10 @@ class SlideEditor(QWidget):
             self.canvas.select(select)
         if 0 <= self.canvas.sel < len(objs):
             self._show_props(self.canvas.sel, self.canvas.objs[self.canvas.sel])
-            self.props.setEnabled(True)
+            self.props.setVisible(True)
         else:
-            self.props.setEnabled(False)
+            self.props.setVisible(False)
+        self._load_slide_fonts()
 
     def _cover_for(self, obj, img: QImage):
         from .slidecanvas import to_mm

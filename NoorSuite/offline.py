@@ -32,7 +32,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_LIST_REFERENCES, ACTION_REFERENCES, ACTION_ASSET,
                        ACTION_LIST_ASSETS, ACTION_TABLE, ACTION_LIST_TABLES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
-                       ACTION_PING,
+                       ACTION_PING, ACTION_EDIT, ACTION_EXPORT,
                        ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET, ACTION_REMOVE_TRACE)
 
 SESSION_FILE = os.path.expanduser("~/.scisuite_session.json")
@@ -106,6 +106,8 @@ class OfflineBackend:
             ACTION_REFERENCES: self._references,
             ACTION_ASSET: self._asset,
             ACTION_TABLE: self._table,
+            ACTION_EDIT: self._edit,
+            ACTION_EXPORT: self._export,
         }.get(action)
         if mutate is None:
             return {"status": "error", "message": f"unknown action {action!r}"}
@@ -400,6 +402,71 @@ class OfflineBackend:
         self.project.tree = prune(self.project.tree)
         if self.project.active_sheet_id == sm.sheet_id:
             self.project.active_sheet_id = ""
+
+    def _edit(self, p):
+        from . import edits
+        from .model import duplicate_sheet_model, split_folder_path, tree_folder_edit, tree_insert_after
+        try:
+            p = edits.check_edit(p)
+            op = p["op"]
+            if op == "combine_traces":
+                sm = self._find_sheet(p.get("sheet"))
+                if sm is None:
+                    raise ValueError(f"no sheet matching {p.get('sheet')!r}")
+                obj, _msg = edits.combine_traces(sm, p, {o.id: o for o in self.project.data_objects})
+                self.project.data_objects.append(obj)
+            elif op in ("trace_style", "remove_trace", "move_trace", "colormap"):
+                sm = self._find_sheet(p.get("sheet")) if p.get("sheet") else None
+                if sm is None and not (op == "colormap" and p.get("do") in ("add", "remove")):
+                    raise ValueError(f"no sheet matching {p.get('sheet')!r}")
+                if op == "colormap":
+                    edits.edit_colormap(p, self.project.colormaps, sm)
+                else:
+                    {"trace_style": edits.edit_trace_style, "remove_trace": edits.edit_remove_trace,
+                     "move_trace": edits.edit_move_trace}[op](sm, p)
+            elif op == "new_sheet":
+                sm = self._new_sheet(p.get("name") or None)
+                org = {k: p[k] for k in ("grid", "sheet_style", "folder", "tags", "notes") if p.get(k)}
+                self._apply_organize(sm, org)
+            elif op == "duplicate_sheet":
+                sm = self._find_sheet(p.get("sheet"))
+                if sm is None:
+                    raise ValueError(f"no sheet matching {p.get('sheet')!r}")
+                new = duplicate_sheet_model(sm, p.get("name") or None)
+                self.project.sheets.append(new)
+                if not tree_insert_after(self.project.tree, sm.sheet_id,
+                                         {"type": "sheet", "sheet_id": new.sheet_id}):
+                    self.project.tree.append({"type": "sheet", "sheet_id": new.sheet_id})
+            elif op == "folder":
+                self.project.tree = tree_folder_edit(self.project.tree, split_folder_path(p["path"]),
+                                                     p["do"], p.get("new_name", ""))
+            elif op == "save_project":
+                self.project.save(os.path.abspath(os.path.expanduser(p["path"])), {})
+            else:
+                raise ValueError(f"{op!r} needs the running GUI")
+        except (ValueError, KeyError, IndexError, OSError) as exc:
+            return {"status": "error", "message": str(exc)}
+
+    def _export(self, p):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        self._qapp = QApplication.instance() or QApplication([])
+        from . import colormap as colormap_mod
+        from .sheet import export_sheet_file
+        sm = self._find_sheet(p.get("sheet"))
+        if sm is None:
+            return {"status": "error", "message": f"no sheet matching {p.get('sheet')!r}"}
+        colormap_mod.set_library(self.project.colormaps)
+        path = os.path.abspath(os.path.expanduser(p["path"]))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            export_sheet_file(sm, {o.id: o for o in self.project.data_objects},
+                              {o.id: o for o in self.project.images}, path,
+                              dpi=int(p.get("dpi", 300)),
+                              assets={a.asset_id: a for a in self.project.assets},
+                              size_cm=p.get("size_cm"))
+        except (ValueError, OSError) as exc:
+            return {"status": "error", "message": str(exc)}
 
     def _clear(self, p):
         self.project.data_objects.clear()

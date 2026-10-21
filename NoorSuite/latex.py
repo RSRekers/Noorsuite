@@ -31,6 +31,15 @@ from pathlib import Path
 
 FIGURES_DIR = "noorsuite-figures"
 DEFAULT_FIG_CM = (12.0, 8.0)      # figure size for sheets that have no explicit cm size
+
+
+def default_size_cm(rows: int = 1, cols: int = 1) -> tuple:
+    """Figure size (cm) of a sheet without an explicit one: one panel = ``DEFAULT_FIG_CM``, every
+    further row / column adds 75 % of a panel, so a 3 x 4 grid is 39 x 20 cm instead of 12 panels
+    squeezed into 12 x 8 cm."""
+    rows, cols = max(1, int(rows)), max(1, int(cols))
+    return (round(DEFAULT_FIG_CM[0] * (1 + 0.75 * (cols - 1)), 2),
+            round(DEFAULT_FIG_CM[1] * (1 + 0.75 * (rows - 1)), 2))
 LINK_SCHEME = "noorsuite://sheet/"
 
 STY = r"""\NeedsTeXFormat{LaTeX2e}
@@ -141,6 +150,7 @@ STY = r"""\NeedsTeXFormat{LaTeX2e}
 %      number-on-title=true,number-x=,number-y=,number-size=}
 \pgfkeys{/noorslide/.cd,
   title-dx/.store in=\noos@tdx, title-dy/.store in=\noos@tdy, title-size/.store in=\noos@tsize,
+  body-size/.store in=\noos@bsize,
   body-top/.store in=\noos@btop, margin-left/.store in=\noos@ml, margin-right/.store in=\noos@mr,
   number-on-title/.store in=\noos@numt, number-x/.store in=\noos@nx, number-y/.store in=\noos@ny,
   number-size/.store in=\noos@nsize,
@@ -166,9 +176,24 @@ STY = r"""\NeedsTeXFormat{LaTeX2e}
 \newcommand{\noormasterobj}[3][]{\g@addto@macro\noo@masterlist{\noorobj[#1]{#2}{#3}}}
 \AtBeginDocument{\ifdefempty{\noo@masterlist}{}{\addtobeamertemplate{background}{}{\noo@masterlist}}}
 \def\noos@tdx{0}\def\noos@tdy{0}\def\noos@tsize{}\def\noos@btop{0}\def\noos@ml{}\def\noos@mr{}%
-\def\noos@numt{false}\def\noos@nx{}\def\noos@ny{}\def\noos@nsize{10}
+\def\noos@numt{false}\def\noos@nx{}\def\noos@ny{}\def\noos@nsize{10}\def\noos@bsize{}
+% body text size (pt) for the running text, itemize levels (85 % / 75 %) and block bodies
+\newcommand{\noo@setbody}[1]{%
+  \pgfmathsetmacro\noo@bl{1.2*#1}\pgfmathsetmacro\noo@sa{0.85*#1}\pgfmathsetmacro\noo@sal{1.2*\noo@sa}%
+  \pgfmathsetmacro\noo@sb{0.75*#1}\pgfmathsetmacro\noo@sbl{1.2*\noo@sb}%
+  \setbeamerfont{normal text}{size=\fontsize{#1 pt}{\noo@bl pt}\selectfont}%
+  \setbeamerfont{itemize/enumerate body}{size=\fontsize{#1 pt}{\noo@bl pt}\selectfont}%
+  \setbeamerfont{itemize/enumerate subbody}{size=\fontsize{\noo@sa pt}{\noo@sal pt}\selectfont}%
+  \setbeamerfont{itemize/enumerate subsubbody}{size=\fontsize{\noo@sb pt}{\noo@sbl pt}\selectfont}%
+  \setbeamerfont{block body}{size=\fontsize{#1 pt}{\noo@bl pt}\selectfont}}
+% per frame: \noorfont{body=20} (first line inside the frame; a title size is set on the title text)
+\pgfkeys{/noorfont/.cd, body/.store in=\noof@body}
+\newcommand{\noorfont}[1]{%
+  \def\noof@body{}\pgfkeys{/noorfont/.cd,#1}%
+  \ifdefempty{\noof@body}{}{\noo@setbody{\noof@body}\fontsize{\noof@body pt}{\noo@bl pt}\selectfont}}
 \newcommand{\noorslide}[1]{%
   \pgfkeys{/noorslide/.cd,#1}%
+  \ifdefempty{\noos@bsize}{}{\noo@setbody{\noos@bsize}}%
   \ifdefempty{\noos@ml}{}{\setbeamersize{text margin left=\noos@ml cm}}%
   \ifdefempty{\noos@mr}{}{\setbeamersize{text margin right=\noos@mr cm}}%
   \ifdefempty{\noos@tsize}{}{\pgfmathsetmacro\noos@tbs{1.2*\noos@tsize}%
@@ -227,6 +252,7 @@ STY = r"""\NeedsTeXFormat{LaTeX2e}
 }{%
 \newcommand{\noorobj}[3][]{}
 \newcommand{\noorslide}[1]{}
+\newcommand{\noorfont}[1]{}
 }
 \makeatother
 \endinput
@@ -535,31 +561,38 @@ def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
 
 
-def figure_refs(source: str) -> list:
-    """Every distinct ``\\noorsheet`` key in ``source`` (comments ignored), in order."""
+# a slide object that shows a graph / a figure file: \\noorobj[..]{sheet}{key}, \\noorobj[..]{file}{key}
+# (and the master-layout twin); the build must export those figures like a \\noorsheet / \\noorfile
+_OBJ_RE = re.compile(r"\\noor(?:master)?obj\s*(?:\[[^\]]*\])?\s*\{(sheet|file)\}\s*\{([^{}]*)\}")
+
+
+def _refs(source: str, rx, obj_kind: str) -> list:
     seen, out = set(), []
     for line in source.splitlines():
-        for m in _REF_RE.finditer(_COMMENT_RE.sub("", line)):
-            key = m.group(1).strip()
+        line = _COMMENT_RE.sub("", line)
+        found = [(m.start(), m.group(1)) for m in rx.finditer(line)]
+        found += [(m.start(), m.group(2)) for m in _OBJ_RE.finditer(line) if m.group(1) == obj_kind]
+        for _pos, key in sorted(found):
+            key = key.strip()
             if key and key not in seen:
                 seen.add(key)
                 out.append(key)
     return out
+
+
+def figure_refs(source: str) -> list:
+    """Every distinct sheet key in ``source`` -- ``\\noorsheet{..}`` and ``\\noorobj{sheet}{..}``
+    (comments ignored), in order."""
+    return _refs(source, _REF_RE, "sheet")
 
 
 _ASSET_RE = re.compile(r"\\noorfile\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
 
 
 def asset_refs(source: str) -> list:
-    """Every distinct ``\\noorfile`` key in ``source`` (comments ignored), in order."""
-    seen, out = set(), []
-    for line in source.splitlines():
-        for m in _ASSET_RE.finditer(_COMMENT_RE.sub("", line)):
-            key = m.group(1).strip()
-            if key and key not in seen:
-                seen.add(key)
-                out.append(key)
-    return out
+    """Every distinct figure-file key in ``source`` -- ``\\noorfile{..}`` and ``\\noorobj{file}{..}``
+    (comments ignored), in order."""
+    return _refs(source, _ASSET_RE, "file")
 
 
 def resolve_asset(key: str, assets):

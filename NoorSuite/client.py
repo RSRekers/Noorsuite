@@ -19,7 +19,8 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 
-from .model import PLOT_TYPES, ImageRef, format_tick_labels, heatmap_from_xyz
+from .model import (PLOT_TYPES, SHEET_LEVEL_OPTIONS, ImageRef, check_sheet_style, check_subplot_style,
+                    expand_subplot_style, format_tick_labels, heatmap_from_xyz)
 from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
                        ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_DOCUMENT,
@@ -28,7 +29,7 @@ from .protocol import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET,
                        ACTION_LIST_ASSETS, ACTION_TABLE, ACTION_LIST_TABLES,
                        ACTION_GET_IMAGE, ACTION_LIST_DATA, ACTION_LIST_IMAGES,
                        ACTION_LIST_SHEETS, ACTION_LIST_TRACES, ACTION_ORGANIZE,
-                       ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET,
+                       ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET, ACTION_EDIT, ACTION_EXPORT,
                        DEFAULT_PORT, IPCClient)
 
 _DATA_COLUMNS = ["id", "name", "columns", "nrows", "tags", "source"]
@@ -93,15 +94,35 @@ def _heatmap_style(cmap, reverse_cmap, vmin, vmax, bins, boundaries, colorbar, i
 
 def _organize_payload(title, tags, notes, folder, subplot, subplot_title, x_label,
                       y_label, x_tick_labels=None, y_tick_labels=None,
-                      content_only=None) -> dict:
+                      content_only=None, axes_options=None, grid=None, size_cm=None,
+                      all_subplots=False, sheet_options=None) -> dict:
     sub = {k: v for k, v in (("title", subplot_title), ("x_label", x_label),
                              ("y_label", y_label),
                              ("x_tick_labels", format_tick_labels(x_tick_labels)),
                              ("y_tick_labels", format_tick_labels(y_tick_labels))) if v}
     if content_only is not None:
         sub["bare"] = bool(content_only)
-    return {"name": title or "", "tags": list(tags or []), "notes": notes or "",
-            "folder": folder or "", "subplots": {int(subplot): sub} if sub else {}}
+    out = {"name": title or "", "tags": list(tags or []), "notes": notes or "",
+           "folder": folder or "", "subplots": {int(subplot): sub} if sub else {}}
+    axes_options = dict(axes_options or {})
+    sheet_options = dict(sheet_options or {})
+    for key in SHEET_LEVEL_OPTIONS:                      # figure-level options (joint legend ...)
+        if key in axes_options:
+            sheet_options[key] = axes_options.pop(key)
+    if axes_options:             # validated here, so a typo raises in the caller, not in the GUI
+        out["subplot_style"] = {"all" if all_subplots else int(subplot):
+                                check_subplot_style(expand_subplot_style(axes_options))}
+    if grid is not None:
+        r, c = (int(v) for v in grid)
+        check_sheet_style({"rows": r, "cols": c})
+        out["grid"] = [r, c]
+    sheet = sheet_options
+    if size_cm is not None:
+        sheet["size_cm"] = size_cm
+    if sheet:
+        check_sheet_style(sheet)
+        out["sheet_style"] = sheet
+    return out
 
 
 _SHAPE_KINDS = ("rect", "ellipse", "line", "arrow", "xspan", "yspan", "text", "picture")
@@ -310,7 +331,8 @@ class SciSuiteClient:
                 iso_width=None, iso_labels=None, iso_label_fmt=None,
                 xticks=None, yticks=None, sheet=None, subplot=0, new_sheet=False,
                 title=None, tags=None, notes=None, folder=None, subplot_title=None,
-                x_label=None, y_label=None, x_tick_labels=None, y_tick_labels=None):
+                x_label=None, y_label=None, x_tick_labels=None, y_tick_labels=None,
+                grid=None, size_cm=None, all_subplots=False, **axes_options):
         """Push (if given a grid) and show a heatmap on a sheet subplot.
 
         ``data``: name of a pushed heatmap, or a 2-D array / DataFrame (see
@@ -337,13 +359,49 @@ class SciSuiteClient:
                                axes=(0, 1), style=style, title=title, tags=tags, notes=notes,
                                folder=folder, subplot_title=subplot_title, x_label=x_label,
                                y_label=y_label, x_tick_labels=x_tick_labels,
-                               y_tick_labels=y_tick_labels)
+                               y_tick_labels=y_tick_labels, grid=grid, size_cm=size_cm,
+                               all_subplots=all_subplots, **axes_options)
+
+    def style_subplot(self, sheet, subplot=0, **options):
+        """Restyle the panels of an existing sheet: ``subplot`` = index, list of indices or
+        ``"all"``; ``options`` as in :meth:`plot` (``yscale="log"``, ``legend=False``,
+        ``font_size=14``, ``xlim=(0, 5)``, ``show_grid=False`` ...)."""
+        targets = range(10 ** 6) if subplot == "all" else (
+            [subplot] if isinstance(subplot, int) else list(subplot))
+        if subplot == "all":
+            return self.organize_sheet(sheet, all_subplots=True, **options)
+        resp = None
+        for i in targets:
+            resp = self.organize_sheet(sheet, subplot=int(i), **options)
+        return resp
+
+    def style_sheet(self, sheet, *, rows=None, cols=None, size_cm=None, **options):
+        """Figure-level options of an existing sheet: the grid (``rows`` / ``cols``), the physical
+        size (``size_cm=(w, h)``), ``background``, ``real_points`` (True: font sizes are true points on
+        the figure) and ``frame`` / ``fig_edge_*``. Axes options are applied to every panel."""
+        sheet_opts = {k: options.pop(k) for k in list(options)
+                      if k in ("background", "real_points", "frame", "width_cm", "height_cm")
+                      or k in SHEET_LEVEL_OPTIONS or k.startswith("fig_")}
+        grid = (rows, cols) if rows is not None or cols is not None else None
+        if grid is not None:
+            cur = self._sheet_grid(sheet)
+            grid = (rows or cur[0], cols or cur[1])
+        return self.organize_sheet(sheet, grid=grid, size_cm=size_cm, all_subplots=bool(options),
+                                   sheet_options=sheet_opts, **options)
+
+    def _sheet_grid(self, sheet):
+        df = self.list_sheets()
+        row = df[(df["id"] == sheet) | (df["name"] == sheet)]
+        if row.empty:
+            raise ValueError(f"no sheet matching {sheet!r}")
+        return int(row.iloc[0].get("rows", 1)), int(row.iloc[0].get("cols", 1))
 
     def show_image(self, data, *, name=None, axis_names=None, sheet=None, subplot=0,
                    axes=(-2, -1), new_sheet=False, style=None, title=None, tags=None,
                    notes=None, folder=None, subplot_title=None, x_label=None,
                    y_label=None, x_tick_labels=None, y_tick_labels=None,
-                   content_only=None):
+                   content_only=None, grid=None, size_cm=None, all_subplots=False,
+                   **axes_options):
         """Register (if given an array) and place an image on a sheet subplot.
 
         ``axes`` are the two axes to display as (rows, cols); negatives allowed.
@@ -372,7 +430,8 @@ class SciSuiteClient:
             "image_style": dict(style or {}),
             "organize": _organize_payload(title, tags, notes, folder, subplot,
                                           subplot_title, x_label, y_label,
-                                          x_tick_labels, y_tick_labels, content_only),
+                                          x_tick_labels, y_tick_labels, content_only,
+                                          axes_options, grid, size_cm, all_subplots),
         })
 
     def list_images(self) -> pd.DataFrame:
@@ -434,7 +493,8 @@ class SciSuiteClient:
              title=None, tags=None, notes=None, folder=None, subplot_title=None,
              x_label=None, y_label=None, plot_type=None, style=None, sort=False,
              x_tick_labels=None, y_tick_labels=None, yerr=None, yerr_low=None,
-             yerr_high=None, yerr_mode=None, errorbars=None, band=False, band_alpha=0.25):
+             yerr_high=None, yerr_mode=None, errorbars=None, band=False, band_alpha=0.25,
+             grid=None, size_cm=None, all_subplots=False, **axes_options):
         """Add columns of a data object as traces to a sheet.
 
         ``data`` is a data-object name (already pushed) or a DataFrame (pushed now
@@ -465,6 +525,20 @@ class SciSuiteClient:
         error (``band_alpha``); ``yerr_mode`` ("std" | "sem" | "minmax") says which error the
         ``yerr`` / ``yerr_low`` / ``yerr_high`` columns are drawn from (default: ``"std"`` for
         ``yerr``, ``"minmax"`` for low / high). Missing error columns raise ``ValueError``.
+
+        ``joint_legend="bottom"`` ("top", "right", "left", ``None``) draws ONE legend for the whole
+        multi-panel figure (every distinct trace label once; the per-panel legends are not drawn),
+        with ``joint_legend_ncol`` / ``joint_legend_size`` / ``joint_legend_frame``.
+
+        Axes / sheet look (any keyword not listed above is an axes option of the target subplot;
+        ``all_subplots=True`` applies it to every panel): ``xscale`` / ``yscale`` ("linear", "log",
+        "symlog", "logit"), ``logx`` / ``logy`` / ``log`` (bool), ``legend`` (False hides it),
+        ``legend_loc``, ``grid`` is the sheet grid (see below) so use ``show_grid`` for the axes grid,
+        ``font_size`` (ticks, labels, title and legend together), ``tick_size``, ``label_size``,
+        ``title_size``, ``legend_size``, ``xlim`` / ``ylim`` ((min, max), ``None`` = automatic),
+        ``aspect``, ``background``, ``spine_width`` ... or any raw ``SubplotModel`` field name
+        (a wrong name raises ``ValueError`` with the list). Sheet: ``grid=(rows, cols)`` arranges the
+        panels (the figure grows with the grid unless ``size_cm=(width, height)`` is given).
         """
         y_cols = [y] if isinstance(y, str) else list(y)
         trace_styles = {}
@@ -489,7 +563,8 @@ class SciSuiteClient:
             "subplot_index": int(subplot),
             "organize": _organize_payload(title, tags, notes, folder, subplot,
                                           subplot_title, x_label, y_label,
-                                          x_tick_labels, y_tick_labels),
+                                          x_tick_labels, y_tick_labels, None,
+                                          axes_options, grid, size_cm, all_subplots),
             "trace_style": _trace_style(plot_type, style, sort),
             "trace_styles": trace_styles,
         })
@@ -561,6 +636,116 @@ class SciSuiteClient:
             styles[yc] = st
         return data, styles
 
+    # ------------------------------------------------------------------ editing what exists
+    def _edit(self, **payload):
+        from .edits import check_edit
+        resp = self._ipc.send({"action": ACTION_EDIT, **check_edit(payload)})
+        if isinstance(resp, dict) and resp.get("status") == "error":
+            raise ValueError(resp.get("message", "edit failed"))      # offline: the same error as the GUI shows
+        return resp
+
+    def restyle_traces(self, sheet, trace="all", *, subplot=0, **style):
+        """Change the look of traces already on a sheet. ``trace`` = index, label / y-column text or
+        ``"all"``; ``subplot`` = index or ``"all"``. Options: ``color``, ``line_width``,
+        ``line_style``, ``marker``, ``marker_size``, ``alpha``, ``plot_type``, ``label``,
+        ``enabled`` (False hides it), ``scale_factor`` (a number to multiply by, ``"Log10"``,
+        ``"relval:pct:100"`` ...), error options ``show_errorbar`` / ``show_band`` ..."""
+        return self._edit(op="trace_style", sheet=sheet, subplot=subplot, trace=trace, style=style)
+
+    def remove_traces(self, sheet, trace="all", *, subplot=0):
+        """Remove traces from a sheet (the data stays in the pool)."""
+        return self._edit(op="remove_trace", sheet=sheet, subplot=subplot, trace=trace)
+
+    def move_trace(self, sheet, trace, to, *, subplot=0):
+        """Put a trace at position ``to`` of its subplot (later = drawn on top)."""
+        return self._edit(op="move_trace", sheet=sheet, subplot=subplot, trace=trace, to=int(to))
+
+    def combine_traces(self, sheet, trace="all", *, subplot=0, split=None, layout="block",
+                       display="band", mode="std", plot_type="Line", label=None,
+                       keep_originals=False):
+        """The GUI's *Combine into mean +- error trace...* for traces already on a sheet.
+
+        Several traces of one subplot (``trace`` = a list of indices / labels, or ``"all"``; they must
+        share their x values) become ONE trace: the row-wise mean with std / sem / min-max error. Or
+        ``split=N`` for a single trace that itself holds repeats (``layout`` "block": N repeats per
+        condition back to back; "sequence": one cycle of N conditions repeated). ``display`` is
+        "band" (shaded), "bars" or "both"; ``mode`` which spread is drawn: "std", "sem", "minmax".
+        The originals are replaced unless ``keep_originals=True``; the derived values are a new data
+        object ``"<label> (n=.. mean±err)"``. (For repeats that are not on a sheet yet use
+        :meth:`plot_mean`.)"""
+        return self._edit(op="combine_traces", sheet=sheet, subplot=int(subplot),
+                          trace=list(trace) if isinstance(trace, (list, tuple)) else trace,
+                          split=int(split) if split else None, layout=layout, display=display,
+                          mode=mode, plot_type=plot_type, label=label or "",
+                          remove_originals=not keep_originals)
+
+    def new_sheet(self, name=None, *, grid=None, size_cm=None, folder=None, tags=None, notes=None):
+        """An empty sheet, optionally with a ``grid=(rows, cols)`` and figure size."""
+        from .model import check_sheet_style
+        pay = {"op": "new_sheet", "name": name or ""}
+        if grid is not None:
+            check_sheet_style({"rows": grid[0], "cols": grid[1]})
+            pay["grid"] = [int(grid[0]), int(grid[1])]
+        if size_cm is not None:
+            check_sheet_style({"size_cm": size_cm})
+            pay["sheet_style"] = {"size_cm": size_cm}
+        pay.update(folder=folder or "", tags=list(tags or []), notes=notes or "")
+        return self._edit(**pay)
+
+    def duplicate_sheet(self, sheet, name=None):
+        """A copy of a sheet (same data, own styling), right behind the original."""
+        return self._edit(op="duplicate_sheet", sheet=sheet, name=name or "")
+
+    def folder(self, path, action="create", *, new_name=None):
+        """Project-tree folders: ``action`` = "create" (parents too), "rename" (``new_name``) or
+        "delete" (its sheets / documents move up one level)."""
+        return self._edit(op="folder", path=path, do=action, new_name=new_name or "")
+
+    def add_colormap(self, name, colors, *, sheet=None):
+        """Store a custom colormap (list of hex colours) in the project library -- or only on
+        ``sheet``. Use it as ``style={"cmap": name}`` for images / heatmaps and for new traces
+        via :meth:`use_colormap`."""
+        return self._edit(op="colormap", do="add", name=name, colors=list(colors),
+                          sheet=sheet, sheet_only=bool(sheet))
+
+    def remove_colormap(self, name):
+        return self._edit(op="colormap", do="remove", name=name)
+
+    def use_colormap(self, sheet, name):
+        """New traces of ``sheet`` take their colours from the colormap ``name``
+        (``"default"`` = matplotlib's cycle)."""
+        return self._edit(op="colormap", do="apply", name=name, sheet=sheet)
+
+    def save_project(self, path):
+        """Write the project to ``path`` (a ``.sciproj``); a running GUI also adopts it as its file."""
+        return self._edit(op="save_project", path=str(path))
+
+    def open_project(self, path):
+        """Load a project file into the running GUI (replaces what is open)."""
+        return self._edit(op="open_project", path=str(path))
+
+    def export_figure(self, sheet, path, *, dpi=300, size_cm=None, wait=60.0):
+        """Write a sheet as ``.png`` / ``.pdf`` / ``.svg`` (by the file name) at its figure size
+        (or ``size_cm=(w, h)``). With a live GUI the file is written by the GUI; this waits up to
+        ``wait`` seconds for it to appear and raises ``TimeoutError`` otherwise."""
+        import os
+        import time
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        if os.path.splitext(path)[1].lower() not in (".png", ".pdf", ".svg"):
+            raise ValueError("the file name must end in .png, .pdf or .svg")
+        if os.path.exists(path):
+            os.remove(path)
+        resp = self._ipc.send({"action": ACTION_EXPORT, "sheet": sheet, "path": path,
+                               "dpi": int(dpi), "size_cm": list(size_cm) if size_cm else None})
+        if isinstance(resp, dict) and resp.get("status") == "error":
+            raise ValueError(resp.get("message", "export failed"))
+        t0 = time.time()
+        while not os.path.exists(path):
+            if time.time() - t0 > wait:
+                raise TimeoutError(f"{path} was not written -- see the GUI's status bar")
+            time.sleep(0.1)
+        return path
+
     def plot_mean(self, data, x=None, y=None, *, band="std", errorbars=False, label=None,
                   name=None, plot_type="Line", style=None, band_alpha=0.25, sheet=None,
                   subplot=0, new_sheet=False, **plot_options):
@@ -622,14 +807,18 @@ class SciSuiteClient:
     def organize_sheet(self, sheet, *, title=None, tags=None, notes=None, folder=None,
                        subplot=0, subplot_title=None, x_label=None, y_label=None,
                        replace_notes=False, x_tick_labels=None, y_tick_labels=None,
-                       content_only=None):
+                       content_only=None, grid=None, size_cm=None, all_subplots=False,
+                       sheet_options=None, **axes_options):
         """Name / tag / annotate / file an existing sheet (by id or name). Tags are merged
         in, notes appended (``replace_notes=True`` overwrites), ``folder`` moves it into
         that folder path, creating folders as needed. ``content_only=True`` hides the
         subplot's axes, ticks, labels, title, legend and background (just the drawn content,
-        e.g. an image or picture)."""
+        e.g. an image or picture). Axes options (``yscale="log"``, ``legend=False``,
+        ``font_size=14``, ``xlim=(0, 5)``, ... see :meth:`plot`), ``grid=(rows, cols)`` and
+        ``size_cm=(w, h)`` restyle an existing sheet; ``all_subplots=True`` styles every panel."""
         org = _organize_payload(title, tags, notes, folder, subplot, subplot_title,
-                                x_label, y_label, x_tick_labels, y_tick_labels, content_only)
+                                x_label, y_label, x_tick_labels, y_tick_labels, content_only,
+                                axes_options, grid, size_cm, all_subplots, sheet_options)
         org["replace_notes"] = replace_notes
         return self._ipc.send({"action": ACTION_ORGANIZE, "kind": "sheet",
                                "target": sheet, **org})

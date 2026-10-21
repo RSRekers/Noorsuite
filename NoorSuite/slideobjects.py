@@ -243,7 +243,7 @@ def slide_size_mm(source: str) -> tuple:
 
 
 # ---------------------------------------------------------------------- slide setup line
-SETUP_KEYS = ("title-dx", "title-dy", "title-size", "body-top", "margin-left", "margin-right",
+SETUP_KEYS = ("title-dx", "title-dy", "title-size", "body-size", "body-top", "margin-left", "margin-right",
               "number-on-title", "number-x", "number-y", "number-size",
               "title-x", "title-y", "title-w", "title-color", "body-x", "body-y", "body-w",
               "num-x", "num-y", "num-size", "num-color", "src-x", "src-y", "src-w", "src-size")

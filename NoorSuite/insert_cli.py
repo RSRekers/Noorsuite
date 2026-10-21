@@ -71,6 +71,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--sheet-name", help="Excel worksheet to read")
     ap.add_argument("--project", help="offline only: .sciproj file (default: session file)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    from .api_cli import add_axes_args, axes_kwargs
+    add_axes_args(ap)
     a = ap.parse_args(argv)
 
     from .client import connect
@@ -86,7 +88,7 @@ def main(argv: list[str]) -> int:
                          axis_names=a.axes.split(",") if a.axes else None)
         if a.plot_image:
             suite.show_image(name, sheet=a.sheet, subplot=a.subplot, new_sheet=a.new_sheet,
-                             axes=(arr.ndim - 2, arr.ndim - 1))
+                             axes=(arr.ndim - 2, arr.ndim - 1), **axes_kwargs(a))
         print(f"inserted image {name!r} {arr.shape}")
     else:
         df = _read_table(a.file, a.sheet_name)
@@ -106,13 +108,18 @@ def main(argv: list[str]) -> int:
     return 0
 
 
+def _axes(a) -> dict:
+    from .api_cli import axes_kwargs
+    return axes_kwargs(a)
+
+
 def _plot(suite, name, x, ycols, a):
     return suite.plot(
         name, x=None if x in ("", "index") else x, y=ycols, sheet=a.sheet, subplot=a.subplot,
         new_sheet=a.new_sheet, title=a.title, tags=[t for t in a.sheet_tags.split(",") if t],
         notes=a.sheet_notes, folder=a.folder, subplot_title=a.subplot_title, x_label=a.x_label,
         y_label=a.y_label, plot_type=a.plot_type, sort=a.sort, x_tick_labels=a.x_tick_labels,
-        y_tick_labels=a.y_tick_labels, yerr=_err_arg(a.yerr, ycols),
+        y_tick_labels=a.y_tick_labels, **_axes(a), yerr=_err_arg(a.yerr, ycols),
         yerr_low=_err_arg(a.yerr_low, ycols), yerr_high=_err_arg(a.yerr_high, ycols),
         yerr_mode=a.yerr_mode, errorbars=False if a.no_errorbars else None, band=a.band,
         band_alpha=a.band_alpha)

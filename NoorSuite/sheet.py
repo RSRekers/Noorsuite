@@ -63,8 +63,9 @@ def logical_size_cm(m) -> tuple:
     ``latex.DEFAULT_FIG_CM`` (the size PDF / PNG exports use)."""
     if m.fig_width_cm and m.fig_height_cm:
         return float(m.fig_width_cm), float(m.fig_height_cm)
-    from .latex import DEFAULT_FIG_CM
-    return float(DEFAULT_FIG_CM[0]), float(DEFAULT_FIG_CM[1])
+    from .latex import default_size_cm
+    w, h = default_size_cm(m.rows, m.cols)
+    return float(w), float(h)
 
 
 def rgba(color, alpha):
@@ -602,7 +603,7 @@ class PlotSheet(QWidget):
                 ax.set_axis_off()
                 ax.set_title("")
                 ax.patch.set_visible(False)
-            if n_drawn and sub.legend_visible and not sub.bare:
+            if n_drawn and sub.legend_visible and not sub.bare and not m.joint_legend:
                 legend = ax.legend(loc=sub.legend_loc, frameon=sub.legend_frame,
                                    fontsize=sub.legend_fontsize * text_scale,
                                    ncol=max(1, int(sub.legend_ncol)),
@@ -610,6 +611,12 @@ class PlotSheet(QWidget):
                 if legend is not None:
                     legend.set_picker(True)
 
+        self._joint_legend = None
+        if m.joint_legend:
+            try:
+                self._joint_legend = self._make_joint_legend(text_scale)
+            except Exception:
+                self._joint_legend = None
         try:
             self._layout()
         except Exception:
@@ -635,12 +642,48 @@ class PlotSheet(QWidget):
                 frac = abs(v1 - v0) / (hi - lo)
         return thin_line(x, y, bins, frac)
 
+    def _make_joint_legend(self, text_scale: float):
+        """One figure-level legend with every distinct trace label of all panels (first
+        occurrence wins), at ``SheetModel.joint_legend`` (bottom / top / right / left)."""
+        m = self.model
+        handles, labels, seen = [], [], set()
+        for ax in self._axes:
+            for h, lab in zip(*ax.get_legend_handles_labels()):
+                if lab and not lab.startswith("_") and lab not in seen:
+                    seen.add(lab)
+                    handles.append(h)
+                    labels.append(lab)
+        if not handles:
+            return None
+        pos = m.joint_legend
+        loc = {"bottom": "lower center", "top": "upper center", "right": "center right",
+               "left": "center left"}[pos]
+        ncol = int(m.joint_legend_ncol) or (len(handles) if pos in ("bottom", "top") else 1)
+        return self.fig.legend(handles, labels, loc=loc, ncol=max(1, ncol),
+                               frameon=bool(m.joint_legend_frame),
+                               fontsize=float(m.joint_legend_fontsize) * text_scale)
+
     def _layout(self):
         """``tight_layout`` -- or, when every subplot is content-only, no margins at all so the
-        picture / image fills its cell."""
+        picture / image fills its cell. A joint legend keeps its strip of the figure free."""
         subs = self.model.subplots[:self.model.rows * self.model.cols]
         if subs and all(getattr(s, "bare", False) for s in subs):
             self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0.02, hspace=0.02)
+            return
+        leg = getattr(self, "_joint_legend", None)
+        rect = None
+        if leg is not None:
+            try:
+                bb = leg.get_window_extent(self.canvas.get_renderer())
+                fw, fh = self.fig.bbox.width, self.fig.bbox.height
+                w, h, pad = bb.width / fw, bb.height / fh, 0.012
+                rect = {"bottom": (0, h + pad, 1, 1), "top": (0, 0, 1, 1 - h - pad),
+                        "right": (0, 0, 1 - w - pad, 1), "left": (w + pad, 0, 1, 1)}[
+                            self.model.joint_legend]
+            except Exception:
+                rect = None
+        if rect is not None:
+            self.fig.tight_layout(rect=rect)
         else:
             self.fig.tight_layout()
 
@@ -1487,7 +1530,8 @@ def export_sheet_pdf(sm, repository, images, path, default_cm=None, assets=None)
     from .model import duplicate_sheet_model
     sm = duplicate_sheet_model(sm)
     if not (sm.fig_width_cm and sm.fig_height_cm):
-        sm.fig_width_cm, sm.fig_height_cm = default_cm or DEFAULT_FIG_CM
+        from .latex import default_size_cm
+        sm.fig_width_cm, sm.fig_height_cm = default_cm or default_size_cm(sm.rows, sm.cols)
     ps = PlotSheet(sm)
     ps.assets = assets or {}
     ps.line_budget = 20000                   # vector file: ~40k points per line are plenty
@@ -1500,22 +1544,46 @@ def export_sheet_pdf(sm, repository, images, path, default_cm=None, assets=None)
         ps.deleteLater()
 
 
+def export_sheet_file(sm, repository, images, path, dpi=300, assets=None, size_cm=None):
+    """Write a sheet as ``.png`` / ``.pdf`` / ``.svg`` (chosen by the suffix) at its own figure size,
+    or ``size_cm=(w, h)``; works offscreen, on a throw-away copy."""
+    import os
+    import matplotlib
+    from .model import duplicate_sheet_model
+    fmt = os.path.splitext(str(path))[1].lower().lstrip(".")
+    if fmt not in ("png", "pdf", "svg"):
+        raise ValueError("the file name must end in .png, .pdf or .svg")
+    sm = duplicate_sheet_model(sm)
+    if size_cm:
+        sm.fig_width_cm, sm.fig_height_cm = float(size_cm[0]), float(size_cm[1])
+    elif not (sm.fig_width_cm and sm.fig_height_cm):
+        sm.fig_width_cm, sm.fig_height_cm = logical_size_cm(sm)
+    ps = PlotSheet(sm)
+    ps.assets = assets or {}
+    ps.line_budget = 20000
+    try:
+        ps.render(repository, images)
+        with matplotlib.rc_context({"pdf.fonttype": 42, "svg.fonttype": "none"}):
+            ps.savefig_export(str(path), fmt, dpi=dpi,
+                              size_in=(sm.fig_width_cm / 2.54, sm.fig_height_cm / 2.54))
+    finally:
+        ps.deleteLater()
+
+
 def export_sheet_raster(sm, repository, images, path, dpi=300, assets=None):
     """A PNG of a sheet at its own figure size (``latex.DEFAULT_FIG_CM`` when unset) and
     ``dpi`` -- what Word / LibreOffice documents embed."""
-    from .latex import DEFAULT_FIG_CM
-    w_cm = sm.fig_width_cm if (sm.fig_width_cm and sm.fig_height_cm) else DEFAULT_FIG_CM[0]
+    w_cm = logical_size_cm(sm)[0]
     export_sheet_png(sm, repository, images, path, width_px=int(w_cm / 2.54 * dpi),
                      assets=assets)
 
 
 def export_sheet_png(sm, repository, images, path, width_px=360, assets=None):
     """A small PNG of a sheet (figure browser thumbnails), at the document figure size."""
-    from .latex import DEFAULT_FIG_CM
     from .model import duplicate_sheet_model
     sm = duplicate_sheet_model(sm)
     if not (sm.fig_width_cm and sm.fig_height_cm):
-        sm.fig_width_cm, sm.fig_height_cm = DEFAULT_FIG_CM
+        sm.fig_width_cm, sm.fig_height_cm = logical_size_cm(sm)
     ps = PlotSheet(sm)
     ps.assets = assets or {}
     ps.line_budget = 20000

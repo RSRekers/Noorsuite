@@ -50,6 +50,7 @@ class SlideCanvas(QWidget):
     duplicateRequested = pyqtSignal(int)
     reorderRequested = pyqtSignal(int, int)    # index, +1 / -1
     pasteRequested = pyqtSignal()              # Ctrl+V
+    pageClicked = pyqtSignal(float, float, bool)   # x, y in cm on the slide where no object is; double?
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -69,6 +70,12 @@ class SlideCanvas(QWidget):
         self._scale = 1.0
         self._off = QPointF(0, 0)
         self._pix_cache: dict = {}
+        self.marker = None                     # (x, y, w, h) cm: the clicked text element
+        self.hover = -1
+
+    def set_marker(self, rect):
+        self.marker = rect
+        self.update()
 
     # ------------------------------------------------------------------ model
     def set_state(self, objs, page_mm, bg=None, dirty=None, cover=None, keep_selection=True):
@@ -137,9 +144,33 @@ class SlideCanvas(QWidget):
         for i, obj in enumerate(self.objs):
             if i in self.dirty:
                 self._paint_object(p, obj)
+        if 0 <= self.hover < len(self.objs) and self.hover != self.sel and self._drag is None:
+            self._paint_hover(p, self.objs[self.hover])
+        if self.marker is not None:                      # the clicked text element of the slide
+            x, y, w, h = self.marker
+            a = self.to_px(x * 10, y * 10)
+            p.setPen(QPen(QColor("#2d8cff"), 1.6, Qt.PenStyle.DashLine))
+            p.setBrush(QColor(45, 140, 255, 40))
+            p.drawRect(QRectF(a.x() - 3, a.y() - 2, w * 10 * self._scale + 6, h * 10 * self._scale + 4))
         if 0 <= self.sel < len(self.objs):
             self._paint_handles(p, self.objs[self.sel])
         p.end()
+
+    def _paint_hover(self, p: QPainter, obj: dict):
+        """Thin outline of the object under the mouse: shows what a click would select."""
+        g = to_mm(obj)
+        p.save()
+        p.setPen(QPen(QColor("#2d8cff"), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if obj["kind"] in ("line", "arrow"):
+            p.drawLine(self.to_px(g["x1"], g["y1"]), self.to_px(g["x2"], g["y2"]))
+        else:
+            c = self.to_px(g["cx"], g["cy"])
+            p.translate(c)
+            p.rotate(-g["a"])
+            p.drawRect(QRectF(-g["w"] * self._scale / 2, -g["h"] * self._scale / 2,
+                              g["w"] * self._scale, g["h"] * self._scale))
+        p.restore()
 
     def _paint_object(self, p: QPainter, obj: dict):
         g, k = to_mm(obj), obj["kind"]
@@ -329,7 +360,12 @@ class SlideCanvas(QWidget):
         i = self._hit_object(e.position())
         self.select(i)
         if i >= 0:
+            self.marker = None
             self._begin("move", e)
+        else:
+            x, y = self.to_mm_pt(e.position())
+            if 0 <= x <= self.page_mm[0] and 0 <= y <= self.page_mm[1]:
+                self.pageClicked.emit(x / 10.0, y / 10.0, False)
 
     def _begin(self, mode, e):
         obj = dict(self.objs[self.sel])
@@ -339,9 +375,12 @@ class SlideCanvas(QWidget):
     def mouseMoveEvent(self, e):
         if self._drag is None:
             h = self._hit_handle(e.position())
+            over = self._hit_object(e.position())
+            if over != self.hover:
+                self.hover = over
+                self.update()
             self.setCursor(Qt.CursorShape.CrossCursor if h else (
-                Qt.CursorShape.SizeAllCursor if self._hit_object(e.position()) >= 0
-                else Qt.CursorShape.ArrowCursor))
+                Qt.CursorShape.SizeAllCursor if over >= 0 else Qt.CursorShape.IBeamCursor))
             return
         d = self._drag
         d["moved"] = True
@@ -451,6 +490,10 @@ class SlideCanvas(QWidget):
         if i >= 0:
             self.select(i)
             self.openRequested.emit(i)
+        else:
+            x, y = self.to_mm_pt(e.position())
+            if 0 <= x <= self.page_mm[0] and 0 <= y <= self.page_mm[1]:
+                self.pageClicked.emit(x / 10.0, y / 10.0, True)
 
     def keyPressEvent(self, e):
         k = e.key()

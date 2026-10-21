@@ -37,6 +37,98 @@ def _read_table(path, sheet=None):
     return read(path, sheet)
 
 
+def _pair(text, cast=float, sep=","):
+    lo, hi = (text.replace("x", sep).replace("X", sep).split(sep) + [""])[:2]
+    return cast(lo) if lo.strip() else None, cast(hi) if hi.strip() else None
+
+
+def _value(text):
+    """``--set field=value`` values: numbers, true / false, none, else text."""
+    low = text.strip().lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if low in ("none", "null", "auto"):
+        return None
+    try:
+        return float(text) if any(c in text for c in ".eE") else int(text)
+    except ValueError:
+        return text
+
+
+def add_axes_args(sp):
+    """Axes / figure look options shared by every command that draws (see ``client.plot``)."""
+    g = sp.add_argument_group("axes and figure look")
+    g.add_argument("--xscale", choices=["linear", "log", "symlog", "logit"])
+    g.add_argument("--yscale", choices=["linear", "log", "symlog", "logit"])
+    g.add_argument("--log", action="store_true", help="log scale on both axes")
+    g.add_argument("--no-legend", action="store_true", help="hide the legend")
+    g.add_argument("--legend", dest="show_legend", action="store_true", help="show the legend")
+    g.add_argument("--legend-loc")
+    g.add_argument("--joint-legend", choices=["bottom", "top", "right", "left", "none"],
+                   help="ONE legend for all panels (every distinct trace label once)")
+    g.add_argument("--joint-legend-ncol", type=int)
+    g.add_argument("--joint-legend-size", type=float)
+    g.add_argument("--joint-legend-frame", action="store_true", default=None)
+    g.add_argument("--no-axes-grid", action="store_true", help="no grid lines in the panels")
+    g.add_argument("--font-size", type=float, help="ticks, labels, title and legend together (pt)")
+    g.add_argument("--tick-size", type=float)
+    g.add_argument("--label-size", type=float)
+    g.add_argument("--title-size", type=float)
+    g.add_argument("--legend-size", type=float)
+    g.add_argument("--xlim", metavar="LO,HI", help="axis range; leave one end empty for automatic")
+    g.add_argument("--ylim", metavar="LO,HI")
+    g.add_argument("--aspect", choices=["auto", "equal"])
+    g.add_argument("--background", help="panel background colour")
+    g.add_argument("--panels", metavar="ROWSxCOLS", help="arrange the sheet in a grid of panels")
+    g.add_argument("--size-cm", metavar="WxH", help="figure size in cm (default: grows with the grid)")
+    g.add_argument("--all-panels", action="store_true", help="apply the options above to every panel")
+    g.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE",
+                   help="any other SubplotModel field, e.g. spine_width=1.5 (repeatable)")
+
+
+def axes_kwargs(a) -> dict:
+    """The keyword arguments ``client.plot`` / ``show_image`` / ``heatmap`` / ``organize_sheet`` take."""
+    kw: dict = {}
+    for name in ("xscale", "yscale", "legend_loc", "font_size", "tick_size", "label_size",
+                 "title_size", "legend_size", "aspect", "background"):
+        v = getattr(a, name, None)
+        if v is not None:
+            kw[name] = v
+    if getattr(a, "joint_legend", None):
+        kw["joint_legend"] = None if a.joint_legend == "none" else a.joint_legend
+        if kw["joint_legend"] is None:
+            kw["joint_legend"] = "none"
+    for name in ("joint_legend_ncol", "joint_legend_size", "joint_legend_frame"):
+        v = getattr(a, name, None)
+        if v is not None:
+            kw[name] = v
+    if getattr(a, "log", False):
+        kw["log"] = True
+    if getattr(a, "no_legend", False):
+        kw["legend"] = False
+    elif getattr(a, "show_legend", False):
+        kw["legend"] = True
+    if getattr(a, "no_axes_grid", False):
+        kw["show_grid"] = False
+    for name in ("xlim", "ylim"):
+        v = getattr(a, name, None)
+        if v:
+            kw[name] = _pair(v)
+    for item in getattr(a, "set", None) or []:
+        key, sep, val = item.partition("=")
+        if not sep:
+            raise ValueError(f"--set needs FIELD=VALUE, not {item!r}")
+        kw[key.strip()] = _value(val)
+    if getattr(a, "panels", None):
+        r, c = _pair(a.panels, int)
+        kw["grid"] = (r or 1, c or 1)
+    if getattr(a, "size_cm", None):
+        kw["size_cm"] = _pair(a.size_cm)
+    if getattr(a, "all_panels", False):
+        kw["all_subplots"] = True
+    return kw
+
+
 def _sheet_args(sp):
     sp.add_argument("--sheet", help="existing sheet name/id")
     sp.add_argument("--new-sheet", action="store_true")
@@ -48,10 +140,11 @@ def _sheet_args(sp):
     sp.add_argument("--subplot-title")
     sp.add_argument("--x-label")
     sp.add_argument("--y-label")
+    add_axes_args(sp)
 
 
 def _sheet_kw(a):
-    return dict(sheet=a.sheet, subplot=a.subplot, new_sheet=a.new_sheet or not a.sheet,
+    return dict(**axes_kwargs(a), sheet=a.sheet, subplot=a.subplot, new_sheet=a.new_sheet or not a.sheet,
                 title=a.title, tags=_csv_list(a.tags), notes=a.notes, folder=a.folder,
                 subplot_title=a.subplot_title, x_label=a.x_label, y_label=a.y_label)
 
@@ -98,6 +191,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--x-tick-labels")
     p.add_argument("--y-tick-labels")
     p.add_argument("--content-only", action="store_true", default=None)
+
+    add_axes_args(p)
 
     p = sub.add_parser("shape", help="draw an object on a sheet")
     p.add_argument("sheet")
@@ -208,6 +303,110 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label", default="")
     p.add_argument("--width", default="")
 
+    p = sub.add_parser("plot", help="plot columns of a data object (all the look options)")
+    p.add_argument("data", help="data object name")
+    p.add_argument("--x", help="x column (default: row index)")
+    p.add_argument("--y", required=True, help="y column(s), comma-separated")
+    p.add_argument("--plot-type", help="Line | Scatter | Line+Scatter | Step | Bar")
+    p.add_argument("--sort", action="store_true")
+    p.add_argument("--color")
+    p.add_argument("--line-width", type=float)
+    p.add_argument("--marker")
+    p.add_argument("--yerr", help="error column(s), or y=err pairs")
+    p.add_argument("--yerr-low")
+    p.add_argument("--yerr-high")
+    p.add_argument("--yerr-mode", choices=["std", "sem", "minmax"])
+    p.add_argument("--no-errorbars", action="store_true")
+    p.add_argument("--band", action="store_true")
+    p.add_argument("--band-alpha", type=float, default=0.25)
+    p.add_argument("--x-tick-labels")
+    p.add_argument("--y-tick-labels")
+    p.add_argument("--content-only", action="store_true", default=None)
+    _sheet_args(p)
+
+    p = sub.add_parser("style", help="restyle panels / the figure of an existing sheet")
+    p.add_argument("sheet")
+    p.add_argument("--subplot", default="all", help="index, comma-separated indices or 'all' (default)")
+    add_axes_args(p)
+
+    p = sub.add_parser("trace-style", help="restyle traces already on a sheet")
+    p.add_argument("sheet")
+    p.add_argument("--trace", default="all", help="index, label / y column text or 'all'")
+    p.add_argument("--subplot", default="0", help="index or 'all'")
+    p.add_argument("--color")
+    p.add_argument("--line-width", type=float)
+    p.add_argument("--line-style")
+    p.add_argument("--marker")
+    p.add_argument("--marker-size", type=float)
+    p.add_argument("--alpha", type=float)
+    p.add_argument("--plot-type")
+    p.add_argument("--label")
+    p.add_argument("--hide", action="store_true")
+    p.add_argument("--show", action="store_true")
+    p.add_argument("--scale-factor", help="a multiplier, Log10, Norm, relval:pct:100 ...")
+    p.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE")
+
+    p = sub.add_parser("combine", help="combine traces into one mean +- error trace (band / bars)")
+    p.add_argument("sheet")
+    p.add_argument("--trace", default="all", help="traces to combine: comma-separated indices / labels, "
+                                                  "or 'all' (default)")
+    p.add_argument("--subplot", default="0")
+    p.add_argument("--split", type=int, metavar="N",
+                   help="ONE trace that holds repeats: N repeats per condition (--layout block) or "
+                        "a cycle of N conditions (--layout sequence)")
+    p.add_argument("--layout", choices=["block", "sequence"], default="block")
+    p.add_argument("--display", choices=["band", "bars", "both"], default="band")
+    p.add_argument("--mode", choices=["std", "sem", "minmax"], default="std")
+    p.add_argument("--plot-type", default="Line")
+    p.add_argument("--label")
+    p.add_argument("--keep", action="store_true", help="keep the original traces")
+
+    p = sub.add_parser("trace-remove", help="remove traces from a sheet (the data stays)")
+    p.add_argument("sheet")
+    p.add_argument("--trace", default="all")
+    p.add_argument("--subplot", default="0")
+
+    p = sub.add_parser("trace-move", help="move a trace in its panel's stack")
+    p.add_argument("sheet")
+    p.add_argument("trace")
+    p.add_argument("--to", type=int, required=True)
+    p.add_argument("--subplot", default="0")
+
+    p = sub.add_parser("sheet", help="create or duplicate sheets")
+    p.add_argument("what", choices=["new", "duplicate"])
+    p.add_argument("name", nargs="?", help="new: the sheet name; duplicate: the sheet to copy")
+    p.add_argument("--as", dest="copy_name", help="duplicate: name of the copy")
+    p.add_argument("--panels", metavar="ROWSxCOLS")
+    p.add_argument("--size-cm", metavar="WxH")
+    p.add_argument("--folder")
+    p.add_argument("--tags", default="")
+
+    p = sub.add_parser("folder", help="project tree folders")
+    p.add_argument("action", choices=["create", "rename", "delete"])
+    p.add_argument("path", help='e.g. "Sample A3/Transport"')
+    p.add_argument("--new-name")
+
+    p = sub.add_parser("colormap", help="custom colormaps")
+    p.add_argument("action", choices=["add", "remove", "use"])
+    p.add_argument("name")
+    p.add_argument("--colors", help="add: comma-separated hex colours")
+    p.add_argument("--sheet", help="add: keep it on this sheet only; use: the sheet")
+
+    p = sub.add_parser("save", help="save the project to a .sciproj file")
+    p.add_argument("path")
+
+    p = sub.add_parser("open", help="load a project into the running GUI")
+    p.add_argument("path")
+
+    p = sub.add_parser("export", help="write a sheet as .png / .pdf / .svg")
+    p.add_argument("sheet")
+    p.add_argument("path")
+    p.add_argument("--dpi", type=int, default=300)
+    p.add_argument("--size-cm", metavar="WxH")
+
+    p = sub.add_parser("info", help="what the project holds")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("references", help="add bibliography records")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--file", help=".bib or CSL-JSON file")
@@ -248,7 +447,7 @@ def run(a, suite) -> int:
                              folder=a.folder, subplot=a.subplot, subplot_title=a.subplot_title,
                              x_label=a.x_label, y_label=a.y_label, replace_notes=a.replace_notes,
                              x_tick_labels=a.x_tick_labels, y_tick_labels=a.y_tick_labels,
-                             content_only=a.content_only)
+                             content_only=a.content_only, **axes_kwargs(a))
         print(f"organized {a.sheet!r}")
     elif cmd == "shape":
         style = {k: v for k, v in dict(
@@ -306,6 +505,123 @@ def run(a, suite) -> int:
             print(suite.table_snippet(a.key, a.caption, a.label))
     elif cmd == "references":
         return _references(a, suite)
+    elif cmd == "plot":
+        return _plot_cmd(a, suite)
+    elif cmd == "style":
+        return _style_cmd(a, suite)
+    elif cmd in ("trace-style", "trace-remove", "trace-move"):
+        return _trace_cmd(a, suite)
+    elif cmd == "combine":
+        parts = _csv_list(a.trace)
+        trace = "all" if parts == ["all"] else [int(p) if p.lstrip("-").isdigit() else p for p in parts]
+        try:
+            suite.combine_traces(a.sheet, trace, subplot=int(a.subplot), split=a.split, layout=a.layout,
+                                 display=a.display, mode=a.mode, plot_type=a.plot_type, label=a.label,
+                                 keep_originals=a.keep)
+        except ValueError as exc:
+            print(f"combine failed: {exc}")
+            return 1
+        print("combined")
+    elif cmd == "sheet":
+        if a.what == "new":
+            kw = axes_kwargs(a)
+            suite.new_sheet(a.name, grid=kw.get("grid"), size_cm=kw.get("size_cm"), folder=a.folder,
+                            tags=_csv_list(a.tags))
+            print(f"new sheet {a.name or '(auto-named)'!r}")
+        else:
+            if not a.name:
+                print("sheet duplicate needs the sheet to copy")
+                return 1
+            suite.duplicate_sheet(a.name, a.copy_name)
+            print(f"duplicated {a.name!r}")
+    elif cmd == "folder":
+        suite.folder(a.path, a.action, new_name=a.new_name)
+        print(f"folder {a.action}: {a.path}")
+    elif cmd == "colormap":
+        if a.action == "add":
+            suite.add_colormap(a.name, _csv_list(a.colors), sheet=a.sheet)
+        elif a.action == "remove":
+            suite.remove_colormap(a.name)
+        else:
+            if not a.sheet:
+                print("colormap use needs --sheet")
+                return 1
+            suite.use_colormap(a.sheet, a.name)
+        print(f"colormap {a.action}: {a.name}")
+    elif cmd == "save":
+        suite.save_project(a.path)
+        print(f"saving to {a.path}")
+    elif cmd == "open":
+        suite.open_project(a.path)
+        print(f"opening {a.path}")
+    elif cmd == "export":
+        size = _pair(a.size_cm) if a.size_cm else None
+        print("wrote", suite.export_figure(a.sheet, a.path, dpi=a.dpi, size_cm=size))
+    elif cmd == "info":
+        import pandas as pd
+        rows = {k: len(getattr(suite, f)()) for k, f in LISTINGS.items() if k != "templates"}
+        if a.json:
+            print(json.dumps(rows))
+        else:
+            print(pd.Series(rows).to_string())
+    return 0
+
+
+def _plot_cmd(a, suite) -> int:
+    from .insert_cli import _err_arg
+    ys = _csv_list(a.y)
+    style = {k: v for k, v in (("color", a.color), ("line_width", a.line_width), ("marker", a.marker))
+             if v is not None}
+    try:
+        suite.plot(a.data, a.x, ys, plot_type=a.plot_type, sort=a.sort, style=style or None,
+                   yerr=_err_arg(a.yerr, ys), yerr_low=_err_arg(a.yerr_low, ys),
+                   yerr_high=_err_arg(a.yerr_high, ys), yerr_mode=a.yerr_mode,
+                   errorbars=False if a.no_errorbars else None, band=a.band, band_alpha=a.band_alpha,
+                   x_tick_labels=a.x_tick_labels, y_tick_labels=a.y_tick_labels, **_sheet_kw(a))
+    except (ValueError, KeyError) as exc:
+        print("plot failed:", exc)
+        return 1
+    print(f"plotted {', '.join(ys)} of {a.data!r}")
+    return 0
+
+
+def _style_cmd(a, suite) -> int:
+    kw = axes_kwargs(a)
+    sheet_only = {k: kw.pop(k) for k in ("grid", "size_cm", "all_subplots") if k in kw}
+    if "grid" in sheet_only or "size_cm" in sheet_only:
+        r, c = sheet_only.get("grid", (None, None))
+        suite.style_sheet(a.sheet, rows=r, cols=c, size_cm=sheet_only.get("size_cm"))
+    if kw:
+        target = "all" if a.subplot == "all" else [int(v) for v in _csv_list(a.subplot)]
+        suite.style_subplot(a.sheet, target, **kw)
+    print(f"styled {a.sheet!r}")
+    return 0
+
+
+def _trace_cmd(a, suite) -> int:
+    sub = "all" if a.subplot == "all" else int(a.subplot)
+    try:
+        if a.cmd == "trace-remove":
+            suite.remove_traces(a.sheet, a.trace, subplot=sub)
+        elif a.cmd == "trace-move":
+            suite.move_trace(a.sheet, int(a.trace) if a.trace.lstrip("-").isdigit() else a.trace,
+                             a.to, subplot=sub)
+        else:
+            style = {k: getattr(a, k) for k in ("color", "line_width", "line_style", "marker",
+                                                "marker_size", "alpha", "plot_type", "label",
+                                                "scale_factor") if getattr(a, k, None) is not None}
+            if a.hide:
+                style["enabled"] = False
+            if a.show:
+                style["enabled"] = True
+            for item in a.set:
+                key, _sep, val = item.partition("=")
+                style[key.strip()] = _value(val)
+            suite.restyle_traces(a.sheet, a.trace, subplot=sub, **style)
+    except ValueError as exc:
+        print(f"{a.cmd} failed: {exc}")
+        return 1
+    print(f"{a.cmd}: ok")
     return 0
 
 

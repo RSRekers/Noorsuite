@@ -1651,6 +1651,35 @@ class DocumentTab(QWidget):
             self.apply_source(figureopts.replace_call(src, pick, dlg.updates()))
             self.status_label.setText("  figure options updated")
 
+    def source_line_at(self, page: int, x: float, y: float):
+        """(editor line, bounding box in bp of that line's text on the page) for a point of the
+        compiled PDF (``page`` 0-based, points from the top-left), or None -- through SyncTeX."""
+        from . import synctex
+        data = synctex.parse(self.workdir / "out" / "main.synctex.gz")
+        if data is None:
+            return None
+        line = synctex.locate(data, page + 1, x, y, text_only=True)
+        if line is None:
+            return None
+        try:
+            build = (self.workdir / "main.tex").read_text(encoding="utf-8").split("\n")
+        except OSError:
+            build = []
+        target = synctex.match_line(build, self.source().split("\n"), line)
+        return target, synctex.line_rect(data, page + 1, line)
+
+    def select_source_line(self, target: int):
+        """Select editor line ``target`` (0-based) and bring it into view."""
+        block = self.editor.document().findBlockByNumber(target)
+        if not block.isValid():
+            return
+        cur = self.editor.textCursor()
+        cur.setPosition(block.position())
+        cur.movePosition(cur.MoveOperation.EndOfBlock, cur.MoveMode.KeepAnchor)
+        self.editor.setTextCursor(cur)
+        self.editor.centerCursor()
+        self.status_label.setText(f"  line {target + 1}")
+
     def jump_to_source(self, page: int, x: float, y: float):
         """Preview double-click -> the matching line in the editor (through SyncTeX)."""
         from . import synctex

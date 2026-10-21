@@ -49,7 +49,7 @@ from .ipc import (ACTION_ADD_IMAGE_TO_SHEET, ACTION_ADD_TO_SHEET, ACTION_ASSET,
                   ACTION_TABLE,
                   ACTION_DOCUMENT, ACTION_REFERENCES,
                   ACTION_APPEND_DATAFRAME, ACTION_APPEND_IMAGE,
-                  ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_ORGANIZE,
+                  ACTION_APPEND_TRACE, ACTION_CLEAR, ACTION_EDIT, ACTION_EXPORT, ACTION_ORGANIZE,
                   ACTION_REMOVE_DATA, ACTION_REMOVE_SHEET, ACTION_REMOVE_TRACE, DEFAULT_PORT,
                   IPCBridge)
 from .model import (ERR_COLUMN_ATTRS, ERROR_MODE_LABELS, ERROR_MODES, INDEX_COL, PLOT_TYPES, REL_INDEX_PREFIX, REL_MODE_LABELS, AssetModel,
@@ -1651,11 +1651,8 @@ class SciSuiteWindow(QMainWindow):
     @staticmethod
     def _set_spread(new_ref, display="band", mode="std"):
         """Error columns of a derived mean trace + how its spread is drawn."""
-        new_ref.yerr_col, new_ref.yerr_sem_col = "std", "sem"
-        new_ref.yerr_low_col, new_ref.yerr_high_col = "err_min", "err_max"
-        new_ref.yerr_mode = mode
-        new_ref.show_band = display in ("band", "both")
-        new_ref.show_errorbar = display in ("bars", "both")
+        from .edits import set_spread
+        set_spread(new_ref, display, mode)
 
     def _split_and_aggregate_trace(self, sm, ref, x, y, n, layout, plot_type, remove_original,
                                    display="band", mode="std"):
@@ -3893,6 +3890,10 @@ class SciSuiteWindow(QMainWindow):
             self._clear_all()
         elif action == ACTION_ORGANIZE:
             self._handle_organize(payload)
+        elif action == ACTION_EDIT:
+            self._handle_edit(payload)
+        elif action == ACTION_EXPORT:
+            self._handle_export(payload)
         elif action == ACTION_DOCUMENT:
             self._handle_document(payload)
         elif action == ACTION_REFERENCES:
@@ -3952,9 +3953,134 @@ class SciSuiteWindow(QMainWindow):
             if hasattr(ps, "notes_edit") and ps.notes_edit.toPlainText() != sm.notes:
                 ps.notes_edit.setPlainText(sm.notes)
         self._render_sheet(sm.sheet_id)
+        self._sync_grid_spinners()
+        self._sync_subplot_strip()
         self.sync_active_subplot_inspector()
         self._sync_subplot_trace_list()
         self._refresh_ipc_snapshot()
+
+    def _sheet_for(self, key):
+        return self.sheets.get(key) or next((s for s in self.sheets.values() if s.name == key), None)
+
+    def _say(self, text: str, ms: int = 8000):
+        self.statusBar().showMessage(text, ms)
+
+    def _handle_edit(self, payload: dict):
+        """``edit`` requests: trace styles / removal, colormaps, sheets, folders, project save / open
+        (the same model edits as the offline backend, see :mod:`NoorSuite.edits`)."""
+        from . import edits
+        try:
+            payload = edits.check_edit(payload)
+            op = payload["op"]
+            if op == "combine_traces":
+                sm = self._sheet_for(payload.get("sheet"))
+                if sm is None:
+                    raise ValueError(f"no sheet {payload.get('sheet')!r}")
+                obj, msg = edits.combine_traces(sm, payload, self.repository)
+                self.repository[obj.id] = obj
+                self._render_sheet(sm.sheet_id)
+                self._refresh_data_list()
+                self._sync_subplot_trace_list()
+                self._refresh_ipc_snapshot()
+                self._refresh_ipc_data()
+            elif op in ("trace_style", "remove_trace", "move_trace", "colormap"):
+                sm = self._sheet_for(payload.get("sheet")) if payload.get("sheet") else None
+                if sm is None and not (op == "colormap" and payload.get("do") in ("add", "remove")):
+                    raise ValueError(f"no sheet {payload.get('sheet')!r}")
+                if op == "colormap":
+                    msg = edits.edit_colormap(payload, self.colormaps, sm)
+                    self.colormap_panel.refresh()
+                else:
+                    msg = {"trace_style": edits.edit_trace_style,
+                           "remove_trace": edits.edit_remove_trace,
+                           "move_trace": edits.edit_move_trace}[op](sm, payload)
+                for s in ([sm] if sm else self.sheets.values()):
+                    self._render_sheet(s.sheet_id)
+                self._sync_subplot_trace_list()
+                self._refresh_ipc_snapshot()
+            elif op == "new_sheet":
+                sm = self.create_new_sheet(payload.get("name") or None)
+                org = {k: payload[k] for k in ("grid", "sheet_style", "folder", "tags", "notes") if payload.get(k)}
+                org["name"] = sm.name
+                self._apply_sheet_organize(sm, org)
+                msg = f"new sheet {sm.name!r}"
+            elif op == "duplicate_sheet":
+                sm = self._sheet_for(payload.get("sheet"))
+                item = self._sheet_tree_item(sm.sheet_id) if sm else None
+                if item is None:
+                    raise ValueError(f"no sheet {payload.get('sheet')!r}")
+                new = self._duplicate_tree_item(item)
+                nsm = self.sheets.get(new.data(0, ITEM_ID_ROLE))
+                if nsm is not None and payload.get("name"):
+                    nsm.name = payload["name"]
+                    new.setText(0, nsm.name)
+                msg = "sheet duplicated"
+            elif op == "folder":
+                msg = self._folder_edit(payload)
+            elif op == "save_project":
+                path = os.path.abspath(os.path.expanduser(payload["path"]))
+                self._save_now(path, force=True)
+                self.project_path = path
+                self._update_title()
+                msg = f"saved {path}"
+            elif op == "open_project":
+                path = os.path.abspath(os.path.expanduser(payload["path"]))
+                pm = ProjectModel.load(path)
+                pm.seed_cache(path, self._cache_for(path))
+                self._load_project_model(pm)
+                self.project_path = path
+                self._update_title()
+                self.start_warmup(600)
+                msg = f"opened {path}"
+            else:
+                raise ValueError(f"unhandled edit {op!r}")
+            self._say(msg, 5000)
+        except (ValueError, KeyError, IndexError, OSError) as exc:
+            self._say(f"edit failed: {exc}")
+
+    def _folder_edit(self, payload: dict) -> str:
+        path = split_folder_path(payload["path"])
+        act = payload["do"]
+        if act == "create":
+            self._folder_item(path)
+            return f"folder {payload['path']!r} ready"
+        holder = self.tree.invisibleRootItem()
+        item = None
+        for part in path:
+            item = next((holder.child(i) for i in range(holder.childCount())
+                         if holder.child(i).data(0, ITEM_TYPE_ROLE) == TYPE_FOLDER
+                         and holder.child(i).text(0) == part), None)
+            if item is None:
+                raise ValueError(f"no folder {payload['path']!r}")
+            holder = item
+        if act == "rename":
+            item.setText(0, payload["new_name"])
+            return "folder renamed"
+        parent = item.parent() or self.tree.invisibleRootItem()   # delete: contents move up
+        self.tree.blockSignals(True)
+        while item.childCount():
+            parent.addChild(item.takeChild(0))
+        parent.removeChild(item)
+        self.tree.blockSignals(False)
+        return "folder deleted (its sheets and documents moved up)"
+
+    def _handle_export(self, payload: dict):
+        """Write a sheet as PNG / PDF / SVG (``export_figure``)."""
+        try:
+            sm = self._sheet_for(payload.get("sheet"))
+            if sm is None:
+                raise ValueError(f"no sheet {payload.get('sheet')!r}")
+            from .sheet import export_sheet_file
+            colormap_mod.set_library(self.colormaps)
+            path = os.path.abspath(os.path.expanduser(payload["path"]))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".part" + os.path.splitext(path)[1]            # appears atomically
+            export_sheet_file(sm, self.repository, self.images, tmp, dpi=int(payload.get("dpi", 300)),
+                              assets=self.assets, size_cm=payload.get("size_cm"))
+            os.replace(tmp, path)
+            self._say(f"exported {path}", 5000)
+        except (ValueError, OSError, KeyError) as exc:
+            self._say(f"export failed: {exc}")
 
     def _handle_organize(self, payload: dict):
         target = payload.get("target")

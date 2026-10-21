@@ -209,6 +209,19 @@ PowerPoint export (native shapes, connectors, pictures, text boxes).
 `python -m NoorSuite insert data.csv --plot x:y1,y2 --yerr e1,e2 [--band] [--yerr-mode sem]`. Missing error columns are reported
 instead of silently dropped.
 
+**Joint legend.** For a multi-panel figure, *Figure* tab -> *Joint legend* (bottom / top / right / left) draws ONE legend with every distinct trace label
+instead of one per panel; from code `joint_legend="bottom"` (+ `joint_legend_ncol`, `joint_legend_size`, `joint_legend_frame`), on the command line
+`--joint-legend bottom` (`none` switches it off). **Combine traces from the command line**: `python -m NoorSuite api combine SHEET --trace r1,r2,r3 --display
+both --mode sem` (or `--split N --layout block|sequence` for one trace that holds repeats), `client.combine_traces(...)`.
+
+**API and CLI cover the whole GUI.** Axes and figure options on every plot call (`yscale="log"`, `legend=False`, `font_size=14`, `xlim=(1, 50)`,
+`grid=(3, 4)`, `size_cm=(30, 18)`, `all_subplots=True`), restyling what exists (`restyle_traces`, `remove_traces`, `move_trace`, `style_subplot`,
+`style_sheet`), `new_sheet`, `duplicate_sheet`, `folder`, custom colormaps, `save_project`, `export_figure` (png / pdf / svg), and the same from the
+command line: `python -m NoorSuite api style|trace-style|sheet|folder|colormap|save|export|plot ...` and the look options on `insert`
+(`--yscale log --no-legend --font-size 14 --panels 3x4 --all-panels`). A grid of panels gets a figure that grows with it, so 12 panels stay readable.
+
+**Slide text.** In the slide editor, click ordinary slide text (a title, a list item, a paragraph) to restyle it: size, bold, italic, colour, "Show in the text"; the side panel also sets the title and body size of the slide, or of all slides (*Use these sizes for all slides*). Objects are outlined when the mouse is over them and selected by a click; the panel on the right is always usable.
+
 **Images.** Image multiplots render in about a second (plain images no longer get a tick label per pixel), images keep an equal aspect by default, the colourmap box of an image also offers your own colormaps (made under *Colours / colormap*), and *Apply this image style to all images in the sheet* copies colormap, interpolation, aspect, colourbar, isolines and tick style to the other images.
 
 **Fast documents.** After the window opens, NoorSuite prepares the documents in the background (figure PDFs, thumbnails, cited Zotero records), and an unchanged document is not rebuilt in the next session.
