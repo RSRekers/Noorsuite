@@ -342,6 +342,12 @@ Rules that matter:
 - **Never edit a `.sciproj`/session file by hand or while the GUI has it open** - go through `connect()`. With a GUI running it always inserts live; an offline write to a project the GUI also has open would be overwritten by the GUI's autosave.
 - With the GUI running, mutations are fire-and-forget (no error comes back); verify with `suite.list_data()` / `list_traces()`. Offline calls validate and return `{"status": "error", ...}` on a missing data object or column.
 - Start the GUI only if the user asks to see it: `{{PYTHON}} -m NoorSuite --gui 55555` (background process; needs a display).
+  Jupyter is never required. `{{PYTHON}} -m NoorSuite PROJECT_OR_FOLDER [--document [TEMPLATE]] [--notebook]` opens (or creates) a
+  project, optionally starts it with a LaTeX document, and `--notebook` / `suite.new_notebook(project=..., name=None, open=False)` /
+  `api --project P notebook` writes a starter `.ipynb` next to the project.
+  `{{PYTHON}} -m NoorSuite shortcut` creates Desktop / Start-menu shortcuts with the app icon (Windows).
+  New project with its own directory and empty tree folders: `suite.new_project("Thesis", parent=".", folders=None | [] | ["Raw", "A/B"], open=True)`
+  or `api new-project Thesis --dir D [--folders Raw,Plots | --no-folders] [--no-open]` (a running GUI switches to it; `save_project` first).
 
 ## 3. One-shot CLI (no Python code needed)
 

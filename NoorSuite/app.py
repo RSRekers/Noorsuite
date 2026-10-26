@@ -1302,12 +1302,14 @@ class SciSuiteWindow(QMainWindow):
         toolbar.addAction(save_act)
 
         for text, slot in (
+            ("New Project", lambda: self.new_project()),
             ("Save As...", self.save_project_file),
             ("Open Project", self.load_project_file),
             (None, None),
             ("New Folder", lambda: self._add_folder_item("New Folder", self._selected_folder())),
             ("New Sheet", lambda: self.create_new_sheet()),
             ("New Document", lambda: self.create_new_document()),
+            ("New Notebook", lambda: self.new_notebook()),
             (None, None),
             ("Copy Plot", self.copy_plot_to_clipboard),
             ("Export SVG", self.export_svg),
@@ -3606,13 +3608,25 @@ class SciSuiteWindow(QMainWindow):
     def load_project_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Project", "", "NOORSUITE Project (*.sciproj)")
-        if not path:
-            return
+        if path:
+            self.open_project_path(path)
+
+    def open_project_path(self, path, create: bool = False) -> bool:
+        """Open a ``.sciproj`` (shared by the dialog, the command line and ``noorsuite PATH``). With
+        ``create`` a missing file becomes a new, empty project of that name."""
+        path = str(path)
+        if create and not os.path.exists(path):
+            self._load_project_model(ProjectModel())
+            self.project_path = path
+            if not self.sheets:
+                self.create_new_sheet("Sheet 1")
+            self._update_title()
+            return self._write_project(path)
         try:
             pm = ProjectModel.load(path)
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             QMessageBox.critical(self, "Cannot open project", str(exc))
-            return
+            return False
         self._save_caches.pop(str(path), None)
         pm.seed_cache(path, self._cache_for(path))
         self._load_project_model(pm)
@@ -3626,6 +3640,52 @@ class SciSuiteWindow(QMainWindow):
         self._update_title()
         self.statusBar().showMessage(f"Opened {self._project_name()}", 4000)
         self.start_warmup(600)
+        return True
+
+    def new_project(self, parent=None, name=None, folders=None) -> str | None:
+        """New empty project in its own directory (``<parent>/<name>/<name>.sciproj``) with empty tree
+        folders; the current project is saved first. Without arguments it asks for name and location."""
+        from . import newproject
+        if parent is None or name is None:
+            name, ok = QInputDialog.getText(self, "New Project", "Project name:")
+            if not ok or not name.strip():
+                return None
+            parent = QFileDialog.getExistingDirectory(
+                self, "Where should the project folder go?",
+                str(Path(self.project_path).parent.parent) if self.project_path else "")
+            if not parent:
+                return None
+        try:
+            path = newproject.create_project(parent, name, folders)
+        except (ValueError, OSError) as exc:
+            QMessageBox.critical(self, "Cannot create project", str(exc))
+            return None
+        if self.project_path:
+            self._write_project(self.project_path)
+        self.open_project_path(path)
+        return str(path)
+
+    def new_notebook(self, name: str | None = None) -> str | None:
+        """Write a starter Jupyter notebook next to the project (asks for a project file first when the
+        work is still unsaved) and open it when Jupyter is installed. Returns the notebook path."""
+        from . import notebook as nb
+        if not self.project_path:
+            self.save_project_file()
+            if not self.project_path:
+                return None
+        path = nb.create_notebook(self.project_path, name)
+        cmd = nb.jupyter_command(path)
+        if cmd:
+            import subprocess
+            try:
+                subprocess.Popen(cmd, cwd=str(path.parent))
+            except OSError as exc:
+                self._say(f"notebook written to {path}; could not start Jupyter: {exc}", 8000)
+                return str(path)
+            self._say(f"notebook {path.name} created and opened in Jupyter", 6000)
+        else:
+            self._say(f"notebook {path} created (install jupyterlab to open it: pip install jupyterlab)", 9000)
+        return str(path)
 
     def save_session(self):
         try:

@@ -1,13 +1,14 @@
 # NOORSUITE
 
 A scientific plotting suite for data management — organize and re-plot datasets from a
-large research project, with a Jupyter-driven exploratory workflow.
+large research project, with a standalone window and (optionally) a Jupyter-driven exploratory workflow.
 
 <img width="1309" height="1318" alt="NOORSUITE_ICON_old" src="https://github.com/user-attachments/assets/7b46cb80-27a4-401c-a0bf-1b489b085eac" />
 
 (Python package: `NoorSuite`.)
 
-- **Jupyter** is the exploratory side: read data, poke at it with pandas, and push the
+- **Jupyter is optional.** NoorSuite runs on its own; *New Notebook* (toolbar, or `noorsuite PROJECT --notebook`)
+  writes a ready-wired notebook next to the project when you want one. It is the exploratory side: read data, poke at it with pandas, and push the
   DataFrames worth keeping into the running GUI (each becomes one *data object*).
 - **The GUI** is where you pick x/y columns from a data object, place them as traces on
   sheets and subplots, style them (double-click any line, title, legend, axis, or border to
@@ -48,7 +49,28 @@ Start the GUI (also started automatically by `SciSuiteClient().launch()`):
 python -m NoorSuite --gui 55555
 ```
 
-or the `noorsuite` / `scisuite` console script after `pip install -e .`.
+or the `noorsuite` / `scisuite` console script after `pip install -e .`. No Jupyter needed:
+
+```bash
+noorsuite                                  # the last session
+noorsuite ~/thesis                         # a folder: its .sciproj, or a new thesis.sciproj in it
+noorsuite paper.sciproj --document         # start with a LaTeX article (--document beamer-clean | acs | rsc ...)
+noorsuite paper.sciproj --notebook         # also write paper.ipynb beside it (opened if Jupyter is installed)
+noorsuite --help
+```
+
+**App icon for launching (Windows):** pip's `noorsuite.exe` is a generic stub and always shows Python's icon. Run
+`noorsuite shortcut [--where desktop|start|both]` once: it writes `~/.noorsuite/noorsuite.ico` from the app icon and creates
+`NoorSuite.lnk` (Desktop and Start menu, starts `pythonw -m NoorSuite`, no console window); pin that to the taskbar.
+
+**New Project** (toolbar) asks for a name and a location, saves the current project, and creates
+`<location>/<name>/<name>.sciproj` with empty tree folders (Data, Figures, Documents, Presentations). From code
+`suite.new_project("Thesis", parent=".", folders=None)` (`folders=[]` = none, or `"A,B/C"`), on the command line
+`noorsuite api new-project Thesis --dir ~/work [--folders "Raw,Plots" | --no-folders] [--no-open]`.
+
+The notebook is optional workbench only: `connect("paper.sciproj")` inside it talks to the open window, or edits the
+file when the window is closed. From the command line: `noorsuite api --project paper.sciproj notebook [--name N] [--open]`,
+from code: `suite.new_notebook(project=None, name=None, open=False)`.
 
 In the window: the current project name shows in the toolbar; **Ctrl+S** saves to the
 current `.sciproj` file (Save As… the first time) and the project autosaves every ~2 min

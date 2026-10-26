@@ -398,6 +398,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("open", help="load a project into the running GUI")
     p.add_argument("path")
 
+    p = sub.add_parser("new-project", help="create <dir>/<name>/<name>.sciproj with empty folders (a running "
+                                           "GUI opens it)")
+    p.add_argument("name")
+    p.add_argument("--dir", default=".", help="parent directory (default: current)")
+    p.add_argument("--folders", help='comma-separated tree folders, e.g. "Data,Figures,Papers/Draft" '
+                                     "(default Data,Figures,Documents,Presentations)")
+    p.add_argument("--no-folders", action="store_true", help="start with an empty tree")
+    p.add_argument("--no-open", action="store_true", help="only create the file")
+
+    p = sub.add_parser("notebook", help="write a starter Jupyter notebook next to the project (needs "
+                                        "--project, or an offline default project)")
+    p.add_argument("--name", help="file name (default: the project's)")
+    p.add_argument("--open", action="store_true", help="start Jupyter on it (if installed)")
+
     p = sub.add_parser("export", help="write a sheet as .png / .pdf / .svg")
     p.add_argument("sheet")
     p.add_argument("path")
@@ -551,6 +565,11 @@ def run(a, suite) -> int:
     elif cmd == "save":
         suite.save_project(a.path)
         print(f"saving to {a.path}")
+    elif cmd == "new-project":
+        folders = [] if a.no_folders else a.folders
+        print(f"project: {suite.new_project(a.name, a.dir, folders, not a.no_open)}")
+    elif cmd == "notebook":
+        print(f"notebook: {suite.new_notebook(a.project, a.name, a.open)}")
     elif cmd == "open":
         suite.open_project(a.path)
         print(f"opening {a.path}")

@@ -44,6 +44,7 @@ cooperating processes talk over loopback TCP (default port 55555):
 ```bash
 pip install -e .                                   # editable (PyQt6, matplotlib, numpy, pandas)
 python -m NoorSuite --gui 55555                    # GUI (needs a display)
+python -m NoorSuite PROJECT|FOLDER [--document [TPL]] [--notebook]   # open/create a project directly, no Jupyter
 python -m NoorSuite insert data.csv --plot x:y ... # one-shot insertion (GUI optional)
 python -m NoorSuite api <command> ...              # every client action (see api --help)
 python -m NoorSuite latex build|export|engine ...  # headless documents
@@ -64,6 +65,9 @@ tectonic in conda env `noorlatex`. `noorgraph.ipynb` is the manual harness; rest
 | `model.py` | All models (`DataObject`, `ImageObject`, `TraceRef`, `ImageRef`, `ShapeRef`, `SubplotModel`, `SheetModel`, `ColorMap`, `AssetModel`, `TableModel`, `DocumentModel`, `ProjectModel`), option vocabularies, `apply_y_transform`, aggregation, styling validators (`check_subplot_style`, `check_sheet_style`), tree helpers. numpy only. |
 | `edits.py` | Qt-free edits of existing things shared by GUI / offline: trace style / remove / move / combine, colormaps, `check_edit`. |
 | `protocol.py` / `ipc.py` | Wire protocol (8-byte length + pickle, action names, `IPCClient`) / `IPCBridge` server (Qt). `ipc.py` re-exports every constant explicitly. |
+| `shortcut.py` | `noorsuite shortcut`: `.ico` from the app icon + Desktop / Start-menu `.lnk` (pip's exe stub cannot carry an icon). |
+| `newproject.py` | Qt-free `create_project(parent, name, folders)`: own directory + `.sciproj` + empty tree folders (GUI *New Project*, `client.new_project`, `api new-project`). |
+| `notebook.py` | Qt-free starter `.ipynb` next to a project (`project_for`, `create_notebook`, `jupyter_command`); Jupyter stays optional (GUI button, `--notebook`, `client.new_notebook`, `api notebook`). |
 | `client.py` / `offline.py` | `SciSuiteClient` API; `OfflineBackend` applies the *same payloads* to a `.sciproj` file when no GUI runs (`connect()` picks). |
 | `api_cli.py` / `insert_cli.py` | CLI: `api <command>` (all actions) / `insert FILE` (+ the same look options). |
 | `app.py` | `SciSuiteWindow`, panels, tabs, inspector, save / load, IPC intake, warm-up. |

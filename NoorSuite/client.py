@@ -724,6 +724,35 @@ class SciSuiteClient:
         """Load a project file into the running GUI (replaces what is open)."""
         return self._edit(op="open_project", path=str(path))
 
+    def new_project(self, name, parent=".", folders=None, open=True):
+        """Create ``<parent>/<name>/<name>.sciproj`` with empty tree folders (``folders``: list or
+        "A,B/C"; default Data / Figures / Documents / Presentations; ``[]`` = none) and return its path.
+        With a running GUI and ``open=True`` the GUI switches to it (its current project is not saved
+        for you -- ``save_project`` first). An offline client keeps working on its own file."""
+        from . import newproject
+        path = newproject.create_project(parent, name, folders)
+        if open and not isinstance(self, OfflineClient):
+            self.open_project(path)
+        return str(path)
+
+    def new_notebook(self, project=None, name=None, open=False):
+        """Write a starter Jupyter notebook next to a project (default: the offline project file; with a
+        running GUI pass its ``.sciproj`` path, a folder works too) and return its path. ``open=True``
+        starts Jupyter on it when installed. NoorSuite itself never needs Jupyter."""
+        from . import notebook as nb
+        project = project or getattr(self, "project_path", None)
+        if not project:
+            raise ValueError("pass project= (the .sciproj file or its folder) -- a running GUI keeps "
+                             "its file to itself")
+        path = nb.create_notebook(nb.project_for(project), name)
+        if open:
+            cmd = nb.jupyter_command(path)
+            if cmd is None:
+                raise ValueError(f"notebook written to {path}, but Jupyter is not installed "
+                                 "(pip install jupyterlab)")
+            subprocess.Popen(cmd, cwd=str(path.parent))
+        return str(path)
+
     def export_figure(self, sheet, path, *, dpi=300, size_cm=None, wait=60.0):
         """Write a sheet as ``.png`` / ``.pdf`` / ``.svg`` (by the file name) at its figure size
         (or ``size_cm=(w, h)``). With a live GUI the file is written by the GUI; this waits up to

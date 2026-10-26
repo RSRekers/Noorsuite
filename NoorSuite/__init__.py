@@ -1,5 +1,7 @@
 """NoorSuite / SciSuite -- organize and re-plot datasets from a research project.
 
+Standalone: ``noorsuite [PROJECT|FOLDER] [--document] [--notebook]`` (Jupyter is optional).
+
 Jupyter side (exploratory)::
 
     from NoorSuite import SciSuiteClient
@@ -13,7 +15,7 @@ from .client import OfflineClient, SciSuiteClient, connect, launch
 from .model import (ColorMap, DataObject, DocumentModel, ImageObject, ImageRef, ProjectModel,
                     SheetModel, SubplotModel, TraceRef)
 
-__version__ = "0.39.0"
+__version__ = "0.40.0"
 
 __all__ = [
     "SciSuiteClient",
